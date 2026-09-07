@@ -1,10 +1,78 @@
-# RapidLLM
+<h1 align="center">RapidLLM</h1>
 
-RapidLLM is an LLM inference framework with continuous batching, tensor and data parallelism, quantized weights, and interchangeable GPU kernels. A PyTorch CPU backend supports local development and inference without Triton.
+<p align="center">
+  <b>Registry · Attention · Pipeline · Inference · Dispatch</b>
+</p>
 
-[中文](README.zh.md) · [Documentation](docs/README.md) · [Optimization guide](docs/optimization_features.md) · [CPU support](docs/cpu.md)
+<p align="center">
+  | <a href="docs/README.md"><b>Documentation</b></a>
+  | <a href="docs/optimization_features.md"><b>Optimization Guide</b></a>
+  | <a href="docs/cpu.md"><b>CPU Support</b></a> |
+</p>
 
-## Install
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/lang-en-red.svg" alt="English"></a>
+  <a href="README.zh.md"><img src="https://img.shields.io/badge/lang-zh-yellow.svg" alt="中文"></a>
+  <img src="https://img.shields.io/badge/python-3.13%2B-blue.svg" alt="Python 3.13+">
+</p>
+
+---
+
+<pre>
+<b>Acceleration Features</b>
+        ✅ Flash Attention       ✅ CUDA Graph Optimize    ✅ Chunked Prefill          ✅ Prefix Caching
+        ✅ W8A16 (FP8/INT8)      ✅ W4A16 (AWQ/GPTQ)       ✅ SmoothQuant W8A8         ✅ FP8 KV Cache (2×)
+        ✅ NVFP4 Weight-Only     ✅ FP8 W8A8 Fused MoE     ✅ TP + CUDA Graph          ✅ DP + CUDA Graph
+        ✅ Kernel Autotune       ✅ Fused MoE              ✅ Tensor Parallel          ✅ Data Parallel
+        ✅ Comm-Compute Overlap  ✅ Tile-Signaling         ✅ DeepSeek V4 (mHC)        ✅ N-gram Speculative Decoding
+
+<b>Framework Design</b>
+        ✅ Continuous Batching   ✅ OpenAI API Server      ✅ Preemption               ✅ Ops Backend Registry
+</pre>
+
+## About
+
+RapidLLM is an LLM inference framework with continuous batching, tensor and data parallelism, quantized weights, and with pluggable Triton/CUDA kernels.
+
+### Models and execution:
+
+The model registry includes LLaMA, Qwen2, Qwen3, Qwen3-MoE, LLaVA, Qwen3-VL, and DeepSeek families. Registration does not imply that every checkpoint, quantization format, and device combination has been validated. The tests use small random checkpoints where full weights are unavailable.
+
+| Feature | Behavior |
+| --- | --- |
+| Tensor parallelism | Shards projections, attention heads, and the vocabulary across ranks |
+| Expert parallelism | Assigns whole MoE experts within the TP group and routes tokens with all-to-all |
+| Data parallelism | Routes requests between independent replicas; can combine with TP |
+| CPU parallelism | Uses Gloo; select `device="cpu"` |
+| CUDA Graph | Captures supported decode shapes; requires matching choices across TP ranks |
+| Quantization | Weight-only INT8/FP8/INT4 and GPU-specific formats; support varies by backend |
+| Communication overlap | Optional CUDA streams for uploads, TP reductions, or EP exchanges |
+| Tile-Signaling | Experimental CUDA producer/consumer kernels; not a CPU optimization |
+| Kernel Autotune | GPU configuration search and a persistent per-device cache |
+
+CPU TP/DP workers share host resources. Increasing worker count may increase memory use and reduce throughput; measure it on the target machine.
+
+### Code layout
+
+```text
+rapid_llm/
+├── engine/          # generation, scheduling, sampling, async front ends
+├── executor/        # workers, model loading, KV storage, CUDA Graph
+├── models/          # model registry, architecture code, checkpoint mapping
+├── modules/         # attention, linear layers, MoE, quantization methods
+├── kernels/
+│   ├── ops/         # GPU operator implementations and contracts
+│   ├── backend/     # CPU and external GPU backends
+│   └── dispatcher/  # selection, configuration cache, autotuning
+├── distributed/     # process groups and collective operations
+├── batch_overlap/   # CUDA stream scheduling and overlap policies
+├── entrypoints/     # HTTP protocol and server
+└── tools/           # inspection, evaluation, observability
+```
+
+## Getting Started
+
+### Install and Development
 
 Requires Python 3.13 or newer. Install from the repository root:
 
@@ -24,7 +92,19 @@ On macOS, `uv pip install --python .venv/bin/python -e .` installs without Trito
 
 Optional extras: `serve` for the HTTP server, `eval` for evaluation, `bench` for plots, `trace` for OTLP export, and `flashinfer` for that kernel backend. Dependency constraints are in [pyproject.toml](pyproject.toml).
 
-## Generate text
+Development Command:
+
+```bash
+uv pip install --python .venv/bin/python -e . --group dev
+.venv/bin/python -m pytest tests/cpu -q
+make test-cpu PYTHON=.venv/bin/python
+make lint
+```
+
+CPU integration tests generate their own small checkpoints. GPU tests require CUDA, and checkpoint-based tests report missing weights. Use the interpreter from the installed environment when running tests.
+
+
+### Generate text
 
 Use a local Hugging Face checkpoint containing `config.json`, tokenizer files, and safetensors weights. Legacy PyTorch `.bin` weights are also accepted. No offline conversion is needed.
 
@@ -45,7 +125,7 @@ print(outputs[0].outputs[0].text)
 
 The Python sampling limit is `max_gen_len`; HTTP requests use `max_tokens`. CUDA Graph requests on CPU fall back to eager execution. CPU memory, precision, and feature limits are described in [CPU support](docs/cpu.md).
 
-## Continuous batching and serving
+### Continuous batching and serving
 
 Requests can enter and leave between decoding steps. The scheduler supports chunked prefill, prefix reuse, and opt-in recompute preemption.
 
@@ -72,25 +152,7 @@ uv pip install --python .venv/bin/python -e '.[serve]'
 
 The server provides `/v1/completions`, `/v1/chat/completions`, SSE streaming, `/health`, and `/metrics`. See [serving](docs/online_serving.md) for request fields and deployment limits.
 
-## Models and execution
-
-The model registry includes LLaMA, Qwen2, Qwen3, Qwen3-MoE, LLaVA, Qwen3-VL, and DeepSeek families. Registration does not imply that every checkpoint, quantization format, and device combination has been validated. The tests use small random checkpoints where full weights are unavailable.
-
-| Feature | Behavior |
-| --- | --- |
-| Tensor parallelism | Shards projections, attention heads, and the vocabulary across ranks |
-| Expert parallelism | Assigns whole MoE experts within the TP group and routes tokens with all-to-all |
-| Data parallelism | Routes requests between independent replicas; can combine with TP |
-| CPU parallelism | Uses Gloo; select `device="cpu"` |
-| CUDA Graph | Captures supported decode shapes; requires matching choices across TP ranks |
-| Quantization | Weight-only INT8/FP8/INT4 and GPU-specific formats; support varies by backend |
-| Communication overlap | Optional CUDA streams for uploads, TP reductions, or EP exchanges |
-| Tile-Signaling | Experimental CUDA producer/consumer kernels; not a CPU optimization |
-| Kernel Autotune | GPU configuration search and a persistent per-device cache |
-
-CPU TP/DP workers share host resources. Increasing worker count may increase memory use and reduce throughput; measure it on the target machine.
-
-## Performance and correctness
+## Benchmark and Performance
 
 GPU benchmark results are workload-specific. Hardware, batch shape, prompt length, output length, precision, and enabled features must match before comparing results. Enabling more optimization switches does not necessarily improve performance.
 
@@ -100,35 +162,6 @@ GPU benchmark results are workload-specific. Hardware, batch shape, prompt lengt
 - [Overlap experiments](docs/release-v0.11.5.md) and [later kernel changes](docs/release-v0.12.0.md)
 
 Release notes and benchmark logs describe the revision and environment measured at the time. They are not the current API reference or a guarantee of speedup on another device.
-
-## Code layout
-
-```text
-rapid_llm/
-├── engine/          # generation, scheduling, sampling, async front ends
-├── executor/        # workers, model loading, KV storage, CUDA Graph
-├── models/          # model registry, architecture code, checkpoint mapping
-├── modules/         # attention, linear layers, MoE, quantization methods
-├── kernels/
-│   ├── ops/         # GPU operator implementations and contracts
-│   ├── backend/     # CPU and external GPU backends
-│   └── dispatcher/  # selection, configuration cache, autotuning
-├── distributed/     # process groups and collective operations
-├── batch_overlap/   # CUDA stream scheduling and overlap policies
-├── entrypoints/     # HTTP protocol and server
-└── tools/           # inspection, evaluation, observability
-```
-
-## Development
-
-```bash
-uv pip install --python .venv/bin/python -e . --group dev
-.venv/bin/python -m pytest tests/cpu -q
-make test-cpu PYTHON=.venv/bin/python
-make lint
-```
-
-CPU integration tests generate their own small checkpoints. GPU tests require CUDA, and checkpoint-based tests report missing weights. Use the interpreter from the installed environment when running tests.
 
 ## Acknowledgements
 
