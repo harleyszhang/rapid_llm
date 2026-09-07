@@ -2,7 +2,7 @@
 
 RapidLLM 是一个大模型推理框架，提供连续批处理、张量并行、数据并行、权重量化及可替换的 GPU 算子。CPU 后端使用 PyTorch，无需安装 Triton 即可进行开发和推理。
 
-[English](README.md) · [文档目录](docs/README.md) · [CPU 支持](docs/cpu.md)
+[English](README.md) · [文档目录](docs/README.md) · [优化特性与实测](docs/optimization_features.md) · [CPU 支持](docs/cpu.md)
 
 ## 安装
 
@@ -94,6 +94,7 @@ CPU 的 TP/DP 进程共享主机资源。增加进程可能增加内存占用、
 
 比较性能时，需要固定硬件、batch、输入与输出长度、精度和功能开关。多开优化开关不一定更快。
 
+- [优化原理、可视化与实测结果](docs/optimization_features.md)
 - [模型性能](docs/benchmark_models.md)与[精度评测](docs/eval_models.md)
 - [量化设计](docs/quantization.md)与[量化实测矩阵](docs/benchmark_logs/quant_matrix_20260901.md)
 - [重叠实验记录](docs/release-v0.11.5.md)与[后续算子变更](docs/release-v0.12.0.md)

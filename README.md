@@ -2,7 +2,7 @@
 
 RapidLLM is an LLM inference framework with continuous batching, tensor and data parallelism, quantized weights, and interchangeable GPU kernels. A PyTorch CPU backend supports local development and inference without Triton.
 
-[中文](README.zh.md) · [Documentation](docs/README.md) · [CPU support](docs/cpu.md)
+[中文](README.zh.md) · [Documentation](docs/README.md) · [Optimization guide](docs/optimization_features.md) · [CPU support](docs/cpu.md)
 
 ## Install
 
@@ -94,6 +94,7 @@ CPU TP/DP workers share host resources. Increasing worker count may increase mem
 
 GPU benchmark results are workload-specific. Hardware, batch shape, prompt length, output length, precision, and enabled features must match before comparing results. Enabling more optimization switches does not necessarily improve performance.
 
+- [Optimization explanations, diagrams, and measured results](docs/optimization_features.md)
 - [Model benchmarks](docs/benchmark_models.md) and [evaluation](docs/eval_models.md)
 - [Quantization](docs/quantization.md) and [recorded quantization matrix](docs/benchmark_logs/quant_matrix_20260901.md)
 - [Overlap experiments](docs/release-v0.11.5.md) and [later kernel changes](docs/release-v0.12.0.md)
