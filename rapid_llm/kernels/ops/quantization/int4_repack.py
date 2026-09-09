@@ -1,17 +1,16 @@
 """One-time int4 weight preprocessing: int32 words to byte pairs.
 
 The fused MoE kernel's int4 mode consumes two nibbles per ``uint8`` byte along
-K (vLLM's layout): a byte tile then loads with each byte repeated in its two
-nibble rows — a 2x repeat L1 absorbs — and the in-loop unpack is one
-shift-and-mask per element, with no 3-D expand and no ``tl.reshape``.
-Checkpoints (and ``quantize_int4_groupwise``) ship eight nibbles per int32
-word instead, so stacked expert weights cross this bridge once at load, the
-same role ``awq_marlin_repack`` plays in vLLM.
+K (vLLM's layout): a byte tile loads with each byte repeated in its two nibble
+rows (a 2x repeat L1 absorbs) and the in-loop unpack is one shift-and-mask per
+element, no 3-D expand, no ``tl.reshape``. Checkpoints (and
+``quantize_int4_groupwise``) ship eight nibbles per int32 word, so stacked
+expert weights cross this bridge once at load — ``awq_marlin_repack``'s role
+in vLLM.
 
-Staying on the word format is not an option: measured on an H100 at the
-Qwen3-30B-A3B geometry, t4096, the replicated int32 tile is ~10x slower
-(18109 us against 1916) — 64 KB per pipeline stage where the byte tile needs
-16 KB, and every word fetched 8x instead of 2x. The failure is the format,
+Staying on the word format measured ~10x slower on an H100 (Qwen3-30B-A3B,
+t4096: 18109 us against 1916) — 64 KB per pipeline stage where the byte tile
+needs 16 KB, every word fetched 8x instead of 2x. The failure is the format,
 not the idiom.
 
 Usage:

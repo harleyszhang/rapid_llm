@@ -8,17 +8,16 @@ trimmed checkpoint) is the parity reference. Each submodule documents its own
 deviations from that reference; they are all deliberate.
 
 Layout:
-    rope.py             interleaved partial RoPE, main / compress tables
-    norm.py             weighted and unweighted RMSNorm
-    hyper_connection.py mHC residual (Sinkhorn mixing + hc_head)
-    cache.py            sliding K==V per-layer cache, bypassing the paged store
-    compressor.py       HCA / CSA compressors and the Lightning Indexer
-    grouped_linear.py   block-diagonal ``o_a_proj``
-    attention.py        the attention that composes all of the above
+    rope.py              interleaved partial RoPE, main / compress tables
+    norm.py              weighted and unweighted RMSNorm
+    hyper_connection.py  mHC residual (Sinkhorn mixing + hc_head)
+    cache.py             sliding K==V per-layer cache, bypassing the paged store
+    compressor.py        HCA / CSA compressors and the Lightning Indexer
+    grouped_linear.py    block-diagonal ``o_a_proj``
+    attention.py         the attention that composes all of the above
 
-Like :mod:`rapid_llm.modules`, names resolve lazily so importing one piece
-does not pull in the rest (``rope`` in particular stays free of the Triton
-kernels that ``norm`` imports).
+Names resolve lazily (like :mod:`rapid_llm.modules`); ``rope`` stays free of
+the Triton kernels ``norm`` imports.
 
 Usage:
     attn = DeepseekV4Attention(config, layer_index)

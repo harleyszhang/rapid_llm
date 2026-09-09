@@ -1,0 +1,155 @@
+gpu: 2 x NVIDIA H100 80GB HBM3 (85.0GB, budget 78.2GB/GPU)
+collapsed 2 escaped-name duplicate model directories
+
+=== preflight (2 x 85GB GPU) ===
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+status                                       model       type             quant    size                                                      note
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+run                     Qwen/Qwen2.5-0.5B-Instruct      qwen2                 -   1.0GB          arms: rapid_llm, transformers, vllm; kv 12KB/tok
+run               Qwen/Qwen3-30B-A3B-Instruct-2507  qwen3_moe                 -  61.1GB          arms: rapid_llm, transformers, vllm; kv 96KB/tok
+skip                          Qwen/Qwen3.6-35B-A3Bqwen3_5_moe                 -  71.9GB   ModelRegistry does not support model_type 'qwen3_5_moe'
+skip                    Qwen/Qwen3___6-35B-A3B-FP8qwen3_5_moe               fp8  37.5GB   ModelRegistry does not support model_type 'qwen3_5_moe'
+run                   Qwen3/Qwen3-4B-Thinking-2507      qwen3                 -   8.0GB         arms: rapid_llm, transformers, vllm; kv 144KB/tok
+skip                             Qwen3/Qwen3.6-27B    qwen3_5                 -  55.6GB       ModelRegistry does not support model_type 'qwen3_5'
+skip                   Qwen3-30B-A3B-Instruct-2507  qwen3_moe                 -   8.0GB                                 incomplete shard download
+run                Qwen3-30B-A3B-Instruct-2507-FP8  qwen3_moe               fp8  31.2GB                        arms: rapid_llm, vllm; kv 96KB/tok
+skip                               Qwen3.8-27B-FP8    qwen3_5               fp8  30.9GB       ModelRegistry does not support model_type 'qwen3_5'
+skip              Wan2.2-T2V-A14B/high_noise_model        t2v                 -  57.2GB           ModelRegistry does not support model_type 't2v'
+skip               Wan2.2-T2V-A14B/low_noise_model        t2v                 -  57.2GB           ModelRegistry does not support model_type 't2v'
+skip                 deepseek-ai/DeepSeek-V4-Flashdeepseek_v4               fp8 159.6GB                  weights 160GB exceed the 2 x 78GB budget
+skip            deepseek-ai/DeepSeek-V4-Flash-0731deepseek_v4               fp8 166.9GB                  weights 167GB exceed the 2 x 78GB budget
+skip                   deepseek-ai/DeepSeek-V4-Prodeepseek_v4               fp8 864.7GB                  weights 865GB exceed the 2 x 78GB budget
+skip                         deepseek-ai/inference          ?                 -   0.0GB             ModelRegistry does not support model_type '?'
+skip  okwinds/Qwen3-30B-A3B-Instruct-2507-Int4-W4A16  qwen3_moecompressed-tensors  16.7GBno rapid_llm loader for checkpoint quantization 'compressed-tensors'
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+=== plan (batch 8, iters 2, greedy, random-ids) ===
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+model                                       scenario  input output    msl tp                              arms
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Qwen/Qwen2.5-0.5B-Instruct                     short    128     32   4096  1       rapid_llm,transformers,vllm
+Qwen/Qwen2.5-0.5B-Instruct                    medium   4096    128   8192  1       rapid_llm,transformers,vllm
+Qwen/Qwen2.5-0.5B-Instruct                      long  31744    256  32768  1       rapid_llm,transformers,vllm
+Qwen/Qwen3-30B-A3B-Instruct-2507               short    128     32   4096  1       rapid_llm,transformers,vllm
+Qwen/Qwen3-30B-A3B-Instruct-2507              medium   4096    128   8192  1       rapid_llm,transformers,vllm
+Qwen/Qwen3-30B-A3B-Instruct-2507                long  32768    256  33792  2       rapid_llm,transformers,vllm
+Qwen3/Qwen3-4B-Thinking-2507                   short    128     32   4096  1       rapid_llm,transformers,vllm
+Qwen3/Qwen3-4B-Thinking-2507                  medium   4096    128   8192  1       rapid_llm,transformers,vllm
+Qwen3/Qwen3-4B-Thinking-2507                    long  32768    256  33792  1       rapid_llm,transformers,vllm
+Qwen3-30B-A3B-Instruct-2507-FP8                short    128     32   4096  1                    rapid_llm,vllm
+Qwen3-30B-A3B-Instruct-2507-FP8               medium   4096    128   8192  1                    rapid_llm,vllm
+Qwen3-30B-A3B-Instruct-2507-FP8                 long  32768    256  33792  1                    rapid_llm,vllm
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+=== extension points ===
+DP2 scaling (medium, 64 prompts, TP1 vs TP2 vs DP2): Qwen/Qwen2.5-0.5B-Instruct, Qwen3/Qwen3-4B-Thinking-2507, Qwen3-30B-A3B-Instruct-2507-FP8
+TP2+EP2 A/B (long): Qwen/Qwen3-30B-A3B-Instruct-2507
+
+==============================================================================
+Qwen/Qwen2.5-0.5B-Instruct
+==============================================================================
+
+--- short ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_short_rapid_llm.json
+  [rapid_llm] done in 14s: tps=2622.9870624720156
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine transformers --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_short_transformers.json
+  [transformers] done in 10s: tps=168.70938097636113
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine vllm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_short_vllm.json
+  [vllm] done in 43s: tps=3783.102737427632
+-> docs/benchmark_logs/bench_Qwen_Qwen2.5-0.5B-Instruct_short_b8_20260908_113044.json
+
+--- medium ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_medium_rapid_llm.json
+  [rapid_llm] done in 17s: tps=452.9440283337366
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine transformers --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_medium_transformers.json
+  [transformers] done in 18s: tps=153.98028160486612
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine vllm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_medium_vllm.json
+  [vllm] done in 46s: tps=?
+-> docs/benchmark_logs/bench_Qwen_Qwen2.5-0.5B-Instruct_medium_b8_20260908_113044.json
+
+--- long ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 31744 --random-output-len 256 --max-seq-len 32768 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_long_rapid_llm.json
+  [rapid_llm] done in 27s: tps=281.9345621288237
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine transformers --dataset-name random-ids --random-input-len 31744 --random-output-len 256 --max-seq-len 32768 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_long_transformers.json
+  [transformers] done in 35s: tps=141.2144363408194
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine vllm --dataset-name random-ids --random-input-len 31744 --random-output-len 256 --max-seq-len 32768 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_long_vllm.json
+  [vllm] done in 62s: tps=1818.4887839518665
+-> docs/benchmark_logs/bench_Qwen_Qwen2.5-0.5B-Instruct_long_b8_20260908_113044.json
+
+--- DP2 scaling point ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 64 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_scaling_tp1.json
+  [rapid_llm] done in 28s: tps=1302.2555141148096
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 64 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_scaling_tp2.json --tensor-parallel-size 2
+  [rapid_llm] FAILED (15s): nv/bin/python() [0x1b45048]
+frame #41: /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python() [0x1b44e46]
+frame #42: <unknown function> + 0x2a1ca (0x7ff27acb11ca in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #43: __libc_start_main + 0x8b (0x7ff27acb128b in /usr/lib/x86_64-linux-gnu/libc.so.6)
+frame #44: _start + 0x29 (0x1be1f6f in /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python)
+
+
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 64 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen2.5-0.5B-Instruct_scaling_dp2.json --data-parallel-size 2 --max-num-seqs 32
+  [rapid_llm] done in 26s: tps=2578.6773620815643
+
+==============================================================================
+Qwen/Qwen3-30B-A3B-Instruct-2507
+==============================================================================
+
+--- short ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_short_rapid_llm.json
+  [rapid_llm] done in 35s: tps=226.13418236879068
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine transformers --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_short_transformers.json --tensor-parallel-size 2
+  [transformers] done in 6s: tps=?
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine vllm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_short_vllm.json
+  [vllm] done in 112s: tps=838.4826639704868
+-> docs/benchmark_logs/bench_Qwen_Qwen3-30B-A3B-Instruct-2507_short_b8_20260908_113044.json
+
+--- medium ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_medium_rapid_llm.json
+  [rapid_llm] done in 45s: tps=103.69731647928552
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine transformers --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_medium_transformers.json --tensor-parallel-size 2
+  [transformers] done in 8s: tps=?
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine vllm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_medium_vllm.json
+  [vllm] done in 111s: tps=819.7789452403342
+-> docs/benchmark_logs/bench_Qwen_Qwen3-30B-A3B-Instruct-2507_medium_b8_20260908_113044.json
+
+--- long ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_long_rapid_llm.json --tensor-parallel-size 2
+  [rapid_llm] done in 112s: tps=54.11189858067429
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine transformers --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_long_transformers.json --tensor-parallel-size 2
+  [transformers] done in 10s: tps=?
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine vllm --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_long_vllm.json --tensor-parallel-size 2
+  [vllm] done in 32s: tps=?
+-> docs/benchmark_logs/bench_Qwen_Qwen3-30B-A3B-Instruct-2507_long_b8_20260908_113044.json
+
+--- TP2+EP2 point ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen3-30B-A3B-Instruct-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen_Qwen3-30B-A3B-Instruct-2507_ep2.json --tensor-parallel-size 2 --engine-arg enable_expert_parallel=true
+  [rapid_llm] done in 130s: tps=32.998918363378735
+
+==============================================================================
+Qwen3/Qwen3-4B-Thinking-2507
+==============================================================================
+
+--- short ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_short_rapid_llm.json
+  [rapid_llm] done in 18s: tps=1277.956615422919
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine transformers --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_short_transformers.json
+  [transformers] done in 13s: tps=114.50619608167494
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine vllm --dataset-name random-ids --random-input-len 128 --random-output-len 32 --max-seq-len 4096 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_short_vllm.json
+  [vllm] done in 83s: tps=?
+-> docs/benchmark_logs/bench_Qwen3_Qwen3-4B-Thinking-2507_short_b8_20260908_113044.json
+
+--- medium ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_medium_rapid_llm.json
+  [rapid_llm] done in 24s: tps=221.96113966094796
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine transformers --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_medium_transformers.json
+  [transformers] done in 23s: tps=119.83785853689558
+  [vllm] /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine vllm --dataset-name random-ids --random-input-len 4096 --random-output-len 128 --max-seq-len 8192 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_medium_vllm.json
+  [vllm] done in 71s: tps=?
+-> docs/benchmark_logs/bench_Qwen3_Qwen3-4B-Thinking-2507_medium_b8_20260908_113044.json
+
+--- long ---
+  [rapid_llm] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine rapid_llm --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_long_rapid_llm.json
+  [rapid_llm] done in 60s: tps=69.8075900104627
+  [transformers] /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/.venv/bin/python /mnt/otto-temp/zhanghonggao.zhg/rapid_llm/benchmarks/bench_offline_throughput.py --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --engine transformers --dataset-name random-ids --random-input-len 32768 --random-output-len 256 --max-seq-len 33792 --num-prompts 8 --iters 2 --greedy --gpu-mem-util 0.92 --json-out docs/benchmark_logs/_arms/Qwen3_Qwen3-4B-Thinking-2507_long_transformers.json

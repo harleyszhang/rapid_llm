@@ -1,4 +1,15 @@
-"""PyTorch implementations of inference operators on CPU."""
+"""CPU kernels: plain-PyTorch implementations of every op the dispatcher targets.
+
+Two roles in one file. At inference this is the CPU backend — the ``cpu/*``
+spec rows in :mod:`rapid_llm.kernels.backend.cpu_specs` point here, and the
+functions keep their CUDA counterparts' signatures so dispatch can swap them
+in. In tests it is the golden baseline: the eager PyTorch reference the GPU
+kernels' outputs are pinned against (``tests/cpu``), so clarity outranks speed
+throughout — per-request loops, eager dequant, no Triton.
+
+Usage:
+    from rapid_llm.kernels.backend.cpu import fused_moe, skip_rmsnorm
+"""
 
 import torch
 import torch.nn.functional as F
@@ -25,11 +36,6 @@ def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
     from ...distributed.parallel_state import tensor_model_parallel_all_reduce
 
     return skip_rmsnorm(tensor_model_parallel_all_reduce(partial), residual, weight, eps)
-
-
-def sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
-    """CPU uses the equivalent full reduction without CUDA partitioning."""
-    return fused_allreduce_rmsnorm(partial, residual, weight, eps)
 
 
 def qk_rmsnorm(q, k, q_weight, k_weight, eps=1e-5):

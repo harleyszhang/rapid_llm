@@ -1,6 +1,6 @@
 """Generate the O8 adaptive split-kv decode-attention GIF for README / release.
 
-Renders the *measured* A/B sweep from ``docs/benchmark_logs/splitkv_o8_*.json`` —
+Renders the *measured* A/B sweep from ``docs/benchmark_logs/kernels/splitkv_o8_*.json`` —
 no synthetic numbers. The story it tells is occupancy, not arithmetic:
 
     stage-1 grid = (batch, num_heads, num_partitions), one warp per program.
@@ -17,14 +17,13 @@ diverging speedup sweep around the 1.0x no-regression line.
 
 Usage:
     python scripts/gen_splitkv_gif.py
-    python scripts/gen_splitkv_gif.py --json docs/benchmark_logs/splitkv_o8_<stamp>.json
+    python scripts/gen_splitkv_gif.py --json docs/benchmark_logs/kernels/splitkv_o8_<stamp>.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -83,7 +82,7 @@ def _title_bar(draw, fonts, subtitle):
 
 def _draw_grid(draw, x, y, filled, colour, fonts):
     """Fill ``filled`` of the WAVE cells row-major; annotate spillover waves."""
-    _, bold, small, _, _ = fonts
+    _, _, small, _, _ = fonts
     draw.rectangle([x, y, x + GRID_W, y + GRID_H], fill=CELL_BG)
     shown = min(filled, WAVE)
     for i in range(shown):
@@ -107,7 +106,7 @@ def _draw_grid(draw, x, y, filled, colour, fonts):
 
 def _shape_frame(row, phase, fonts, geo):
     """phase 0: only the fixed grid lit. phase 1: adaptive lit + speedup badge."""
-    body, bold, small, big, mid = fonts
+    _, bold, small, big, mid = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
     _title_bar(
@@ -185,7 +184,7 @@ def _shape_frame(row, phase, fonts, geo):
 
 
 def _sweep_frame(rows, upto, fonts, geo):
-    body, bold, small, big, mid = fonts
+    body, bold, small, _, mid = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
     _title_bar(draw, fonts, "lite-llama  —  O8 split-kv speedup sweep  (adaptive vs fixed-128, A10)")
@@ -238,7 +237,7 @@ def _sweep_frame(rows, upto, fonts, geo):
 
 
 def _intro_frame(fonts, geo):
-    body, bold, small, big, mid = fonts
+    body, bold, small, _, _ = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
     _title_bar(draw, fonts, "lite-llama  —  O8 adaptive split-kv decode attention")
@@ -279,7 +278,7 @@ def main() -> int:
     if args.json:
         path = Path(args.json)
     else:
-        cands = sorted((REPO_ROOT / "docs" / "benchmark_logs").glob("splitkv_o8_*.json"))
+        cands = sorted((REPO_ROOT / "docs" / "benchmark_logs" / "kernels").glob("splitkv_o8_*.json"))
         if not cands:
             print("ERROR: no splitkv_o8_*.json found; run benchmarks/kernels/bench_splitkv.py first.")
             return 1

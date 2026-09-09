@@ -1,0 +1,100 @@
+{
+  "config": {
+    "model": "Qwen3/Qwen3-4B-Thinking-2507",
+    "model_type": "qwen3",
+    "quant": null,
+    "weight_gb": 8.0,
+    "scenario": "short",
+    "effective": {
+      "input_len": 128,
+      "max_seq_len": 4096
+    },
+    "tp_by_arm": {
+      "rapid_llm": 1,
+      "transformers": 1,
+      "vllm": 1
+    },
+    "batch": 8,
+    "iters": 2,
+    "timestamp": "2026-09-08T13:13:13",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "rapid_llm": {
+      "ttft_ms": 52.344175055623055,
+      "tpot_ms": 4.786325430858039,
+      "total_s": 0.20086624287068844,
+      "steps": 32,
+      "batch": 8,
+      "gen_tokens": 256,
+      "tpot_p50_ms": 4.786617723443816,
+      "ttft_p50_ms": 52.344175055623055,
+      "ttft_p99_ms": 52.344175055623055,
+      "tpot_p99_ms": 4.7889977861796655,
+      "tps": 1274.4799541295,
+      "input_tokens": 1024,
+      "engine_args": {
+        "use_cuda_graph": true,
+        "enable_prefix_cache": true,
+        "max_seq_len": 4096
+      },
+      "steady_state_output_tps": 1671.4286525226746,
+      "steady_state_window_s": 0.14825586788356304,
+      "footprint": {
+        "model_mem_gb": 7.492430686950684,
+        "kv_cache_tokens": 432768,
+        "graph_installed": true,
+        "graph_replays": 71
+      },
+      "wall_s": 17.0
+    },
+    "transformers": {
+      "ttft_ms": 969.9627514928579,
+      "tpot_ms": 28.475377588502823,
+      "total_s": 1.8526994567364454,
+      "steps": 32,
+      "batch": 8,
+      "gen_tokens": 256,
+      "tpot_p50_ms": 0.0,
+      "ttft_p50_ms": 0.0,
+      "ttft_p99_ms": 0.0,
+      "tpot_p99_ms": 0.0,
+      "tps": 138.17675558179704,
+      "input_tokens": 1024,
+      "dtype": "torch.bfloat16",
+      "basis": "batch-level (no per-request timing)",
+      "wall_s": 11.6
+    },
+    "vllm": {
+      "ttft_ms": 80.62623627483845,
+      "tpot_ms": 2.9677483703820937,
+      "total_s": 0.17262643575668335,
+      "steps": 32,
+      "batch": 8,
+      "gen_tokens": 256,
+      "tpot_p50_ms": 4.037138795660388,
+      "ttft_p50_ms": 24.604082107543945,
+      "ttft_p99_ms": 40.1060028001666,
+      "tpot_p99_ms": 4.038162673072469,
+      "tps": 1482.9710112351015,
+      "input_tokens": 1024,
+      "ignore_eos": true,
+      "wall_s": 45.0
+    }
+  }
+}

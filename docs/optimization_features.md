@@ -141,13 +141,13 @@ The CPU/Gloo suite verifies two-rank routing, full MoE forward parity, stacked c
 
 DeepSeek-V2-Lite runs end-to-end (`rapid-llm serve --model-dir my_weight/DeepSeek-V2-Lite --tensor-parallel-size 2`): every token caches one 576-element latent row (512 lora + 64 rope) instead of per-head K and V, through the same `(dim,)` KV row every other model uses. Under TP the latent is **replicated, not sharded** — it is single-KV-head, so splitting it would leave no rank able to compute attention alone; the consequence is that a per-rank pool IS the whole-model pool, and the benchmark reports it under that convention.
 
-On 2× A10 (batch=8, gen=128, eager decode): TTFT 64.8 ms, TPOT 63.01 ms; KV density **33.6k tokens/GiB** of pool memory vs 9.3k for Qwen3-1.7B's GQA on the same card — the 3.6× is the config-parsed 30.4 vs 112.0 KiB/token showing up in a real pool. `python benchmarks/bench_mla.py` reports the complete table: two models that are not the same size, labeled as such, with the latency columns run on one identical workload.
+On 2× A10 (batch=8, gen=128, eager decode): TTFT 64.8 ms, TPOT 63.01 ms; KV density **33.6k tokens/GiB** of pool memory vs 9.3k for Qwen3-1.7B's GQA on the same card — the 3.6× is the config-parsed 30.4 vs 112.0 KiB/token showing up in a real pool. `python benchmarks/models/bench_mla.py` reports the complete table: two models that are not the same size, labeled as such, with the latency columns run on one identical workload.
 
 Accuracy is checked by a regression gate: `pytest tests/golden/test_deepseek_v2_tp2.py` compares greedy tokens and per-step logprobs against `transformers` on 2× A10, with drift budgets calibrated from a parity probe — the BOS investigation showed a single-layer max-abs threshold can flag a 1-ULP arithmetic tie as a hotspot, so the budget is what the noise floor actually measured, not a round number.
 
 ## DeepSeek-V4 (v0.11.5)
 
-V4 has no public weights, so the end-to-end path is verified against a randomly-initialised trimmed checkpoint built from its `config.json`: mHC residual (Sinkhorn mixing), the Compressor + Lightning Indexer pair, SWA/CSA hybrid attention over a 512-dim latent KV, O-LoRA grouped projections and Hash MoE. Eight module-level tests plus a TP2 consistency test carry the numerics; `python benchmarks/bench_deepseek_v4.py` measures the speed side against `transformers`.
+V4 has no public weights, so the end-to-end path is verified against a randomly-initialised trimmed checkpoint built from its `config.json`: mHC residual (Sinkhorn mixing), the Compressor + Lightning Indexer pair, SWA/CSA hybrid attention over a 512-dim latent KV, O-LoRA grouped projections and Hash MoE. Eight module-level tests plus a TP2 consistency test carry the numerics; `python benchmarks/models/bench_deepseek_v4.py` measures the speed side against `transformers`.
 
 ![DeepSeek-V4 trimmed vs transformers](images/deepseek_v4_speed.png)
 
@@ -296,11 +296,11 @@ How to run Benchmarks:
 
 ```bash
 # Single model
-python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B \
+python benchmarks/engine/run.py quant --model-dir /data/shared/llm_weights/Qwen3-0.6B \
     --schemes fp16 int8 fp8 --json docs/benchmark_logs/bench_quant_Qwen3-0.6B.json
 
 # All representative models (Qwen3-0.6B, 0.6B-FP8, VL-4B, 30B-MoE)
-python benchmarks/bench_quant.py --all
+python benchmarks/engine/run.py quant --all
 ```
 
 Quantization Benchmark Result (A10, Qwen3-0.6B, batch=4, seq_len=25, gen_len=64, greedy):
@@ -359,7 +359,7 @@ Each replica can also replay a captured decode graph. A replica is tp=1, so no c
 
 ![DP x CUDA graph](images/dp_cuda_graph.png)
 
-Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/bench_data_parallel.py --mode graph --model my_weight/Qwen3-0.6B` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
+Qwen3-0.6B, batch 16 per replica, 128 steps: TPOT 25.9 → 5.2 ms per replica (**-80%**) and 618 → 6162 tok/s aggregate (**5.1×**) at DP2, with the +2.4 s capture cost and the per-GPU memory delta recorded in the log. `python benchmarks/parallelism/bench_data_parallel.py --mode graph --model my_weight/Qwen3-0.6B` reproduces it; `tests/engine/test_dp_cuda_graph.py` asserts both replicas hold captured graphs and agree greedily.
 
 ## MoE Dequant-Fused Grouped GEMM (v0.12)
 
@@ -436,7 +436,7 @@ curl localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
   "max_tokens": 8, "logprobs": 5, "prompt_logprobs": 5}'
 ```
 
-Cost, measured with `python benchmarks/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`benchmark_logs/observability_v0.10.json`](benchmark_logs/observability_v0.10.json).
+Cost, measured with `python benchmarks/serving/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`benchmark_logs/observability_v0.10.json`](benchmark_logs/observability_v0.10.json).
 
 ### Metrics and Tracing
 
@@ -500,4 +500,4 @@ Two switches, independently composable: `reasoning_parser` routes `<think>…</t
 - **`finish_reason` is its own frame.** The parser's flush (a tool call cut mid-JSON, a held partial tag) must reach the client before it stops reading, so the terminal frame is an empty delta carrying only the reason — the OpenAI shape.
 - **Truncation remains distinguishable.** A call truncated by `max_tokens` reports the fragments it did get, but `finish_reason` stays `"length"` rather than claiming `"tool_calls"`.
 
-Cost, measured with `python benchmarks/bench_parser.py`: reasoning + tool parsing adds ~1.17 µs/token — 0.002–0.005% of decode TPOT, below run-to-run noise.
+Cost, measured with `python benchmarks/serving/bench_parser.py`: reasoning + tool parsing adds ~1.17 µs/token — 0.002–0.005% of decode TPOT, below run-to-run noise.

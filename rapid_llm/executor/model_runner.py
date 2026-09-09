@@ -471,6 +471,18 @@ class ModelRunner:
         """Whether at least one decode CUDA graph is installed."""
         return self._graph_manager is not None
 
+    def release_cuda_graph(self) -> None:
+        """Drop every captured graph so a process-group teardown cannot block.
+
+        The follower teardown calls this before destroying the TP group: a
+        captured region can hold NCCL kernels registered with the communicator,
+        and ``destroy_process_group`` would wait on them forever. Eager engines
+        (no manager) pass through untouched.
+        """
+        if self._graph_manager is not None:
+            self._graph_manager.discard()
+            self._graph_manager = None
+
     def _run_tbo(
         self,
         input_ids: torch.Tensor,

@@ -137,6 +137,13 @@ ignore = [
 # `import apex` is an availability check, and unused locals document the tuning
 # knobs a reader may want to switch on.
 "benchmarks/kernels/*" = ["E402", "E731", "F401", "F403", "F405", "F841", "RUF001"]
+# GIF/parity scripts import rapid_llm after injecting the repo root into sys.path.
+"scripts/*" = ["E402"]
+# Unified benchmark entrypoints use the same sys.path-injection import pattern.
+"benchmarks/*/run.py" = ["E402"]
+# Chinese progress output uses proper fullwidth punctuation (same rationale as
+# the teaching-material exemption above).
+"benchmarks/suites/*" = ["RUF001"]
 
 [tool.ruff.format]
 docstring-code-format = true

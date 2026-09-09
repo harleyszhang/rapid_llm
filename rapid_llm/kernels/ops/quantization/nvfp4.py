@@ -1,16 +1,15 @@
 """NVFP4 GEMM: e2m1 weights with 16-element e4m3 block scales, 16-bit activations.
 
-NVFP4 (NVIDIA ModelOpt / TensorRT-LLM) is a *two-level* format, and that is the
+NVFP4 (NVIDIA ModelOpt / TensorRT-LLM) is a *two-level* format, which is the
 whole reason it beats plain int4 on accuracy at the same bit width:
 
-* each weight element is fp4-e2m1 — 1 sign bit, 2 exponent bits, 1 mantissa bit,
-  so the representable magnitudes are ``{0, .5, 1, 1.5, 2, 3, 4, 6}``, packed two
-  to a byte;
-* every **16** consecutive k elements share one fp8-e4m3 block scale, stored as a
-  ``uint8`` bit pattern. A 16-wide block is 8x finer than AWQ's usual 128, which
-  is what lets 4 bits of near-mantissa-free weight stay usable;
-* the whole tensor shares one fp32 global scale, whose only job is to bring the
-  block scales themselves into e4m3's range.
+* each element is fp4-e2m1 — representable magnitudes ``{0, .5, 1, 1.5, 2, 3,
+  4, 6}``, two to a byte;
+* every **16** consecutive k elements share one fp8-e4m3 block scale (a
+  ``uint8`` bit pattern) — 8x finer than AWQ's usual 128, which is what lets
+  4 bits of near-mantissa-free weight stay usable;
+* one fp32 global scale for the whole tensor, whose only job is to bring the
+  block scales into e4m3's range.
 
 Reconstruction is ``w = e2m1(nibble) * e4m3(block_scale) * global_scale``.
 

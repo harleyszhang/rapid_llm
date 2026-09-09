@@ -270,6 +270,41 @@ class TestChunkedPrefill:
         out = sched.schedule()
         assert out.prefill_chunk_lens == [100]
 
+    def test_chunked_prefill_is_on_by_default(self):
+        """vLLM's default, and ours: a fresh config chunks."""
+        config = SchedulerConfig(max_seq_len=_MAX_SEQ_LEN)
+        assert config.enable_chunked_prefill
+        assert config.max_chunk_size > 0
+
+    def test_disabling_the_flag_prefills_in_one_pass(self):
+        """``enable_chunked_prefill=False`` ignores ``max_chunk_size``."""
+        sched = Scheduler(
+            SchedulerConfig(
+                max_seq_len=_MAX_SEQ_LEN,
+                max_num_seqs=4,
+                max_num_batched_tokens=1 << 20,
+                enable_chunked_prefill=False,
+                max_chunk_size=32,
+            ),
+            num_slots=4,
+        )
+        sched.add_request(make_request("long", prompt_len=100))
+        assert sched.schedule().prefill_chunk_lens == [100]
+
+    def test_max_chunk_size_zero_folds_into_the_flag(self):
+        """The older spelling of "off" leaves one field to read."""
+        config = SchedulerConfig(max_seq_len=_MAX_SEQ_LEN, max_chunk_size=0)
+        assert not config.enable_chunked_prefill
+
+    def test_disabling_needs_a_budget_that_holds_the_longest_prompt(self):
+        """Without chunking a whole prompt must fit one pass, as vLLM checks."""
+        with pytest.raises(ValueError, match="chunked prefill disabled"):
+            SchedulerConfig(
+                max_seq_len=4096,
+                max_num_batched_tokens=512,
+                enable_chunked_prefill=False,
+            )
+
 
 # --------------------------------------------------------------------------- #
 # 4. Decode scheduling

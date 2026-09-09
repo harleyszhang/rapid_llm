@@ -1,0 +1,1216 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "mode": "offline (all prompts submitted at once, no serving queue)",
+    "arms": {
+      "tp2_graph": {
+        "tp": 2,
+        "ep": false,
+        "graph": true
+      },
+      "ep2_graph": {
+        "tp": 2,
+        "ep": true,
+        "graph": true
+      }
+    },
+    "scenarios": [
+      {
+        "label": "bs1-short",
+        "batch": 1,
+        "prompt_kind": "short",
+        "prompt_tokens": {
+          "min": 24,
+          "mean": 24,
+          "max": 24
+        },
+        "gen_len": 128,
+        "build": "wide",
+        "engine": {
+          "max_seq_len": 4096,
+          "max_num_seqs": 64,
+          "kv_tokens": 40960
+        }
+      },
+      {
+        "label": "bs16-short",
+        "batch": 16,
+        "prompt_kind": "short",
+        "prompt_tokens": {
+          "min": 11,
+          "mean": 14.8,
+          "max": 24
+        },
+        "gen_len": 128,
+        "build": "wide",
+        "engine": {
+          "max_seq_len": 4096,
+          "max_num_seqs": 64,
+          "kv_tokens": 40960
+        }
+      },
+      {
+        "label": "bs64-short",
+        "batch": 64,
+        "prompt_kind": "short",
+        "prompt_tokens": {
+          "min": 11,
+          "mean": 14.8,
+          "max": 24
+        },
+        "gen_len": 128,
+        "build": "wide",
+        "engine": {
+          "max_seq_len": 4096,
+          "max_num_seqs": 64,
+          "kv_tokens": 40960
+        }
+      },
+      {
+        "label": "bs16-2k",
+        "batch": 16,
+        "prompt_kind": 2048,
+        "prompt_tokens": {
+          "min": 2048,
+          "mean": 2048,
+          "max": 2048
+        },
+        "gen_len": 128,
+        "build": "wide",
+        "engine": {
+          "max_seq_len": 4096,
+          "max_num_seqs": 64,
+          "kv_tokens": 40960
+        }
+      },
+      {
+        "label": "bs4-32k",
+        "batch": 4,
+        "prompt_kind": 32768,
+        "prompt_tokens": {
+          "min": 32768,
+          "mean": 32768,
+          "max": 32768
+        },
+        "gen_len": 128,
+        "build": "long",
+        "engine": {
+          "max_seq_len": 33280,
+          "max_num_seqs": 8,
+          "kv_tokens": 139264
+        }
+      }
+    ],
+    "parity_gen_len": 24,
+    "tie_gap_nats": 0.5,
+    "min_agreement": 0.6666666666666666,
+    "metric_basis": "per-request: TTFT from each request's first-token time (mean and max), TPOT from (finish - first_token)/(tokens-1) \u2014 long prompts prefill in 512-token chunks, so step-interval metrics would misreport TTFT",
+    "traffic_view": "driver rank, measured run only; graph replays bypass the accounting, so graph arms' bytes are eager passes only",
+    "timestamp": "2026-09-09T05:58:23",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": [
+    {
+      "arm": "tp2_graph",
+      "tp": 2,
+      "ep": false,
+      "graph": true,
+      "build": "wide",
+      "weights_gib": 29.06,
+      "kv_tokens": 40960,
+      "executor": "MultiprocExecutor",
+      "followers": 1,
+      "scenarios": [
+        {
+          "scenario": "bs1-short",
+          "metrics": {
+            "ttft_ms": 86.31,
+            "ttft_ms_max": 86.31,
+            "tpot_ms": 9.31,
+            "total_s": 1.269,
+            "gen_tokens": 128,
+            "tps": 100.9
+          },
+          "traffic": {
+            "all_reduce": {
+              "calls": 97,
+              "nbytes": 9535488
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 56888
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 1024
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 1024
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 256
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 17.63
+        },
+        {
+          "scenario": "bs16-short",
+          "parity": [
+            {
+              "text": " Paris. The capital of the United States is Washington, D.C. The capital of the United Kingdom is London. The",
+              "tokens": [
+                12095,
+                13,
+                576,
+                6722,
+                315,
+                279,
+                3639,
+                4180,
+                374,
+                6515,
+                11,
+                422,
+                727,
+                13,
+                576,
+                6722,
+                315,
+                279,
+                3639,
+                15072,
+                374,
+                7148,
+                13,
+                576
+              ],
+              "gaps": [
+                3.125,
+                0.625,
+                0.25,
+                1.125,
+                2.625,
+                0.25,
+                3.625,
+                2.125,
+                4.0,
+                7.375,
+                1.0,
+                3.375,
+                4.0,
+                3.375,
+                1.0,
+                6.625,
+                7.25,
+                0.0,
+                2.875,
+                7.125,
+                7.75,
+                8.125,
+                3.0,
+                1.5
+              ]
+            },
+            {
+              "text": " two. One plus two equals three. One plus three equals four. One plus four equals five. One plus five equals",
+              "tokens": [
+                1378,
+                13,
+                3776,
+                5519,
+                1378,
+                16819,
+                2326,
+                13,
+                3776,
+                5519,
+                2326,
+                16819,
+                3040,
+                13,
+                3776,
+                5519,
+                3040,
+                16819,
+                4236,
+                13,
+                3776,
+                5519,
+                4236,
+                16819
+              ],
+              "gaps": [
+                2.375,
+                0.5,
+                0.375,
+                1.125,
+                0.375,
+                4.125,
+                6.25,
+                4.375,
+                2.25,
+                5.0,
+                4.75,
+                6.875,
+                7.125,
+                4.75,
+                2.25,
+                5.875,
+                5.5,
+                8.625,
+                6.75,
+                4.125,
+                1.5,
+                5.375,
+                5.875,
+                7.375
+              ]
+            },
+            {
+              "text": " 212 \u00b0F or 100 \u00b0C and ice melts at 32 \u00b0F or ",
+              "tokens": [
+                220,
+                17,
+                16,
+                17,
+                36286,
+                37,
+                476,
+                220,
+                16,
+                15,
+                15,
+                36286,
+                34,
+                323,
+                9853,
+                98091,
+                518,
+                220,
+                18,
+                17,
+                36286,
+                37,
+                476,
+                220
+              ],
+              "gaps": [
+                3.5,
+                0.25,
+                10.625,
+                13.25,
+                1.0,
+                8.25,
+                5.375,
+                4.875,
+                10.0,
+                14.75,
+                15.6875,
+                7.375,
+                13.375,
+                4.125,
+                4.5,
+                8.625,
+                11.375,
+                6.125,
+                14.75,
+                15.375,
+                6.875,
+                14.25,
+                12.25,
+                9.375
+              ]
+            },
+            {
+              "text": " Jupiter, which has a mass of approximately $1.9 \\times 10^{27}$ kg. The",
+              "tokens": [
+                49689,
+                11,
+                892,
+                702,
+                264,
+                3072,
+                315,
+                13187,
+                400,
+                16,
+                13,
+                24,
+                1124,
+                15136,
+                220,
+                16,
+                15,
+                47822,
+                17,
+                22,
+                31716,
+                20972,
+                13,
+                576
+              ],
+              "gaps": [
+                1.5,
+                0.0,
+                0.125,
+                0.75,
+                4.625,
+                0.75,
+                2.625,
+                0.5,
+                0.875,
+                4.25,
+                7.375,
+                0.25,
+                2.0,
+                6.875,
+                13.375,
+                16.75,
+                15.4375,
+                8.625,
+                9.0,
+                9.0,
+                3.25,
+                1.375,
+                1.625,
+                0.75
+              ]
+            },
+            {
+              "text": " has gained immense popularity due to its simplicity, readability, and powerful features. One of the key aspects that make Python so",
+              "tokens": [
+                702,
+                18163,
+                37783,
+                22538,
+                4152,
+                311,
+                1181,
+                38975,
+                11,
+                91494,
+                11,
+                323,
+                7988,
+                4419,
+                13,
+                3776,
+                315,
+                279,
+                1376,
+                13566,
+                429,
+                1281,
+                13027,
+                773
+              ],
+              "gaps": [
+                0.0,
+                1.25,
+                1.75,
+                10.125,
+                1.25,
+                14.25,
+                10.5,
+                0.875,
+                3.25,
+                7.0,
+                14.1875,
+                15.5625,
+                0.5,
+                0.75,
+                4.75,
+                0.875,
+                3.25,
+                4.0,
+                0.5,
+                1.5,
+                0.625,
+                1.375,
+                8.0,
+                0.5
+              ]
+            },
+            {
+              "text": " a subset of artificial intelligence (AI) that focuses on building systems that can learn from data without being explicitly programmed. It",
+              "tokens": [
+                264,
+                25993,
+                315,
+                20443,
+                11229,
+                320,
+                15469,
+                8,
+                429,
+                23497,
+                389,
+                4752,
+                5942,
+                429,
+                646,
+                3960,
+                504,
+                821,
+                2041,
+                1660,
+                20975,
+                55068,
+                13,
+                1084
+              ],
+              "gaps": [
+                2.5,
+                1.0,
+                9.25,
+                4.5,
+                9.0,
+                0.25,
+                8.875,
+                5.375,
+                5.25,
+                1.125,
+                12.3125,
+                0.5,
+                7.125,
+                0.5,
+                9.25,
+                7.875,
+                6.5,
+                0.875,
+                0.125,
+                9.25,
+                12.375,
+                12.625,
+                2.375,
+                0.125
+              ]
+            }
+          ],
+          "metrics": {
+            "ttft_ms": 70.06,
+            "ttft_ms_max": 70.06,
+            "tpot_ms": 14.61,
+            "total_s": 1.929,
+            "gen_tokens": 2048,
+            "tps": 1061.4
+          },
+          "traffic": {
+            "all_reduce": {
+              "calls": 97,
+              "nbytes": 152567808
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 88670
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 4096
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 17.65
+        },
+        {
+          "scenario": "bs64-short",
+          "metrics": {
+            "ttft_ms": 138.54,
+            "ttft_ms_max": 138.54,
+            "tpot_ms": 17.76,
+            "total_s": 2.395,
+            "gen_tokens": 8192,
+            "tps": 3420.2
+          },
+          "traffic": {
+            "all_reduce": {
+              "calls": 97,
+              "nbytes": 610271232
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 187534
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 65536
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 65536
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 16384
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 17.73
+        },
+        {
+          "scenario": "bs16-2k",
+          "metrics": {
+            "ttft_ms": 1077.79,
+            "ttft_ms_max": 1077.79,
+            "tpot_ms": 16.92,
+            "total_s": 3.219,
+            "gen_tokens": 1927,
+            "tps": 598.7
+          },
+          "traffic": {
+            "all_reduce": {
+              "calls": 388,
+              "nbytes": 13019119616
+            },
+            "broadcast_object": {
+              "calls": 131,
+              "nbytes": 205532
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 15424
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 15424
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 3856
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 18.18
+        }
+      ]
+    },
+    {
+      "arm": "tp2_graph",
+      "tp": 2,
+      "ep": false,
+      "graph": true,
+      "build": "long",
+      "weights_gib": 29.06,
+      "kv_tokens": 139264,
+      "executor": "MultiprocExecutor",
+      "followers": 1,
+      "scenarios": [
+        {
+          "scenario": "bs4-32k",
+          "metrics": {
+            "ttft_ms": 11730.35,
+            "ttft_ms_max": 11730.35,
+            "tpot_ms": 99.17,
+            "total_s": 24.331,
+            "gen_tokens": 512,
+            "tps": 21.0
+          },
+          "traffic": {
+            "all_reduce": {
+              "calls": 18527,
+              "nbytes": 52278312960
+            },
+            "broadcast_object": {
+              "calls": 191,
+              "nbytes": 538854
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 4096
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 4096
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 1024
+            }
+          },
+          "graph_replays": 0,
+          "peak_mem_gib": 22.31
+        }
+      ]
+    },
+    {
+      "arm": "ep2_graph",
+      "tp": 2,
+      "ep": true,
+      "graph": true,
+      "build": "wide",
+      "weights_gib": 29.06,
+      "kv_tokens": 40960,
+      "executor": "MultiprocExecutor",
+      "followers": 1,
+      "scenarios": [
+        {
+          "scenario": "bs1-short",
+          "metrics": {
+            "ttft_ms": 144.54,
+            "ttft_ms_max": 144.54,
+            "tpot_ms": 12.25,
+            "total_s": 1.7,
+            "gen_tokens": 128,
+            "tps": 75.3
+          },
+          "traffic": {
+            "all_to_all": {
+              "calls": 144,
+              "nbytes": 151142400
+            },
+            "all_reduce": {
+              "calls": 49,
+              "nbytes": 4816896
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 56897
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 1024
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 1024
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 256
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 16.56
+        },
+        {
+          "scenario": "bs16-short",
+          "parity": [
+            {
+              "text": " Paris. The capital of the United States is Washington, D.C. The capital of the United Kingdom is London. The",
+              "tokens": [
+                12095,
+                13,
+                576,
+                6722,
+                315,
+                279,
+                3639,
+                4180,
+                374,
+                6515,
+                11,
+                422,
+                727,
+                13,
+                576,
+                6722,
+                315,
+                279,
+                3639,
+                15072,
+                374,
+                7148,
+                13,
+                576
+              ],
+              "gaps": [
+                3.0,
+                0.5,
+                0.25,
+                1.375,
+                2.75,
+                0.375,
+                3.625,
+                2.125,
+                3.875,
+                7.25,
+                0.875,
+                3.5,
+                4.0,
+                3.375,
+                1.125,
+                6.875,
+                7.875,
+                0.0,
+                3.125,
+                6.875,
+                7.5,
+                8.125,
+                3.125,
+                1.75
+              ]
+            },
+            {
+              "text": " two. One plus two equals three. One plus three equals four. One plus four equals five. One plus five equals",
+              "tokens": [
+                1378,
+                13,
+                3776,
+                5519,
+                1378,
+                16819,
+                2326,
+                13,
+                3776,
+                5519,
+                2326,
+                16819,
+                3040,
+                13,
+                3776,
+                5519,
+                3040,
+                16819,
+                4236,
+                13,
+                3776,
+                5519,
+                4236,
+                16819
+              ],
+              "gaps": [
+                2.5,
+                0.375,
+                0.375,
+                1.125,
+                0.25,
+                4.125,
+                5.5,
+                4.375,
+                2.25,
+                5.25,
+                4.625,
+                6.875,
+                7.0,
+                4.625,
+                2.25,
+                5.75,
+                5.375,
+                8.5,
+                6.5,
+                4.125,
+                1.5,
+                5.25,
+                5.875,
+                7.0
+              ]
+            },
+            {
+              "text": " 212 \u00b0F or 100 \u00b0C and ice melts at 32 \u00b0F or ",
+              "tokens": [
+                220,
+                17,
+                16,
+                17,
+                36286,
+                37,
+                476,
+                220,
+                16,
+                15,
+                15,
+                36286,
+                34,
+                323,
+                9853,
+                98091,
+                518,
+                220,
+                18,
+                17,
+                36286,
+                37,
+                476,
+                220
+              ],
+              "gaps": [
+                3.625,
+                0.25,
+                10.25,
+                13.625,
+                1.0,
+                8.125,
+                5.25,
+                5.0,
+                9.875,
+                14.5,
+                15.9375,
+                7.5,
+                13.0,
+                4.125,
+                4.625,
+                9.0,
+                11.375,
+                5.75,
+                14.875,
+                15.5,
+                6.75,
+                14.875,
+                12.375,
+                8.875
+              ]
+            },
+            {
+              "text": " Jupiter, with a diameter of about 142,984 kilometers. If a spaceship travels at a constant",
+              "tokens": [
+                49689,
+                11,
+                448,
+                264,
+                23033,
+                315,
+                911,
+                220,
+                16,
+                19,
+                17,
+                11,
+                24,
+                23,
+                19,
+                40568,
+                13,
+                1416,
+                264,
+                84842,
+                34192,
+                518,
+                264,
+                6783
+              ],
+              "gaps": [
+                1.75,
+                0.0,
+                0.0,
+                3.625,
+                0.625,
+                5.25,
+                0.125,
+                2.25,
+                0.625,
+                1.25,
+                0.0,
+                8.0,
+                1.5,
+                4.625,
+                4.125,
+                0.125,
+                2.75,
+                0.625,
+                0.0,
+                0.25,
+                1.5,
+                0.125,
+                4.125,
+                0.75
+              ]
+            },
+            {
+              "text": " has gained immense popularity due to its simplicity, readability, and powerful features. One of the key aspects that make Python so",
+              "tokens": [
+                702,
+                18163,
+                37783,
+                22538,
+                4152,
+                311,
+                1181,
+                38975,
+                11,
+                91494,
+                11,
+                323,
+                7988,
+                4419,
+                13,
+                3776,
+                315,
+                279,
+                1376,
+                13566,
+                429,
+                1281,
+                13027,
+                773
+              ],
+              "gaps": [
+                0.0,
+                1.25,
+                1.875,
+                10.0,
+                1.25,
+                14.0625,
+                10.5,
+                0.875,
+                3.125,
+                7.25,
+                14.125,
+                15.4375,
+                0.375,
+                0.5,
+                4.875,
+                0.875,
+                3.375,
+                4.0,
+                0.625,
+                1.5,
+                0.5,
+                1.375,
+                8.0,
+                0.5
+              ]
+            },
+            {
+              "text": " a subset of artificial intelligence (AI) that focuses on building systems that can learn from data without being explicitly programmed. It",
+              "tokens": [
+                264,
+                25993,
+                315,
+                20443,
+                11229,
+                320,
+                15469,
+                8,
+                429,
+                23497,
+                389,
+                4752,
+                5942,
+                429,
+                646,
+                3960,
+                504,
+                821,
+                2041,
+                1660,
+                20975,
+                55068,
+                13,
+                1084
+              ],
+              "gaps": [
+                2.625,
+                1.0,
+                9.375,
+                4.5,
+                9.0,
+                0.375,
+                8.875,
+                5.5,
+                5.25,
+                1.0,
+                12.4375,
+                0.625,
+                7.0,
+                0.375,
+                9.375,
+                7.875,
+                6.5,
+                1.0,
+                0.25,
+                9.25,
+                12.375,
+                12.75,
+                2.375,
+                0.125
+              ]
+            }
+          ],
+          "metrics": {
+            "ttft_ms": 113.99,
+            "ttft_ms_max": 113.99,
+            "tpot_ms": 17.17,
+            "total_s": 2.295,
+            "gen_tokens": 2048,
+            "tps": 892.4
+          },
+          "traffic": {
+            "all_to_all": {
+              "calls": 144,
+              "nbytes": 2418278400
+            },
+            "all_reduce": {
+              "calls": 49,
+              "nbytes": 77070336
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 88633
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 4096
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 16.74
+        },
+        {
+          "scenario": "bs64-short",
+          "metrics": {
+            "ttft_ms": 185.96,
+            "ttft_ms_max": 185.96,
+            "tpot_ms": 25.91,
+            "total_s": 3.478,
+            "gen_tokens": 8192,
+            "tps": 2355.3
+          },
+          "traffic": {
+            "all_to_all": {
+              "calls": 144,
+              "nbytes": 9673113600
+            },
+            "all_reduce": {
+              "calls": 49,
+              "nbytes": 308281344
+            },
+            "broadcast_object": {
+              "calls": 128,
+              "nbytes": 187294
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 65536
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 65536
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 16384
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 17.11
+        },
+        {
+          "scenario": "bs16-2k",
+          "metrics": {
+            "ttft_ms": 2477.68,
+            "ttft_ms_max": 2477.68,
+            "tpot_ms": 18.04,
+            "total_s": 4.77,
+            "gen_tokens": 2048,
+            "tps": 429.3
+          },
+          "traffic": {
+            "all_to_all": {
+              "calls": 576,
+              "nbytes": 206359756800
+            },
+            "all_reduce": {
+              "calls": 196,
+              "nbytes": 6576668672
+            },
+            "broadcast_object": {
+              "calls": 131,
+              "nbytes": 207296
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 16384
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 4096
+            }
+          },
+          "graph_replays": 127,
+          "peak_mem_gib": 19.11
+        }
+      ]
+    },
+    {
+      "arm": "ep2_graph",
+      "tp": 2,
+      "ep": true,
+      "graph": true,
+      "build": "long",
+      "weights_gib": 29.06,
+      "kv_tokens": 139264,
+      "executor": "MultiprocExecutor",
+      "followers": 1,
+      "scenarios": [
+        {
+          "scenario": "bs4-32k",
+          "metrics": {
+            "ttft_ms": 16582.22,
+            "ttft_ms_max": 16582.22,
+            "tpot_ms": 118.86,
+            "total_s": 31.679,
+            "gen_tokens": 512,
+            "tps": 16.2
+          },
+          "traffic": {
+            "all_to_all": {
+              "calls": 27504,
+              "nbytes": 828638208000
+            },
+            "all_reduce": {
+              "calls": 9359,
+              "nbytes": 26408632320
+            },
+            "broadcast_object": {
+              "calls": 191,
+              "nbytes": 538599
+            },
+            "tensor_model_parallel_all_gather": {
+              "calls": 128,
+              "nbytes": 4096
+            },
+            "broadcast": {
+              "calls": 128,
+              "nbytes": 4096
+            },
+            "tensor_model_parallel_all_reduce_max": {
+              "calls": 128,
+              "nbytes": 1024
+            }
+          },
+          "graph_replays": 0,
+          "peak_mem_gib": 21.7
+        }
+      ]
+    }
+  ]
+}

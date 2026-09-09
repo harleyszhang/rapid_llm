@@ -163,6 +163,18 @@ class CUDAGraphRunner:
             # Warm up on real work (see above).
             self.atten_info.b_seq_len.fill_(min(self.seq_len_bucket, 32))
 
+        # Distinct token per row instead of the all-zero buffer: identical tokens
+        # embed identically and route every slot to the same experts, which under
+        # EP piles ~all the load on one rank -- a degenerate imbalance that a
+        # capacity-bounded MoE dispatch would reject during this eager warmup even
+        # though real (varied) traffic never looks like that. arange stays well
+        # inside the vocab (batch << vocab) and only feeds the embedding lookup;
+        # replay overwrites input_ids with the live batch, so the values here do
+        # not affect the recorded graph's correctness.
+        self.input_ids.copy_(
+            torch.arange(self.batch_size, device=self.device, dtype=self.input_ids.dtype).unsqueeze(1)
+        )
+
         # The capture stream must be idle, so warmup runs on its own stream, fenced
         # both ways. Those passes force Triton JIT, cuBLAS workspaces and allocator
         # blocks to happen *before* the capture, which cannot allocate — and under

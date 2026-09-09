@@ -20,7 +20,7 @@ Switch under test: ``RAPID_LLM_AUTOTUNE`` = ``1`` (store) | ``0`` (heuristic).
 
 Usage:
     python benchmarks/kernels/bench_moe_autotune.py \
-        --json docs/benchmark_logs/moe_autotune_<stamp>.json
+        --json docs/benchmark_logs/kernels/moe_autotune_<stamp>.json
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def main() -> int:
     )
 
     if args.json:
-        from benchmarks.lib import write_json_log
+        from rapid_llm.benchmark import write_json_log
 
         write_json_log(
             args.json,

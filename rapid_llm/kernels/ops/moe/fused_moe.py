@@ -1,19 +1,17 @@
 """Fused MoE: top-k routed experts as a Triton grouped GEMM.
 
 Pipeline: moe_align_block_size -> GEMM1 (gate_up) -> silu_and_mul -> GEMM2
-(down, router weight folded in) -> moe_sum. Supports fp16, fp8, int8, int4 and
-mxfp4 packed expert weights with group-wise scales.
-
-The activation may be fp16 or bf16 and every quantised weight tile is widened to
-whichever it is: ``tl.dot`` needs both operands in one type, so the compute dtype
-is the activation's to choose, not the weight format's. The exceptions are
-:func:`fused_moe_w8a8_fp8` and :func:`fused_moe_w8a8_int8`, where the activation
-is quantised as well and both operands stay 8-bit through the dot. Whether an
-fp8 dot *lands* on the fp8 tensor cores is Triton's call, not ours: it emits
-``wgmma`` only from ``BLOCK_M >= 64``, and widens both e4m3 operands to an fp16
-``mma.sync`` below that. Either way the inner loop skips the bit-trick
-dequantisation the weight-only modes pay, which is where the modes' speed
-actually comes from -- see ``_FP8_A8_PROMOTE_EVERY``.
+(down, router weight folded in) -> moe_sum. fp16, fp8, int8, int4 and mxfp4
+packed expert weights with group-wise scales. The activation may be fp16 or
+bf16 and every quantised weight tile widens to whichever it is — ``tl.dot``
+needs both operands in one type, so the compute dtype is the activation's to
+choose. The exceptions are :func:`fused_moe_w8a8_fp8` and
+:func:`fused_moe_w8a8_int8`, where the activation is quantised too and both
+operands stay 8-bit through the dot. Whether an fp8 dot lands on the fp8
+tensor cores is Triton's call: ``wgmma`` only from ``BLOCK_M >= 64``, fp16
+``mma.sync`` below — either way the inner loop skips the bit-trick
+dequantisation the weight-only modes pay, which is where their speed comes
+from (see ``_FP8_A8_PROMOTE_EVERY``).
 
 Usage:
     out = fused_moe(hidden_states, w1, w2, topk_weights, topk_ids)
@@ -21,8 +19,6 @@ Usage:
                     group_n=128, group_k=128)
     out = fused_moe_w8a8_fp8(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
                              group_n=1, group_k=hidden)
-    out = fused_moe_w8a8_int8(x, qw1, qw2, tw, ids, w1_scale=s1, w2_scale=s2,
-                              group_n=1, group_k=hidden)
 """
 
 from __future__ import annotations
@@ -147,6 +143,7 @@ def _moe_align_count_kernel(
     topk_ids_ptr,
     counts_ptr,
     num_slots,
+    NUM_EXPERTS: tl.constexpr,
     BLOCK_S: tl.constexpr,
 ):
     """Histogram of expert ids: ``counts[e] = #{slots routed to e}``.
@@ -156,12 +153,22 @@ def _moe_align_count_kernel(
     also keeps the count on the device, unlike ``bincount``, whose host read of
     the max element both stalls the launch queue and makes the layer
     uncapturable as a CUDA graph.
+
+    A slot whose id is outside ``[0, NUM_EXPERTS)`` routes to no local expert
+    and is dropped from the histogram. That is what lets a caller hand this
+    kernel a buffer with holes -- the EP dispatcher marks its all-to-all
+    padding rows with ``-1`` so the grouped GEMM never runs them, the same
+    ``off_experts == -1`` contract sglang's expert map uses. The scatter kernel
+    only ever claims ids in ``[0, NUM_EXPERTS)``, so guarding the count here is
+    all it takes for the two halves to agree; without it the sentinel would
+    write ``counts`` out of bounds.
     """
     pid = tl.program_id(0)
     offs = pid * BLOCK_S + tl.arange(0, BLOCK_S)
     mask = offs < num_slots
-    experts = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
-    tl.atomic_add(counts_ptr + experts, 1, mask=mask)
+    experts = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    in_range = mask & (experts >= 0) & (experts < NUM_EXPERTS)
+    tl.atomic_add(counts_ptr + experts, 1, mask=in_range)
 
 
 @triton.jit
@@ -292,7 +299,7 @@ def moe_align_block_size(
     if not fused_count:
         counts = torch.zeros(num_experts, dtype=torch.int32, device=device)
         _moe_align_count_kernel[(triton.cdiv(num_slots, block_s),)](
-            flat_experts, counts, num_slots, BLOCK_S=block_s, num_warps=4
+            flat_experts, counts, num_slots, NUM_EXPERTS=num_experts, BLOCK_S=block_s, num_warps=4
         )
     _moe_align_scatter_kernel[(num_experts,)](
         flat_experts,

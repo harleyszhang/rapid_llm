@@ -1,22 +1,20 @@
 """L4 tile-signaling: a producer/consumer pair of persistent Triton kernels.
 
-The primitive lets a dependent kernel start consuming a GEMM's output tiles
-before the GEMM itself finishes: the producer publishes each output tile with
-a release-semantics flag write, and the consumer acquires that flag (a bounded
-spin) before reading the tile. One intra-kernel pipeline is then
-``x @ W_gate, x @ W_up -> silu(gate) * up`` — the MLP epilogue streams over
-tiles that the GEMM is still producing, on two CUDA streams of the same GPU.
+Lets a dependent kernel start consuming a GEMM's output tiles before the GEMM
+finishes: the producer publishes each tile with a release-semantics flag
+write, the consumer acquires the flag (a bounded spin) before reading. One
+intra-kernel pipeline: ``x @ W_gate, x @ W_up -> silu(gate) * up`` — the MLP
+epilogue streams over tiles the GEMM is still producing, on two CUDA streams
+of the same GPU. Eager runs use a monotonic epoch, so stale flags never look
+ready; CUDA Graph capture records one flag clear because replay cannot advance
+a Python epoch.
 
-Eager runs use a monotonic epoch, so stale flags never look ready. CUDA Graph
-capture records one flag clear because replay cannot advance a Python epoch.
-
-Deadlock freedom is a sizing property, not a hope: both kernels are
-persistent (fixed grid, work pulled through an atomic counter), and the
-launch splits the device's SM budget so producer blocks + consumer blocks
-always fit resident at once. The producer depends on nothing, so it always
-drains the work queue; the consumer's spin is bounded (``MAX_SPIN``) and a
-tile it gives up on is counted in a device counter the host can read — a
-dropped tile is a loud failure, never silently-wrong data.
+Deadlock freedom is a sizing property, not a hope: both kernels are persistent
+(fixed grid, work pulled through an atomic counter) and the launch splits the
+SM budget so producer + consumer blocks always fit resident at once. The
+producer depends on nothing, so it always drains; the consumer's spin is
+bounded (``MAX_SPIN``) and a dropped tile is counted in a device counter the
+host reads — a loud failure, never silently-wrong data.
 
 Usage:
     from rapid_llm.kernels.tile_signal import TileSignalBuffer, pipelined_gemm_swiglu

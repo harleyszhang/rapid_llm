@@ -1,39 +1,26 @@
 """FlashInfer attention wrappers: both phases behind the native signatures.
 
-Prefill and decode share one lazily allocated workspace and keep one wrapper
-per phase (cleared via ``_reset_cache``); the functions mirror the native
-kernels' signatures so dispatch can swap them in.
-
-Decode is NOT CUDA-graph compatible as written: the page indices are assembled
-with Python-side slicing over the live lengths and the wrapper is planned on
-every call, so a capture would bake the capture-time lengths into the graph
-and replay would attend stale rows forever. The spec row is therefore marked
-``graph_safe=False``, and the runner refuses to capture while it is chosen
+Both phases share one lazily allocated workspace, one wrapper each (cleared via
+``_reset_cache``); the functions mirror the native kernels' signatures so
+dispatch can swap them in. Decode is NOT CUDA-graph compatible as written —
+page indices come from Python-side slicing over live lengths and the wrapper is
+planned on every call, so a capture would bake capture-time lengths in and
+replay would attend stale rows forever — hence ``graph_safe=False``, and the
+runner refuses capture while it is chosen
 (:func:`~rapid_llm.kernels.dispatcher.unsafe_for_graph`).
 
-The vLLM-shaped route to compatibility (``vllm/v1/attention/backends/
-flashinfer.py``) has three parts, two of which now exist here:
-
-1. build ``kv_indices``/``kv_indptr`` with fixed-shape GPU ops driven by the
-   persistent length/table buffers (:func:`paged_kv_indices_gpu`), never
-   Python slicing;
-2. a per-step, outside-the-layer-path plan hook (:func:`prepare_decode`,
-   wired through ``KernelSpec.step_prepare``) fed by the engine-side CPU
-   length ledger (``AttentionMetadata.b_seq_len_cpu``) — it assembles the
-   plan inputs once per step, sync-free, and plans the wrapper so every
-   layer's call reduces to ``run()``. That is the eager half of vLLM's
-   ``build_metadata``: per-layer host work becomes per-step host work;
-3. per-captured-batch wrappers whose plan inputs live at stable addresses
-   across replays — FlashInfer's own ``fast_decode_plan`` reduces the plan
-   to two pinned H2D copies once the split schedule is fixed. Without it a
-   planned wrapper's internal buffers move on every ``plan()`` call, so a
-   replayed ``run()`` would read capture-time addresses. This is the piece
-   that keeps ``graph_safe=False`` until a flashinfer wheel that ships it
-   can be installed and verified.
+The vLLM-shaped route to compatibility has three parts, two exist: fixed-shape
+GPU ops for the page indices (:func:`paged_kv_indices_gpu`, never Python
+slicing); a per-step plan hook (:func:`prepare_decode`, wired through
+``KernelSpec.step_prepare`` and fed by the engine-side CPU length ledger) so
+per-layer host work becomes per-step, sync-free, and every layer's call reduces
+to ``run()``; and per-captured-batch wrappers whose plan inputs stay at stable
+addresses across replays (FlashInfer's ``fast_decode_plan``). The third piece
+is missing — that is what keeps ``graph_safe=False`` until a wheel shipping it
+can be installed and verified.
 
 Usage:
-    out = prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len,
-                            max_seq_len)
+    out = prefill_attention(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_len)
 """
 
 from __future__ import annotations

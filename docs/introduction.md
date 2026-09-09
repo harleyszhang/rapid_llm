@@ -372,17 +372,17 @@ step():
 
 ## 七、基准测试体系
 
-结论要有出处。benchmarks/ 目录三层：`lib/` 是共享库（指标口径、被测系统适配、落盘与打印，对标 vLLM 的 benchmarks/lib），场景层 `bench_*.py` 测用户看得见的指标（TTFT / TPOT / 吞吐），kernel 层测单个算子对硬件上限的逼近程度。三层共用一条纪律：**先证明算得对，再谈快**。
+结论要有出处。基准测试分三层：共享库 `rapid_llm/benchmark/`（指标口径、被测系统适配、数据集、落盘与打印，与引擎同包，对标 sglang 的 `python/sglang/benchmark/` 和 vLLM 的 `vllm/benchmarks/`），场景层 `benchmarks/bench_*.py` 测用户看得见的指标（TTFT / TPOT / 吞吐），kernel 层测单个算子对硬件上限的逼近程度。三层共用一条纪律：**先证明算得对，再谈快**。库里每个引擎只有一份驱动实现（`Backend.measure_rows`），场景脚本与 runnable 都走它——否则两条路径会在 warm-up、取哪一轮、`greedy` 含义上悄悄分叉，测出来的数就不再可比。
 
 ### 7.1 两层测量口径
 
-e2e 层（口径定义在 [benchmarks/lib/](../benchmarks/lib/)，对齐 vLLM/TensorRT-LLM）：
+e2e 层（口径定义在 [rapid_llm/benchmark/](../rapid_llm/benchmark/)，对齐 vLLM/TensorRT-LLM）：
 
-- **TTFT**（首 token 延迟）：prefill 提交到第一个 token 可见的墙钟时间。LiteBackend 靠 stream 每步回调直接打点；HF transformers 的 `generate()` 没有逐步回调，HFBackend 用两段式拆：先跑 1 token 测 TTFT，再跑全程（lib/backends.py）。
+- **TTFT**（首 token 延迟）：prefill 提交到第一个 token 可见的墙钟时间。LiteBackend 靠 stream 每步回调直接打点；HF transformers 的 `generate()` 没有逐步回调，HFBackend 用两段式拆：先跑 1 token 测 TTFT，再跑全程（benchmark/backends.py）。
 - **TPOT**（每 token 生成延迟）：稳态每步延迟，取首 token 之后所有步间隔的均值；batch 内 lockstep 推进，`gen_tokens = steps × batch`。
 - **TPS**：`gen_tokens / 总时间`。
 
-在线服务另有专用口径（[bench_scheduler.py](../benchmarks/bench_scheduler.py) 的 `serving` 子命令）：真实子进程 + 真实 socket + SSE，TTFT 报 mean 和 p99（负载下尾部才是用户感知到的数），TPOT 从请求自己的帧间隔取，在队列里等待的请求不会被重复计费。正确性三重校验（`batch` / `dup` / `offline`）全部在 temperature=0、采样字段显式钉死的条件下对比**前缀一致率**：greedy 解码是混沌的，一旦一个 token 分叉，逐位一致率必然衰减，只有前缀一致率才能反映真实偏差。
+在线服务另有专用口径（[`engine/run.py scheduler serving`](../benchmarks/engine/run.py)）：真实子进程 + 真实 socket + SSE，TTFT 报 mean 和 p99（负载下尾部才是用户感知到的数），TPOT 从请求自己的帧间隔取，在队列里等待的请求不会被重复计费。正确性三重校验（`batch` / `dup` / `offline`）全部在 temperature=0、采样字段显式钉死的条件下对比**前缀一致率**：greedy 解码是混沌的，一旦一个 token 分叉，逐位一致率必然衰减，只有前缀一致率才能反映真实偏差。
 
 kernel 层（[microbench.py](../benchmarks/kernels/microbench.py)）：`Work` 声明理论代价，`Row` 派生 TFLOP/s 与 GB/s，`report()` 先打吞吐后打延迟（吞吐跨 shape 可比），每行附 SOL（speed-of-light，理论上限）检查；`metadata()` 输出设备 / 软件版本 / commit / 改变后端选择的环境变量，没有这一行的表格只是轶事。
 
@@ -390,21 +390,21 @@ kernel 层（[microbench.py](../benchmarks/kernels/microbench.py)）：`Work` �
 
 ```bash
 # e2e：eager vs CUDA graph，--verify 断言 graph 不改变贪心输出
-python benchmarks/bench_e2e.py --model-dir my_weight/Qwen2.5-0.5B --verify
+python -m rapid_llm.benchmark.one_batch --model my_weight/Qwen2.5-0.5B --verify
 
-# e2e：HF transformers 对照（同一批 prompt、同一指标口径）
-python benchmarks/bench_e2e.py --model-dir my_weight/Qwen2.5-0.5B --backend hf
+# 跨引擎对照（同一批 prompt、同一指标口径；--engine all 覆盖 rapid_llm/transformers/vllm）
+python -m rapid_llm.benchmark.offline_throughput --model my_weight/Qwen2.5-0.5B --engine all
 
 # 在线服务矩阵：量化 x TP x 并发，逐配置起独立服务进程
-python benchmarks/bench_scheduler.py serving --model-dir <ckpt> \
+python benchmarks/engine/run.py scheduler serving --model-dir <ckpt> \
     --schemes fp16 fp8 int4 --tp 1 2 --concurrency 1 8 32
 
 # 调度器特性矩阵：prefix-cache / chunked prefill × CUDA graph，另附
 # diag-prefix（按 wave 分解 TTFT）与 diag-preempt（超订抢占一致性）子命令
-python benchmarks/bench_scheduler.py matrix --model-dir <ckpt> --graph --prefix-cache
+python benchmarks/engine/run.py scheduler matrix --model-dir <ckpt> --graph --prefix-cache
 
 # 全模型套件（结果 JSON 落 docs/benchmark_logs/）
-./benchmarks/run_benchmark_suite.sh
+python benchmarks/suites/run.py compare
 
 # 内核微基准：先正确性门（max_abs_diff），再计时，最后 SOL 检查
 python benchmarks/kernels/bench_paged_decode.py
@@ -415,17 +415,15 @@ benchmarks/ 全部脚本的分工：
 
 | 脚本 | 测什么 |
 |------|--------|
-| [bench_e2e.py](bench_e2e.py) | TTFT/TPOT/TPS 基线，eager vs CUDA graph，附贪心输出一致性断言；`--backend` 切换被测系统（lite/hf/vllm）做跨引擎对比 |
-| [bench_optimizations.py](bench_optimizations.py) | 特性矩阵：每个引擎开关单独一格再交叉组合，三个 workload 各对准特性的生效条件，`--verify` 逐格比对 greedy 文本；含两个构建期副作用特性 `overlap_off`（L1 重叠）与 `router_fp32_cache`（路由 GEMM） |
-| [bench_continuous.py](bench_continuous.py) | 连续批处理 vs 静态批处理，离线与偏斜到达两种场景 |
-| [bench_data_parallel.py](bench_data_parallel.py) | DP 三个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 · `--mode graph` DP×CUDA graph 四格矩阵（TPOT、capture 代价、显存增量） |
-| [bench_scheduler.py](../benchmarks/bench_scheduler.py) | 调度器基准入口：`matrix`（特性矩阵）· `serving`（在线量化 × TP/DP × graph，HTTP + SSE）· `diag-prefix` · `diag-preempt` |
-| [bench_quant.py](bench_quant.py) | 离线量化矩阵：每行同时带吞吐与输出偏移，缺一半就不是合格的量化表 |
+| `python -m rapid_llm.benchmark.one_batch` | TTFT/TPOT/TPS 基线，eager vs CUDA graph，`--verify` 断言 graph 不改变贪心输出（跨引擎对比见 `offline_throughput --engine all`） |
+| [`engine/run.py`](../benchmarks/engine/run.py) | 统一引擎级入口：`scheduler matrix/continuous/serving/diag-prefix/diag-preempt`、`optimizations` 特性 A/B、`quant` 量化矩阵、`cpu` forward 微基准 |
+| [`suites/run.py`](../benchmarks/suites/run.py) | 统一批量套件入口：`compare` 跨引擎、`e2e` eager/graph、`models` modelzoo、`qk-norm run/summarize` |
+| [bench_data_parallel.py](../benchmarks/parallelism/bench_data_parallel.py) | DP 三个实验：`--mode scaling` 吞吐扩展（weak/strong scaling，输出逐条 diff 防止速度掩盖错误）· `--mode prefix` 前缀缓存跨副本的命中率与路由质量 · `--mode graph` DP×CUDA graph 四格矩阵（TPOT、capture 代价、显存增量） |
 | [overlap/levels.py](../benchmarks/overlap/levels.py) | 重叠原语基准入口：`--level l1/l2/l3`（copy-stream 上传 / 双批重叠 / 分块 all-reduce），附 timeline 证据 |
 | [overlap/policies.py](../benchmarks/overlap/policies.py) | 重叠策略基准入口：`--policy sbo/ep_tbo/ep_matrix/prefill/scaling/matrix` |
-| [bench_observability.py](bench_observability.py) | 每个可观测开关的每 token 开销一行 |
-| [bench_mla.py](bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
-| [bench_parser.py](bench_parser.py) | 推理/工具解析器的每 token CPU 成本（流式增量口径） |
+| [bench_observability.py](../benchmarks/serving/bench_observability.py) | 每个可观测开关的每 token 开销一行 |
+| [bench_mla.py](../benchmarks/models/bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
+| [bench_parser.py](../benchmarks/serving/bench_parser.py) | 推理/工具解析器的每 token CPU 成本（流式增量口径） |
 | [accuracy/deepseek.py](accuracy/deepseek.py) | DeepSeek 裁剪版精度对比：`v3 parity/vllm/three-way`（V3-4layers，transformers / rapid_llm / vLLM 三方贪心一致率）· `v4 lite/hf/compare`（V4-Flash，TP2 vs fp32 CPU 参考，贪心一致率 + top-5 漂移） |
 | [accuracy/dspark_to_hf.py](accuracy/dspark_to_hf.py) | DSpark checkpoint -> transformers 权重装载，V4 fp32 CPU 参考侧使用 |
 | [accuracy/convert_v4_hf.py](accuracy/convert_v4_hf.py) | 一次性转换：DSpark V4 -> bf16 HF safetensors，`AutoModelForCausalLM` 直接加载 |

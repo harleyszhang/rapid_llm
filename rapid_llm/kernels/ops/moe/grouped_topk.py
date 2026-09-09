@@ -1,18 +1,16 @@
 """Grouped top-k MoE routing: DeepSeek's grouped/biased router as one kernel.
 
-``grouped_topk`` defines DeepSeek's two grouped routing families -- V2's
+``grouped_topk`` covers DeepSeek's two grouped families — V2's
 ``group_limited_greedy`` and V2.5+/V3's ``noaux_tc``. The torch reference
-(:func:`grouped_topk_torch`) is what the tests pin and what CPU inputs take; on
-CUDA the wrapper launches :func:`_grouped_topk_kernel`, one program per token,
-keeping every intermediate in registers instead of the reference's ~10 little
-kernels -- at decode batch sizes those launches dominate.
+(:func:`grouped_topk_torch`) pins the tests and serves CPU inputs; on CUDA
+one program per token keeps all intermediates in registers where the
+reference launches ~10 little kernels, which dominates at decode batch sizes.
 
-Semantics (aligned with vLLM): score every expert (softmax/sigmoid, fp32); biased
-scores *choose* experts while original scores *weight* them; score each group (sum
-of its two best when biased, else max), keep ``topk_group`` groups and mask the
-rest; top-k over survivors, renormalise, apply the routed scale. Exact fp32 ties
-may break differently than ``torch.topk`` (measure-zero on real logits); every
-tie-break-independent rule is pinned by the tests.
+Semantics (vLLM-aligned): score in fp32; biased scores *choose*, original ones
+*weight*; keep ``topk_group`` groups (sum of two best when biased, else max)
+and mask the rest; top-k, renormalise, routed scale. Exact fp32 ties may break
+differently than ``torch.topk`` (measure-zero); every tie-break-independent
+rule is pinned by the tests.
 
 Usage:
     from rapid_llm.kernels import grouped_topk

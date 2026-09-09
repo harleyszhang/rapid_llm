@@ -1,6 +1,6 @@
 """NVFP4 config and method: 4-bit e2m1 weights with two levels of scale.
 
-The format is NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4:
+NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4:
 
 * ``weight``       ``[N, K // 2]`` uint8 — two e2m1 nibbles per byte, low nibble
   at the even k index;
@@ -11,13 +11,11 @@ The format is NVIDIA ModelOpt's ``modelopt_fp4`` / TensorRT-LLM's NVFP4:
 
 Weight-only, permanently so on this hardware: sm90 has no fp4 MMA, so
 activations stay 16-bit and the win is bytes, not FLOPs — lower decode latency
-and a smaller resident model. See
-:mod:`lite_llama.kernels.ops.quantization.nvfp4` for why that is a property of
-the device.
-
-MoE experts are not implemented (the fused grouped GEMM would need its own
-two-level unpacking kernel), so :meth:`NVFP4Config.get_quant_method` raises
-rather than handing a MoE block a linear method it cannot use.
+and a smaller resident model (:mod:`rapid_llm.kernels.ops.quantization.nvfp4`
+has the format story). MoE experts are not implemented — the fused grouped
+GEMM would need its own two-level unpacking kernel — so
+:meth:`NVFP4Config.get_quant_method` raises rather than handing a MoE block a
+linear method it cannot use.
 """
 
 from __future__ import annotations

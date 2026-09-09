@@ -1,0 +1,77 @@
+{
+  "config": {
+    "host": "127.0.0.1",
+    "port": 30000,
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "request_rate": 4.0,
+    "burstiness": 1.0,
+    "max_concurrency": 4,
+    "num_prompts": 8,
+    "dataset_name": "random-ids",
+    "random_input_len": 64,
+    "random_output_len": 16,
+    "random_range_ratio": 1.0,
+    "seed": 42,
+    "ttft_slo_ms": null,
+    "tpot_slo_ms": null,
+    "gpu": "h100",
+    "timestamp": "2026-09-08T11:28:34",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "duration_s": 2.0663826391100883,
+    "completed": 8,
+    "failed": 0,
+    "input_tokens": 512,
+    "output_tokens": 126,
+    "request_throughput": 3.871499812563898,
+    "output_token_throughput": 60.9761220478814,
+    "goodput": null,
+    "ttft_ms": {
+      "mean": 6.03647087700665,
+      "median": 5.937368609011173,
+      "std": 0.6641237115340077,
+      "min": 5.233779549598694,
+      "max": 7.502691820263863,
+      "p50": 5.937368609011173,
+      "p90": 6.615165248513222,
+      "p99": 7.4139391630887985
+    },
+    "tpot_ms": {
+      "mean": 6.305635900103621,
+      "median": 5.549387633800507,
+      "std": 2.5186604401446737,
+      "min": 3.85605866710345,
+      "max": 10.850813115636509,
+      "p50": 5.549387633800507,
+      "p90": 9.0817258755366,
+      "p99": 10.673904391626518
+    },
+    "itl_ms": {
+      "mean": 5.569401056025967,
+      "median": 2.104763872921467,
+      "std": 12.401941320524953,
+      "min": 0.07055141031742096,
+      "max": 76.04557275772095,
+      "p50": 2.104763872921467,
+      "p90": 4.169765673577789,
+      "p99": 56.19696075096726
+    },
+    "heartbeat_latency_s": 0.005195252597332001
+  }
+}

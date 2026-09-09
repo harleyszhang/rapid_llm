@@ -1,22 +1,20 @@
 """Streaming think-block splitting: one pass, any chunking.
 
-:class:`ReasoningSplitter` eats the incremental detokenizer deltas and routes each
-character to ``reasoning`` or ``content``, so the serving layer can expose
-``reasoning_content`` without buffering the whole generation. The contract the
-design hangs on: feeding a text split at *any* boundaries yields, concatenated,
-exactly what :meth:`ReasoningSplitter.parse` returns in one piece -- bought by
-holding back an ambiguous partial-tag tail and consuming tags the moment they are
-recognised.
+:class:`ReasoningSplitter` eats the incremental detokenizer deltas and routes
+each character to ``reasoning`` or ``content``, so serving can expose
+``reasoning_content`` without buffering the whole generation. The contract:
+any split of the text yields, concatenated, exactly what
+:meth:`ReasoningSplitter.parse` returns in one piece — bought by holding back
+an ambiguous partial-tag tail and consuming tags the moment they are recognised.
 
-Not a vLLM clone: ``starts_inside=True`` is the R1 behaviour (no opening tag means
-the template already opened thinking); the default is pass-through, right for
+Not a vLLM clone: ``starts_inside=True`` is the R1 behaviour (no opening tag
+means the template already opened thinking); the default is pass-through, for
 models that only *sometimes* emit think blocks.
 
 Usage:
     splitter = ReasoningSplitter()
     for delta in stream:
-        reasoning, content = splitter.feed(delta)
-    tail_reasoning, tail_content = splitter.finish()
+        reasoning, content = splitter.feed(delta)   # finish() returns the tail
 """
 
 from __future__ import annotations

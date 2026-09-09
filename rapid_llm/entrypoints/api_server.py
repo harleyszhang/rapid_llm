@@ -110,6 +110,9 @@ class ServerConfig:
         max_seq_len: Context window, and the per-slot KV cache size.
         max_num_seqs: Concurrency ceiling — how many requests may decode together.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        enable_chunked_prefill: Let a prompt prefill across steps, as in vLLM.
+            On by default so one long prompt cannot stall every decode in
+            flight; off needs ``max_num_batched_tokens >= max_seq_len``.
         max_chunk_size: Maximum prefill chunk per request; ``0`` disables
             chunking and favours throughput over decode-tail latency.
         max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
@@ -146,6 +149,7 @@ class ServerConfig:
     max_seq_len: int = 2048
     max_num_seqs: int = 32
     max_num_batched_tokens: int = 8192
+    enable_chunked_prefill: bool = True
     max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
     max_gpu_num_blocks: int | None = None
     device: str = "cuda"
@@ -561,6 +565,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     max_seq_len=config.max_seq_len,
                     max_num_seqs=config.max_num_seqs,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    enable_chunked_prefill=config.enable_chunked_prefill,
                     max_chunk_size=config.max_chunk_size,
                     max_gpu_num_blocks=config.max_gpu_num_blocks,
                     use_cuda_graph=config.use_cuda_graph,
@@ -579,6 +584,7 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     max_seq_len=config.max_seq_len,
                     max_num_seqs=config.max_num_seqs,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    enable_chunked_prefill=config.enable_chunked_prefill,
                     max_chunk_size=config.max_chunk_size,
                     max_gpu_num_blocks=config.max_gpu_num_blocks,
                     device=config.device,

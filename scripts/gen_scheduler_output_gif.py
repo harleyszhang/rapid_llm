@@ -25,8 +25,8 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.sampler import SamplingParams  # noqa: E402
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig  # noqa: E402
+from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"

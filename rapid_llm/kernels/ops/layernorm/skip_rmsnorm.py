@@ -280,59 +280,6 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
 
 
 @torch.no_grad()
-def sequence_parallel_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
-    """Reduce-scatter a TP partial, norm its token shard, then all-gather.
-
-    The caller must have skipped the preceding row-parallel all-reduce. Token
-    rows must divide evenly across ranks; an uneven shape safely falls back to
-    the canonical all-reduce plus fused norm.
-
-    Args:
-        partial: ``(..., hidden)`` this rank's row-parallel partial sum.
-        residual: ``(..., hidden)`` full running residual.
-        weight: ``(hidden,)`` learned scale.
-        eps: Added to the mean square before the reciprocal square root.
-
-    Returns:
-        ``(normalised, residual)`` — same contract as :func:`skip_rmsnorm`.
-    """
-    from ....distributed.parallel_state import (
-        get_tensor_model_parallel_rank,
-        get_tensor_model_parallel_world_size,
-        reduce_scatter,
-        tensor_model_parallel_all_gather,
-        tensor_model_parallel_all_reduce,
-    )
-
-    if get_tensor_model_parallel_world_size() <= 1:
-        return fused_add_rmsnorm(partial, residual, weight, eps)
-
-    if residual is None:
-        raise ValueError("sequence-parallel RMSNorm requires a residual tensor")
-
-    world_size = get_tensor_model_parallel_world_size()
-    hidden = partial.shape[-1]
-    flat_partial = partial.reshape(-1, hidden)
-    if flat_partial.shape[0] % world_size:
-        reduced = tensor_model_parallel_all_reduce(partial)
-        return fused_add_rmsnorm(reduced, residual, weight, eps)
-
-    rank = get_tensor_model_parallel_rank()
-    local_partial = reduce_scatter(flat_partial, dim=0)
-    local_len = local_partial.shape[0]
-
-    flat_residual = residual.reshape(-1, hidden)
-    local_residual = flat_residual[rank * local_len : (rank + 1) * local_len].contiguous()
-    normed_local, residual_local = fused_add_rmsnorm(local_partial, local_residual, weight, eps)
-
-    normed = tensor_model_parallel_all_gather(normed_local.contiguous(), dim=0)
-    residual_out = tensor_model_parallel_all_gather(residual_local.contiguous(), dim=0)
-
-    orig_shape = partial.shape
-    return normed.view(orig_shape), residual_out.view(orig_shape)
-
-
-@torch.no_grad()
 def fused_allreduce_rmsnorm(partial, residual, weight, eps=1e-5):
     """Complete a TP all-reduce, then fuse residual-add and RMSNorm."""
     from ....distributed.parallel_state import tensor_model_parallel_all_reduce

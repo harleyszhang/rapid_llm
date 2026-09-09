@@ -1,0 +1,69 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+    "engine": "rapid_llm",
+    "iters": 2,
+    "greedy": true,
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 1,
+    "max_seq_len": 8192,
+    "max_num_seqs": 0,
+    "gpu_mem_util": 0.92,
+    "engine_args": {},
+    "vllm_args": {},
+    "disable_ignore_eos": false,
+    "num_prompts": 8,
+    "dataset_name": "random-ids",
+    "random_input_len": 4096,
+    "random_output_len": 128,
+    "random_range_ratio": 1.0,
+    "seed": 42,
+    "gpu": "h100",
+    "timestamp": "2026-09-08T13:13:35",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "rapid_llm": {
+      "ttft_ms": 812.0972246397287,
+      "tpot_ms": 26.03374926543075,
+      "total_s": 4.131064539775252,
+      "steps": 135,
+      "batch": 8,
+      "gen_tokens": 897,
+      "tpot_p50_ms": 25.396939719051826,
+      "ttft_p50_ms": 905.1784910261631,
+      "ttft_p99_ms": 905.1784910261631,
+      "tpot_p99_ms": 29.589634102101872,
+      "tps": 217.13531496866923,
+      "input_tokens": 32768,
+      "engine_args": {
+        "use_cuda_graph": true,
+        "enable_prefix_cache": true,
+        "max_seq_len": 8192
+      },
+      "steady_state_output_tps": 269.7457000280728,
+      "steady_state_window_s": 0.02605104073882103,
+      "footprint": {
+        "model_mem_gb": 7.492430686950684,
+        "kv_cache_tokens": 432768,
+        "graph_installed": true,
+        "graph_replays": 2
+      }
+    }
+  }
+}

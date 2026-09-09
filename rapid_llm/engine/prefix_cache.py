@@ -1,15 +1,13 @@
 """Prefix caching: reuse the KV of shared prefixes by sharing physical blocks.
 
-:class:`PrefixCache` is the scheduler's whole view of the KV cache. It hashes a
+:class:`PrefixCache` is the scheduler's whole view of the KV cache: it hashes a
 sequence in fixed-size blocks, looks the hashes up in a
-:class:`~rapid_llm.engine.block_pool.BlockPool`, and hands the caller the
-*physical blocks* a matching prefix already lives in. Reuse is then a reference
-on a shared block rather than a copy of its rows: the executor's block table is
-the indirection that lets two sequences read the same rows.
-
-Because the hash chain covers generated tokens too, a completed request's whole
-sequence — prompt *and* output — is reusable by the next prompt that starts with
-it, which is what makes multi-turn conversations cheap.
+:class:`~rapid_llm.engine.block_pool.BlockPool`, and hands back the *physical
+blocks* a matching prefix already lives in — reuse is a reference on a shared
+block, not a copy (the executor's block table is the indirection letting two
+sequences read the same rows). Generated tokens join the hash chain, so a
+finished request's whole sequence is reusable by the next prompt that starts
+with it — that is what makes multi-turn cheap.
 
 Usage:
     cache = PrefixCache(num_blocks=1024)

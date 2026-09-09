@@ -37,7 +37,7 @@ class TestPlatformInfo:
         assert CPU.compute_capability is None
 
     def test_frozen(self) -> None:
-        with pytest.raises(Exception):  # noqa: B017 (dataclasses raises FrozenInstanceError)
+        with pytest.raises(Exception):  # noqa: B017
             A10.arch_major = 9  # type: ignore[misc]
 
 

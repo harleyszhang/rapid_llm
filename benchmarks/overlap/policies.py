@@ -36,14 +36,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from benchmarks.lib import (
-    BenchResult,
-    environment,
-    report_agreement,
-    require_gpus,
-    timestamped_log_path,
-    write_json_log,
-)
 from benchmarks.overlap.arms import (
     Arm,
     compare,
@@ -56,6 +48,14 @@ from benchmarks.overlap.arms import (
     sm_budget,
     tbo_switch,
     timeline_overlap,
+)
+from rapid_llm.benchmark import (
+    BenchResult,
+    environment,
+    report_agreement,
+    require_gpus,
+    timestamped_log_path,
+    write_json_log,
 )
 
 V2_LITE = "my_weight/DeepSeek-V2-Lite"
@@ -418,7 +418,7 @@ def build_v4(workdir: Path) -> Path:
     from transformers import AutoConfig
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
-    from benchmarks.bench_deepseek_v4 import CONFIG as V4_BODY
+    from benchmarks.models.bench_deepseek_v4 import CONFIG as V4_BODY
 
     workdir.mkdir(parents=True, exist_ok=True)
     body = {**V4_BODY, "vocab_size": V4_VOCAB, "tie_word_embeddings": False}

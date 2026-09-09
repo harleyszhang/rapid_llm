@@ -58,7 +58,7 @@ def title_bar(draw: ImageDraw.ImageDraw, w: int, s: str) -> None:
 # ---------------------------------------------------------------------------
 
 def fig_router_evolution() -> None:
-    log = json.loads((LOG_DIR / "router_gemm_tier4_h100_20260903.json").read_text())
+    log = json.loads((LOG_DIR / "kernels" / "router_gemm_tier4_h100_20260903.json").read_text())
     rows = {r["num_tokens"]: r for r in log["rows"]}
 
     W, H = 1240, 600
@@ -132,8 +132,8 @@ def fig_router_evolution() -> None:
 # ---------------------------------------------------------------------------
 
 def fig_e2e_ab() -> None:
-    optim = json.loads((LOG_DIR / "optim_ab_h100_20260903.json").read_text())
-    router = json.loads((LOG_DIR / "router_ab_h100_20260903.json").read_text())
+    optim = json.loads((LOG_DIR / "engine" / "optim_ab_h100_20260903.json").read_text())
+    router = json.loads((LOG_DIR / "engine" / "router_ab_h100_20260903.json").read_text())
 
     def mean(rows, pred, key="tpot_ms"):
         vals = [r[key] for r in rows if pred(r)]

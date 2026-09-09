@@ -1,25 +1,21 @@
 """Tile-config resolution shared by the dense GEMM and MoE launchers.
 
 Two jobs, both formerly copy-pasted into every quant kernel file:
+:func:`resolve_tiles` is the autotune-store-first, heuristic-fallback pattern,
+with an optional ``BLOCK_K`` convergence for formats whose k-tile has to cover
+whole quantisation groups; :func:`tile_tier` names the device generation a
+heuristic table forks on — ``TileTier.PRE_HOPPER`` instead of re-deriving
+``sm_version(device_index) < (9, 0)`` at every branch.
 
-* :func:`resolve_tiles` — the autotune-store-first, heuristic-fallback
-  pattern, with an optional ``BLOCK_K`` convergence for formats whose k-tile
-  has to cover whole quantisation groups;
-* :func:`tile_tier` — the device generation a heuristic table forks on, so a
-  launcher says ``TileTier.PRE_HOPPER`` instead of re-deriving
-  ``sm_version(device_index) < (9, 0)`` at every branch.
-
-``sm_version`` and ``has_native_fp8`` live here rather than in
-``quantization.w8a16``: they are device queries, not a property of one
-numeric format, and every sibling file was importing them from a format
-module it otherwise has nothing to do with.
+``sm_version`` and ``has_native_fp8`` live here, not in ``quantization.w8a16``:
+they are device queries, not a property of one numeric format, and every
+sibling file was importing them from a format module it has nothing else to do
+with.
 
 Usage:
-    cfg = resolve_tiles(
-        "w8a16_matmul", m=m, n=n, k=k, dtype_label="int8_block",
-        heuristic=lambda dev: _launch_config(m, dev),
-        device_index=x.device.index,
-    )
+    cfg = resolve_tiles("w8a16_matmul", m=m, n=n, k=k, dtype_label="int8_block",
+                        heuristic=lambda dev: _launch_config(m, dev),
+                        device_index=x.device.index)
 """
 
 from __future__ import annotations

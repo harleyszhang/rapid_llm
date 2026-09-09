@@ -25,7 +25,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from benchmarks.lib import (
+from rapid_llm.benchmark import (
     PROMPTS,
     BenchResult,
     expand_prompts,

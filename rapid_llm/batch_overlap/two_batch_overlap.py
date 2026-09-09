@@ -1,39 +1,21 @@
 """L2 two-batch overlap: the decode ping-pong over a deferred all-reduce.
 
 One tensor-parallel decode step splits its batch into two halves that
-ping-pong at *layer-segment* granularity — while half A's o_proj
-all-reduce is on the wire, half B's attention GEMMs are on the SMs, and
-swapping the roles every segment keeps both engines busy:
+ping-pong at layer-segment granularity — half A's o_proj all-reduce is on
+the wire while half B's attention GEMMs are on the SMs::
 
-::
     compute:  A.attn0  B.attn0  A.mlp0  B.mlp0  A.attn1  B.attn1  ...
     comm:       [AR Ao0] [AR Bo0] [AR Ad0] [AR Bd0]  ...
-    # AR Ao0 (Attention的All-Reduce) and AR Ad0 (MLP的All-Reduce)。
 
 The split is sglang's: both halves carry the same padded row count
-(:class:`TboSplitter`), so the EP all-to-all is an equal split and a captured
-graph's shapes never drift with the batch's parity. The op stream is the
-layers' own bound methods, ordered by
-:class:`~rapid_llm.batch_overlap.operations_strategy.OperationsStrategy`.
-
-The entry is sglang's shape — the caller answers the *policy* question
-(``enable_tbo``), this module owns the *execution* one::
-
-    model_forward_maybe_tbo()
-      ├── enable_tbo=True  → _model_forward_tbo()
-      │     ├── _model_forward_tbo_split_inputs()   # split inputs
-      │     ├── execute_overlapped_operations()     # interleave
-      │     └── _model_forward_tbo_merge_outputs()  # merge outputs
-      └── enable_tbo=False → _model_forward_non_tbo()
-            └── execute_operations()                # serial
-
-Both arms run the *same* op stream, so the serial run is the interleaved
-one's reference: if the ping-pong changed the math, the two disagree.
+(:class:`TboSplitter`), so the EP all-to-all is an equal split and captured
+graph shapes never drift with the batch's parity. The op stream is the
+layers' own bound methods (OperationsStrategy); the caller answers the
+*policy* question, this module the *execution* one — both arms run the same
+stream, so the serial run is the interleaved run's reference.
 
 Usage:
-    logits = model_forward_maybe_tbo(
-        model, enable_tbo=True, input_ids=ids, position_ids=pos, atten_info=meta
-    )
+    model_forward_maybe_tbo(model, enable_tbo=True, input_ids=ids, position_ids=pos)
 """
 
 from __future__ import annotations

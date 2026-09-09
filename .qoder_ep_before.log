@@ -1,0 +1,232 @@
+
+===========================================================================================
+/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8  |  mode=offline (all prompts submitted at once)  arms=tp2_graph ep2_graph  gen_len=128  parity=6 x 24 tok (bs16-short)  sampling=greedy  ranks=tp1 and tp2 arms, see table
+gpu=NVIDIA H100 80GB HBM3 x 2
+===========================================================================================
+
+─────────────────────────────────────────────────────────────────────────────────────
+scenario        batch prompt tok (min-mean-max) gen tok       build (kv tok, max seq)
+─────────────────────────────────────────────────────────────────────────────────────
+bs1-short           1                  24-24-24     128 wide (kv 40960 tok, seq 4096)
+bs16-short         16                11-14.8-24     128 wide (kv 40960 tok, seq 4096)
+bs64-short         64                11-14.8-24     128 wide (kv 40960 tok, seq 4096)
+bs16-2k            16            2048-2048-2048     128 wide (kv 40960 tok, seq 4096)
+bs4-32k             4         32768-32768-32768     128long (kv 139264 tok, seq 33280)
+─────────────────────────────────────────────────────────────────────────────────────
+
+[tp2_graph/wide] tp=2 ep=False graph=True — building
+[32m09-09 06:03:38 [I] parallel_state.py:199 parallel state: global rank 1/2 (dp 0/1, tp 1/2)[0m
+[32m09-09 06:03:38 [I] parallel_state.py:199 parallel state: global rank 0/2 (dp 0/1, tp 0/2)[0m
+[32m09-09 06:03:38 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:03:38 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:03:38 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:03:38 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:03:49 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:1 in 11.31s[0m
+[32m09-09 06:03:49 [I] kv_cache_manager.py:178 KV cache: 40960 blocks, watermark=4096 blocks (10%), recovery band=2048 blocks[0m
+[32m09-09 06:03:49 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:0 in 11.31s[0m
+[32m09-09 06:03:49 [I] kv_cache_manager.py:178 KV cache: 40960 blocks, watermark=4096 blocks (10%), recovery band=2048 blocks[0m
+[36m09-09 06:03:49 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([40960, 4, 128])[0m
+[36m09-09 06:03:49 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([40960, 4, 128])[0m
+[32m09-09 06:03:49 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:03:49 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:04:07 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:04:07 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:04:07 [I] executor.py:445 tp rank 1 ready on cuda:1[0m
+[tp2_graph/wide] finished in 49s
+
+[tp2_graph/long] tp=2 ep=False graph=True — building
+[32m09-09 06:04:30 [I] parallel_state.py:199 parallel state: global rank 1/2 (dp 0/1, tp 1/2)[0m
+[32m09-09 06:04:30 [I] parallel_state.py:199 parallel state: global rank 0/2 (dp 0/1, tp 0/2)[0m
+[32m09-09 06:04:30 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:04:30 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:04:30 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:04:30 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:04:40 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:1 in 10.47s[0m
+[32m09-09 06:04:40 [I] kv_cache_manager.py:178 KV cache: 139264 blocks, watermark=13926 blocks (10%), recovery band=6963 blocks[0m
+[36m09-09 06:04:40 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([139264, 4, 128])[0m
+[32m09-09 06:04:40 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:04:41 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:0 in 11.00s[0m
+[32m09-09 06:04:41 [I] kv_cache_manager.py:178 KV cache: 139264 blocks, watermark=13926 blocks (10%), recovery band=6963 blocks[0m
+[36m09-09 06:04:41 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([139264, 4, 128])[0m
+[32m09-09 06:04:41 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:04:58 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:04:58 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:04:59 [I] executor.py:445 tp rank 1 ready on cuda:1[0m
+[36m09-09 06:05:09 [D] comm_overlap.py:199 comm stream pool created for cuda:0[0m
+[36m09-09 06:05:09 [D] comm_overlap.py:199 comm stream pool created for cuda:1[0m
+[tp2_graph/long] finished in 71s
+
+[ep2_graph/wide] tp=2 ep=True graph=True — building
+[32m09-09 06:05:44 [I] parallel_state.py:199 parallel state: global rank 1/2 (dp 0/1, tp 1/2), ep 1/2[0m
+[32m09-09 06:05:44 [I] parallel_state.py:199 parallel state: global rank 0/2 (dp 0/1, tp 0/2), ep 0/2[0m
+[32m09-09 06:05:44 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:05:44 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:05:44 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:05:44 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:05:54 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:1 in 10.66s[0m
+[32m09-09 06:05:54 [I] kv_cache_manager.py:178 KV cache: 40960 blocks, watermark=4096 blocks (10%), recovery band=2048 blocks[0m
+[36m09-09 06:05:54 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([40960, 4, 128])[0m
+[32m09-09 06:05:55 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:05:55 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:0 in 10.79s[0m
+[32m09-09 06:05:55 [I] kv_cache_manager.py:178 KV cache: 40960 blocks, watermark=4096 blocks (10%), recovery band=2048 blocks[0m
+[36m09-09 06:05:55 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([40960, 4, 128])[0m
+[32m09-09 06:05:55 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[36m09-09 06:05:56 [D] comm_overlap.py:199 comm stream pool created for cuda:0[0m
+[36m09-09 06:05:56 [D] comm_overlap.py:199 comm stream pool created for cuda:1[0m
+[32m09-09 06:05:58 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:05:58 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:05:58 [I] executor.py:445 tp rank 1 ready on cuda:1[0m
+[ep2_graph/wide] finished in 45s
+
+[ep2_graph/long] tp=2 ep=True graph=True — building
+[32m09-09 06:06:29 [I] parallel_state.py:199 parallel state: global rank 1/2 (dp 0/1, tp 1/2), ep 1/2[0m
+[32m09-09 06:06:29 [I] parallel_state.py:199 parallel state: global rank 0/2 (dp 0/1, tp 0/2), ep 0/2[0m
+[32m09-09 06:06:29 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:06:29 [I] loader.py:137 Building Qwen3MoeModel skeleton on the meta device[0m
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[32m09-09 06:06:29 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:06:30 [I] weight_utils.py:92 Loading weights from 4 file(s) in /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8[0m
+[32m09-09 06:06:39 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:1 in 10.30s[0m
+[32m09-09 06:06:39 [I] kv_cache_manager.py:178 KV cache: 139264 blocks, watermark=13926 blocks (10%), recovery band=6963 blocks[0m
+[36m09-09 06:06:39 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([139264, 4, 128])[0m
+[32m09-09 06:06:39 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[32m09-09 06:06:40 [I] loader.py:156 Loaded Qwen3MoeModel onto cuda:0 in 10.47s[0m
+[32m09-09 06:06:40 [I] kv_cache_manager.py:178 KV cache: 139264 blocks, watermark=13926 blocks (10%), recovery band=6963 blocks[0m
+[36m09-09 06:06:40 [D] kv_cache_manager.py:248 gpu_kv_buffer per layer shape: torch.Size([139264, 4, 128])[0m
+[32m09-09 06:06:40 [I] model_runner.py:369 Capturing CUDA graphs for batch_sizes=(1, 2, 4, 8, 16, 32, 64, 128) seq_len_buckets=(256, 512, 1024, 2048, 4096)[0m
+[36m09-09 06:06:41 [D] comm_overlap.py:199 comm stream pool created for cuda:1[0m
+[36m09-09 06:06:41 [D] comm_overlap.py:199 comm stream pool created for cuda:0[0m
+[32m09-09 06:06:43 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:06:43 [I] model_runner.py:462 TP CUDA graphs verified: worst graph-vs-eager logit difference 0.000e+00 (tolerance 1.0e-02)[0m
+[32m09-09 06:06:43 [I] executor.py:445 tp rank 1 ready on cuda:1[0m
+[ep2_graph/long] finished in 76s
+
+scenario bs1-short — batch 1, prompt 24-24-24 tok (min-mean-max), gen 128 tok, offline
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+config        TTFT (ms)  TTFT max  TPOT (ms)      TPS  vs tp1  vs tp2 peak (GiB)        graph
+─────────────────────────────────────────────────────────────────────────────────────────────
+tp2_graph         182.5     182.5       8.04    106.3       —       —       17.6  replays 127
+ep2_graph         138.2     138.2      12.16     76.0       —       —       16.6  replays 127
+─────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────
+config        a2a calls  a2a (MiB) all-red. calls all-red. (MiB) data plane (MiB)
+─────────────────────────────────────────────────────────────────────────────────
+tp2_graph             0        0.0             97            9.1              9.1
+ep2_graph           144      144.1             49            4.6            148.7
+─────────────────────────────────────────────────────────────────────────────────
+  wire bytes are the driver rank's view of the measured run only
+  caveat: a graph replay bypasses the Python accounting, so graph arms' bytes cover their eager (prefill) passes only — read the eager arms' rows for per-op wire cost
+
+scenario bs16-short — batch 16, prompt 11-14.8-24 tok (min-mean-max), gen 128 tok, offline
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+config        TTFT (ms)  TTFT max  TPOT (ms)      TPS  vs tp1  vs tp2 peak (GiB)        graph
+─────────────────────────────────────────────────────────────────────────────────────────────
+tp2_graph          68.4      68.4      11.98   1287.3       —       —       17.6  replays 127
+ep2_graph         116.2     116.2      16.77    911.5       —       —       16.7  replays 127
+─────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────
+config        a2a calls  a2a (MiB) all-red. calls all-red. (MiB) data plane (MiB)
+─────────────────────────────────────────────────────────────────────────────────
+tp2_graph             0        0.0             97          145.5            145.5
+ep2_graph           144     2306.2             49           73.5           2379.8
+─────────────────────────────────────────────────────────────────────────────────
+  wire bytes are the driver rank's view of the measured run only
+  caveat: a graph replay bypasses the Python accounting, so graph arms' bytes cover their eager (prefill) passes only — read the eager arms' rows for per-op wire cost
+
+scenario bs64-short — batch 64, prompt 11-14.8-24 tok (min-mean-max), gen 128 tok, offline
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+config        TTFT (ms)  TTFT max  TPOT (ms)      TPS  vs tp1  vs tp2 peak (GiB)        graph
+─────────────────────────────────────────────────────────────────────────────────────────────
+tp2_graph         121.2     121.2      13.95   4323.9       —       —       17.7  replays 127
+ep2_graph         201.7     201.7      24.04   2513.8       —       —       17.1  replays 127
+─────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────
+config        a2a calls  a2a (MiB) all-red. calls all-red. (MiB) data plane (MiB)
+─────────────────────────────────────────────────────────────────────────────────
+tp2_graph             0        0.0             97          582.0            582.1
+ep2_graph           144     9225.0             49          294.0           9519.1
+─────────────────────────────────────────────────────────────────────────────────
+  wire bytes are the driver rank's view of the measured run only
+  caveat: a graph replay bypasses the Python accounting, so graph arms' bytes cover their eager (prefill) passes only — read the eager arms' rows for per-op wire cost
+
+scenario bs16-2k — batch 16, prompt 2048-2048-2048 tok (min-mean-max), gen 128 tok, offline
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+config        TTFT (ms)  TTFT max  TPOT (ms)      TPS  vs tp1  vs tp2 peak (GiB)        graph
+─────────────────────────────────────────────────────────────────────────────────────────────
+tp2_graph         877.5     877.5      13.44    748.3       —       —       18.2  replays 127
+ep2_graph        2764.1    2764.1      18.02    405.3       —       —       19.1  replays 127
+─────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────
+config        a2a calls  a2a (MiB) all-red. calls all-red. (MiB) data plane (MiB)
+─────────────────────────────────────────────────────────────────────────────────
+tp2_graph             0        0.0            388        12416.0          12416.0
+ep2_graph           576   196800.0            196         6272.0         203072.0
+─────────────────────────────────────────────────────────────────────────────────
+  wire bytes are the driver rank's view of the measured run only
+  caveat: a graph replay bypasses the Python accounting, so graph arms' bytes cover their eager (prefill) passes only — read the eager arms' rows for per-op wire cost
+
+scenario bs4-32k — batch 4, prompt 32768-32768-32768 tok (min-mean-max), gen 128 tok, offline
+
+─────────────────────────────────────────────────────────────────────────────────────────────
+config        TTFT (ms)  TTFT max  TPOT (ms)      TPS  vs tp1  vs tp2 peak (GiB)        graph
+─────────────────────────────────────────────────────────────────────────────────────────────
+tp2_graph       10063.8   10063.8      79.52     25.4       —       —       22.3    replays 0
+ep2_graph       17859.5   17859.5     116.62     15.7       —       —       21.7    replays 0
+─────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────
+config        a2a calls  a2a (MiB) all-red. calls all-red. (MiB) data plane (MiB)
+─────────────────────────────────────────────────────────────────────────────────
+tp2_graph             0        0.0          18527        49856.5          49856.5
+ep2_graph         27504   790251.0           9359        25185.2         815436.2
+─────────────────────────────────────────────────────────────────────────────────
+  wire bytes are the driver rank's view of the measured run only
+  caveat: a graph replay bypasses the Python accounting, so graph arms' bytes cover their eager (prefill) passes only — read the eager arms' rows for per-op wire cost
+
+parity vs tp2 (bs16-short, greedy)
+
+───────────────────────────────────────────────────────────────────────────────────
+config        first forkworst fork margin (nat) token agreement             verdict
+───────────────────────────────────────────────────────────────────────────────────
+tp2                    —                      —               —           reference
+───────────────────────────────────────────────────────────────────────────────────
+
+throughput (tok/s) by scenario
+
+────────────────────────────────────────────────────────────────────────
+config         bs1-short  bs16-short  bs64-short     bs16-2k     bs4-32k
+────────────────────────────────────────────────────────────────────────
+tp1                    —           —           —           —           —
+tp2                    —           —           —           —           —
+tp2_graph          106.3      1287.3      4323.9       748.3        25.4
+ep2                    —           —           —           —           —
+ep2_graph           76.0       911.5      2513.8       405.3        15.7
+────────────────────────────────────────────────────────────────────────
+
+the ratios that answer the question (same graph setting both sides)
+
+───────────────────────────────────────────────────────────────────
+scenario         ep2/tp2ep2_graph/tp2_graph tp2_graph/tp1   tp2/tp1
+───────────────────────────────────────────────────────────────────
+bs1-short              —              0.71x             —         —
+bs16-short             —              0.71x             —         —
+bs64-short             —              0.58x             —         —
+bs16-2k                —              0.54x             —         —
+bs4-32k                —              0.62x             —         —
+───────────────────────────────────────────────────────────────────
+-> docs/benchmark_logs/expert_parallel_Qwen3-30B-A3B-Instruct-2507-FP8_20260909_060739.json

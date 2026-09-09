@@ -139,7 +139,7 @@ def main():
         },
         "verdict": "PASS" if match and diverge else "INCONCLUSIVE",
     }
-    out_path = Path("docs/benchmark_logs/tp2_sampling_fix_comparison.json")
+    out_path = Path("docs/benchmark_logs/engine/tp2_sampling_fix_comparison.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(log, ensure_ascii=False, indent=2) + "\n")
     print(f"\nLog saved: {out_path}")

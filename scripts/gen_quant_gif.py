@@ -1,7 +1,7 @@
 """Generate the quantization demo GIF for README.
 
 Shows: CLI command → loading → benchmark results table with speedup bars.
-Uses real benchmark data from `docs/benchmark_logs/bench_quant_Qwen3-0.6B_20260823.json`.
+Uses real benchmark data from `docs/benchmark_logs/quantization/quant_Qwen3-0.6B_20260823.json`.
 
 Usage:
     python scripts/gen_quant_gif.py
@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO_ROOT))
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 OUTPUT = REPO_ROOT / "docs" / "images" / "quantization_benchmark.gif"
-RESULTS_PATH = REPO_ROOT / "docs" / "benchmark_logs" / "bench_quant_Qwen3-0.6B_all_20260823.json"
+RESULTS_PATH = REPO_ROOT / "docs" / "benchmark_logs" / "quantization" / "quant_Qwen3-0.6B_all_20260823.json"
 
 # Terminal palette
 W, H = 1080, 640
@@ -60,7 +60,7 @@ def _draw_title_bar(draw, fonts):
 
 
 def _make_frame(fonts, lines, cursor_visible=True) -> Image.Image:
-    body, bold, small, big = fonts
+    body, bold, _, big = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
     _draw_title_bar(draw, fonts)
@@ -81,13 +81,13 @@ def _make_frame(fonts, lines, cursor_visible=True) -> Image.Image:
 
 def _make_bar_frame(fonts, results, highlight_idx) -> Image.Image:
     """Draw the benchmark results with speedup bars."""
-    body, bold, small, big = fonts
+    body, bold, small, _ = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
     _draw_title_bar(draw, fonts)
 
     y = TITLE_H + PAD
-    draw.text((PAD, y), "$ python benchmarks/bench_quant.py --model-dir Qwen3-0.6B", fill=PROMPT_FG, font=body)
+    draw.text((PAD, y), "$ python benchmarks/engine/run.py quant --model-dir Qwen3-0.6B", fill=PROMPT_FG, font=body)
     y += LINE_H + 4
     draw.text((PAD, y), "Quantization Speed Benchmark (batch=4, greedy, max_gen=64)", fill=CYAN, font=bold)
     y += LINE_H + 8
@@ -111,7 +111,7 @@ def _make_bar_frame(fonts, results, highlight_idx) -> Image.Image:
         colour = colours[i] if i < len(colours) else TEXT_FG
         tpot = f"{r['tpot_ms']:.2f}ms"
         tps = f"{r['tps']:.0f}"
-        speedup = f"{r['tps'] / results[0]['tps']:.1f}×" if results[0]["tps"] > 0 else "—"
+        speedup = f"{r['tps'] / results[0]['tps']:.1f}x" if results[0]["tps"] > 0 else "—"
 
         draw.text((PAD, y), f"{label:<22s}", fill=colour, font=bold)
         draw.text((PAD + 240, y), f"{tpot:>7s}", fill=TEXT_FG, font=body)
@@ -134,13 +134,13 @@ def _make_bar_frame(fonts, results, highlight_idx) -> Image.Image:
             fill=DIM, font=body,
         )
         y += LINE_H
-        draw.text((PAD, y), "✓ smoothquant W8A8: 6.7× faster (int8 tensor cores)", fill=(255, 140, 180), font=bold)
+        draw.text((PAD, y), "✓ smoothquant W8A8: 6.7x faster (int8 tensor cores)", fill=(255, 140, 180), font=bold)
         y += LINE_H
-        draw.text((PAD, y), "✓ rapid_llm fp16:  6.2× faster than HF transformers", fill=GREEN, font=bold)
+        draw.text((PAD, y), "✓ rapid_llm fp16:  6.2x faster than HF transformers", fill=GREEN, font=bold)
         y += LINE_H
-        draw.text((PAD, y), "✓ int8 per-channel:  6.1× faster, saves 1 GB memory", fill=BLUE, font=bold)
+        draw.text((PAD, y), "✓ int8 per-channel:  6.1x faster, saves 1 GB memory", fill=BLUE, font=bold)
         y += LINE_H
-        draw.text((PAD, y), "✓ fp8 W8A8:   3.0× faster (no weight dequant)", fill=YELLOW, font=bold)
+        draw.text((PAD, y), "✓ fp8 W8A8:   3.0x faster (no weight dequant)", fill=YELLOW, font=bold)
         y += LINE_H + 4
         draw.text(
             (PAD, y),
@@ -155,7 +155,7 @@ def main():
     fonts = _fonts()
 
     if not RESULTS_PATH.exists():
-        print(f"ERROR: {RESULTS_PATH} not found. Run bench_quant.py first.")
+        print(f"ERROR: {RESULTS_PATH} not found. Run benchmarks/engine/run.py quant first.")
         sys.exit(1)
 
     results = json.loads(RESULTS_PATH.read_text())
@@ -163,7 +163,7 @@ def main():
     durations: list[int] = []
 
     # Phase 1: Show the CLI command being typed (5 frames)
-    cmd = "$ python benchmarks/bench_quant.py --model-dir Qwen3-0.6B --schemes fp16 int8 fp8"
+    cmd = "$ python benchmarks/engine/run.py quant --model-dir Qwen3-0.6B --schemes fp16 int8 fp8"
     for i in range(0, len(cmd) + 1, 4):
         lines = [(cmd[:i], PROMPT_FG, "body")]
         frames.append(_make_frame(fonts, lines, cursor_visible=True))

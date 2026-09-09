@@ -103,9 +103,9 @@ Qwen2.5-1.5B-Instruct，2× A10（23 GB），greedy，`max_gen_len=128`，round-
 复现：
 
 ```bash
-python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct \
+python benchmarks/parallelism/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct \
     --dp 2 --batch-size 16 --scaling weak
-python benchmarks/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct \
+python benchmarks/parallelism/bench_data_parallel.py --model my_weight/Qwen2.5-1.5B-Instruct \
     --dp 2 --batch-size 256 --scaling strong
 ```
 

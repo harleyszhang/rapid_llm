@@ -29,7 +29,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from benchmarks.lib import make_backend, require_gpus, timestamped_log_path, write_json_log
 from benchmarks.overlap.arms import (
     TIMELINE_ENV,
     Arm,
@@ -42,6 +41,7 @@ from benchmarks.overlap.arms import (
     timeline_overlap,
     workload,
 )
+from rapid_llm.benchmark import make_backend, require_gpus, timestamped_log_path, write_json_log
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 

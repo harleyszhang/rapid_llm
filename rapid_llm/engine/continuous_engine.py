@@ -1,16 +1,14 @@
 """Continuous batching: a step-driven engine where requests join and leave freely.
 
-Each ``step()`` asks the :class:`~rapid_llm.engine.scheduler.Scheduler` for
-a plan, runs it through the executor, harvests sampled tokens and updates
-request state — so chunked prefills and running decodes share one pass.
-
-The :class:`~rapid_llm.executor.worker.PIPELINE_ENV` mode reshapes that order
-into the launch/harvest pipeline: schedule and launch step N while step N-1 is
-still on the GPU, then harvest N-1's tokens — their readback has landed under
-N's forward, so the host's detokenise/stop work overlaps compute instead of
-serialising against it. Decode inputs never cross to the host in that mode:
-the worker feeds them back on the device (see
-:meth:`~rapid_llm.executor.worker.ModelWorker`).
+Each ``step()`` asks the :class:`~rapid_llm.engine.scheduler.Scheduler` for a
+plan, runs it through the executor, harvests sampled tokens and updates request
+state — chunked prefills and running decodes share one pass. The
+``PIPELINE_ENV`` mode reshapes that order into launch/harvest pipelining:
+schedule and launch step N while N-1 is still on the GPU, then harvest N-1's
+tokens — their readback has landed under N's forward, so the host's
+detokenise/stop work overlaps compute instead of serialising against it.
+Decode inputs never cross to the host in that mode: the worker feeds them back
+on the device (see :meth:`~rapid_llm.executor.worker.ModelWorker`).
 
 Usage:
     engine.add_request(prompt, params)
@@ -47,6 +45,7 @@ from ..models.config import read_model_type
 from ..models.registry import ModelRegistry
 from ..tools.observability import EngineMetrics, Tracer
 from ..utils.env_compat import getenv
+from ..utils.logger import get_logger
 from .detokenizer import IncrementalDetokenizer
 from .ngram_proposer import NgramProposer
 from .outputs import CompletionOutput, RequestOutput
@@ -70,6 +69,8 @@ if TYPE_CHECKING:
 #: a grid pass through the chunked prefill kernel. A kill-switch rather than a
 #: config field because the engine decides once, from the cache dtype.
 _FUSED_CHUNK_ENV = "RAPID_LLM_FUSED_CHUNK_PREFILL"
+
+logger = get_logger(__name__)
 
 #: Ngram speculative decoding (O5): ``1``/``true``/``on`` enables ngram proposal
 #: for decode requests. The proposer scans the prompt + generated tokens for
@@ -320,26 +321,27 @@ class ContinuousBatchingEngine:
         runner_config = getattr(engine.model_runner, "config", None)
         kv_fp8 = runner_config is not None and runner_config.kv_cache_torch_dtype == torch.uint8
         fused = getenv(_FUSED_CHUNK_ENV, "1") != "0" and not kv_fp8
+        if kv_fp8 and config.enable_chunked_prefill:
+            # Say it once, the way vLLM announces a config it downgraded for
+            # you: chunked prefill still runs, only its resumed chunks take the
+            # slower route, so a TTFT that regressed against a bf16 cache has a
+            # line in the log to point at.
+            logger.info(
+                "fp8 KV cache: chunked prefill stays on, but resumed chunks run "
+                "through the extend pass -- the chunk kernel cannot read e4m3 bytes"
+            )
 
         self._executor: Executor = executor or UniProcExecutor(
             engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
         )
         # The replay cap reads the runner's live graph manager, so it is
         # settled after the executor; ``math.inf`` disables the chunked route.
-        #
-        # The cap falls back to the *configured* batch sizes when no manager
-        # exists (graphs off), so the threshold -- and therefore which kernel a
-        # resumed chunk takes -- is the same either way. That matters because
-        # the two routes are not numerically equivalent: EXTEND computes QK/PV
-        # as fp32 vector sums while the chunked kernel uses ``tl.dot`` on tensor
-        # cores, so a threshold that flipped with the graph switch made eager
-        # and graph disagree on the first token and diverge from there. Graph
-        # replay itself is bit-identical to eager (verified at capture), so a
-        # threshold that does not depend on the switch is enough to make the
-        # two agree. Measured cost is nil: on the shared-prefix workload this
-        # removed 9 output-mismatch cells at no TTFT/TPOT change, and on the
-        # long workload nothing moves because its resumed chunks are 256-394
-        # rows -- past either threshold, so the route was already the same.
+        # With graphs off the cap falls back to the *configured* batch sizes:
+        # EXTEND (fp32 vector sums) and the chunked kernel (``tl.dot``) are not
+        # numerically equivalent, so a threshold that flipped with the graph
+        # switch made eager and graph diverge from the first token. Replay is
+        # bit-identical (verified at capture), so a switch-invariant threshold
+        # suffices -- measured: 9 output mismatches removed at no TTFT/TPOT cost.
         manager = self._graph_manager()
         cap = max(manager.batch_sizes, default=0) if manager else max(DEFAULT_BATCH_SIZES)
         self._chunked_min_rows = cap + 1 if fused else math.inf
@@ -389,6 +391,7 @@ class ContinuousBatchingEngine:
         max_seq_len: int = 2048,
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        enable_chunked_prefill: bool = True,
         max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
         max_gpu_num_blocks: int | None = None,
         device: str = "cuda",
@@ -414,6 +417,9 @@ class ContinuousBatchingEngine:
             max_seq_len: Context window, and the per-slot cache size.
             max_num_seqs: Concurrency ceiling.
             max_num_batched_tokens: Padded token budget for one prefill group.
+            enable_chunked_prefill: Whether a prompt may prefill across steps
+                (vLLM's default: on). Off prefills each prompt in one pass and
+                needs ``max_num_batched_tokens >= max_seq_len``.
             max_chunk_size: Maximum tokens a request may prefill in one step;
                 ``0`` disables chunking.
             max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
@@ -535,6 +541,7 @@ class ContinuousBatchingEngine:
             max_seq_len=engine.max_seq_len,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=enable_chunked_prefill,
             max_chunk_size=max_chunk_size,
             enable_prefix_cache=enable_prefix_cache,
             prefix_cache_blocks=prefix_cache_blocks,

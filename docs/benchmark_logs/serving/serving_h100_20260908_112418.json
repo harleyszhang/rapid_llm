@@ -1,0 +1,68 @@
+{
+  "config": {
+    "host": "127.0.0.1",
+    "port": 30000,
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "request_rate": 4.0,
+    "burstiness": 1.0,
+    "max_concurrency": 4,
+    "num_prompts": 8,
+    "dataset_name": "random-ids",
+    "random_input_len": 64,
+    "random_output_len": 16,
+    "random_range_ratio": 1.0,
+    "seed": 42,
+    "ttft_slo_ms": 500.0,
+    "tpot_slo_ms": null,
+    "gpu": "h100",
+    "timestamp": "2026-09-08T11:24:18",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "duration_s": 2.084023702889681,
+    "completed": 8,
+    "failed": 0,
+    "input_tokens": 512,
+    "output_tokens": 0,
+    "request_throughput": 3.838727932368188,
+    "output_token_throughput": 0.0,
+    "goodput": 3.838727932368188,
+    "ttft_ms": {
+      "mean": 5.8205449022352695,
+      "median": 5.693764425814152,
+      "std": 0.3881194751716657,
+      "min": 5.45935146510601,
+      "max": 6.484832614660263,
+      "p50": 5.693764425814152,
+      "p90": 6.371247582137585,
+      "p99": 6.473474111407995
+    },
+    "tpot_ms": "n/a",
+    "itl_ms": {
+      "mean": 4.737739089820812,
+      "median": 1.9653113558888435,
+      "std": 9.788317193883483,
+      "min": 0.0731535255908966,
+      "max": 59.29775536060333,
+      "p50": 1.9653113558888435,
+      "p90": 2.987230382859707,
+      "p99": 42.24081236869095
+    },
+    "heartbeat_latency_s": 0.0044811442494392395
+  }
+}

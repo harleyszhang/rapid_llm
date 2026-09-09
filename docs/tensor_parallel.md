@@ -196,7 +196,7 @@ decode graph 在单卡上录的是一串 kernel；在两卡上还把分片层的
 
 实测（Qwen2.5-0.5B、H100×2、`max_seq_len=512` → 8 个 graph）：bf16 / fp8 / nvfp4 三种方案下 graph 引擎与 eager 引擎 32 步 greedy **逐字节一致**（单请求与 3 条 padding 到 batch-4 两种分组都比过）。这里要求逐字节，而 `test_tp_engine.py` 只要求共享前缀，差别是真实的：那边是 1 卡对 2 卡，行并行 GEMM + all-reduce 改变了求和顺序，greedy 平局会翻；这边是 2 卡对同样的 2 卡，只有 launch 来自 Python 还是来自 replay 的区别。
 
-`int4`（AWQ）在 TP 下另有约束：group size 128 必须整除分片后的 `in_features`，0.5B 的 896 两分变 448 就不满足。这是 checkpoint 几何的限制，与 graph 无关，int4 × TP × graph 在更宽的模型上由 `benchmarks/bench_quant.py` 覆盖。
+`int4`（AWQ）在 TP 下另有约束：group size 128 必须整除分片后的 `in_features`，0.5B 的 896 两分变 448 就不满足。这是 checkpoint 几何的限制，与 graph 无关，int4 × TP × graph 在更宽的模型上由 `benchmarks/engine/run.py quant` 覆盖。
 
 ## 当前边界
 

@@ -14,7 +14,7 @@ So this test runs the real thing: ``rapid-llm serve`` as a subprocess, real weig
 quantised at load time, a real socket. It asserts only what such a smoke test can
 honestly assert -- that the server becomes ready, that a completion comes back
 non-empty, and that streaming and non-streaming agree with each other. Whether the
-quantised tokens are *good* is a question for ``benchmarks/bench_quant.py``, which
+quantised tokens are *good* is a question for ``benchmarks/engine/run.py quant``, which
 compares them against a recorded baseline; a smoke test that tried to judge quality
 from one prompt would be asserting noise.
 """

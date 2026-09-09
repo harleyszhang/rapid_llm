@@ -1,25 +1,22 @@
 """W4A16 GEMM: 4-bit weights (AWQ/GPTQ), fp16/bf16 activations, fp32 accumulation.
 
-AWQ and GPTQ checkpoints pack 8 int4 values into each int32 word along K,
-with one fp32 scale (and zero point) per group of ``group_size`` input
-channels. The kernel unpacks the nibbles, applies the group-wise
-dequantisation and multiplies by the fp16 activation inside the GEMM loop, so
-the weight never exists at fp16 in HBM.
+Checkpoints pack 8 int4 values per int32 word along K with one fp32 scale (and
+zero point) per ``group_size`` channels. The kernel unpacks nibbles, applies
+the group-wise dequantisation and multiplies by the fp16 activation inside the
+GEMM loop, so the weight never exists at fp16 in HBM.
 
-``BLOCK_K`` is decoupled from ``group_size`` and the unpack follows the
-:mod:`.nvfp4` idiom — a coalesced ``[BLOCK_N, BLOCK_K//8]`` word load, a 3-D
-shift/reshape to nibbles in registers, fp32 dequant, ``tl.trans`` into
-``tl.dot``. Measured on an H100 (N=K=4096, fp16): ``BLOCK_K=256`` fills a
-128-byte transaction per output channel where a per-group loop
-(``BLOCK_K == group_size == 128``) fetches half of one, worth 1.4-1.6x at
-decode widths and parity at prefill; 512 loses to register pressure, so the
-tune space stops at 256. An fp16 magic-number dequant variant measured 9%
-faster at m=64 but 12% slower at m=1, so there is one code path.
+``BLOCK_K`` is decoupled from ``group_size``; the unpack follows the
+:mod:`.nvfp4` idiom — coalesced word load, 3-D shift/reshape to nibbles in
+registers, fp32 dequant, ``tl.trans``, ``tl.dot``. Measured on an H100
+(N=K=4096, fp16): ``BLOCK_K=256`` fills a 128-byte transaction per output
+channel where a per-group loop fetches half of one — 1.4-1.6x at decode
+widths, parity at prefill; 512 loses to register pressure, so the tune space
+stops at 256. An fp16 magic-number dequant measured 9% faster at m=64 but 12%
+slower at m=1, so there is one code path.
 
-Packing order (AWQ/GPTQ standard):
-    int32 word w contains values for K indices [8*i, 8*i+7]:
-        nibble_j = (w >> (4*j)) & 0xF,  j = 0..7
-    The dequantised value is: (nibble - zero) * scale.
+Packing order (AWQ/GPTQ standard): int32 word ``w`` holds K indices
+``[8*i, 8*i+7]`` as ``nibble_j = (w >> (4*j)) & 0xF``, j = 0..7; the
+dequantised value is ``(nibble - zero) * scale``.
 
 Usage:
     y = w4a16_matmul(x, qweight, scales, zeros)

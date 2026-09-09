@@ -272,6 +272,7 @@ def _dp_worker(
     engine_kwargs: dict[str, Any],
     max_num_seqs: int,
     max_num_batched_tokens: int,
+    enable_chunked_prefill: bool,
     max_chunk_size: int,
     enable_prefix_cache: bool,
     prefix_cache_blocks: int | None,
@@ -350,6 +351,7 @@ def _dp_worker(
                 device=device,
                 max_num_seqs=max_num_seqs,
                 max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
                 max_chunk_size=max_chunk_size,
                 enable_prefix_cache=enable_prefix_cache,
                 prefix_cache_blocks=prefix_cache_blocks,
@@ -403,6 +405,9 @@ class DataParallelEngine:
         max_num_seqs: Requests each replica keeps in flight. Per replica, not in
             total: DP multiplies concurrency along with throughput.
         max_num_batched_tokens: Padded token budget for one prefill group.
+        enable_chunked_prefill: Let a prompt prefill across steps, as in vLLM.
+            On by default; off makes every replica prefill each prompt in one
+            pass and so needs ``max_num_batched_tokens >= max_seq_len``.
         max_chunk_size: Maximum prompt tokens one request prefills per step;
             ``0`` disables chunking.
         enable_prefix_cache: Give every replica a prefix cache. Each one is *local*:
@@ -431,6 +436,7 @@ class DataParallelEngine:
         load_balancer: str = "round_robin",
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        enable_chunked_prefill: bool = True,
         max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
         enable_prefix_cache: bool = False,
         prefix_cache_blocks: int | None = None,
@@ -500,6 +506,7 @@ class DataParallelEngine:
                     self._engine_kwargs,
                     max_num_seqs,
                     max_num_batched_tokens,
+                    enable_chunked_prefill,
                     max_chunk_size,
                     enable_prefix_cache,
                     prefix_cache_blocks,

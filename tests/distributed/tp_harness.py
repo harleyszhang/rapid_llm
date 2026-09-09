@@ -50,6 +50,7 @@ def _worker(
     results: mp.Queue,
     acks: mp.Queue,
     enable_expert_parallel: bool = False,
+    enable_dp_attention: bool = False,
 ) -> None:
     """One rank: take a device, join the grid, run the payload, report answer or traceback.
 
@@ -68,6 +69,7 @@ def _worker(
         ps.init_parallel(
             global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend=backend,
             enable_expert_parallel=enable_expert_parallel,
+            enable_dp_attention=enable_dp_attention,
         )
         results.put((rank, payload(rank), None))
     except BaseException:  # reported to the parent, which re-raises it verbatim
@@ -89,6 +91,7 @@ def run_on_tp_ranks(
     timeout: float = 300.0,
     backend: str = "nccl",
     enable_expert_parallel: bool = False,
+    enable_dp_attention: bool = False,
 ) -> list[Any]:
     """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` grid.
 
@@ -105,9 +108,12 @@ def run_on_tp_ranks(
             exercise the control plane, which is what
             :func:`~rapid_llm.distributed.parallel_state.broadcast_object` and the
             executor's plan hand-off live on.
-        enable_expert_parallel: Set the EP group state (the TP group doubles as
-            the EP group) before the payload runs, so expert-parallel code paths
-            see :func:`~rapid_llm.distributed.parallel_state.get_ep_group`.
+        enable_expert_parallel: Set the EP group state before the payload runs, so
+            expert-parallel code paths see
+            :func:`~rapid_llm.distributed.parallel_state.get_ep_group`.
+        enable_dp_attention: Make the DP axis a shard of one model rather than a
+            set of independent replicas: builds the DP group and widens the EP
+            group to the whole grid, which is what the DP-attention tests need.
 
     Returns:
         One result per global rank, in rank order.
@@ -129,7 +135,7 @@ def run_on_tp_ranks(
             target=_worker,
             args=(
                 payload, rank, tp_size, dp_size, port, backend, results, acks,
-                enable_expert_parallel,
+                enable_expert_parallel, enable_dp_attention,
             ),
             daemon=True,
         )

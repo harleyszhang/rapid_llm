@@ -4,7 +4,7 @@ Three panels:
   1. the INT4 memory addressing each MoE kernel uses for the same byte-packed
      weight, which is where the vectorisation difference comes from;
   2. the measured INT4 kernel cost, including the four-step evolution and
-     vLLM's Triton fallback (docs/benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json);
+     vLLM's Triton fallback (docs/benchmark_logs/kernels/fused_moe_h100_20260902_int4byte.json);
   3. the end-to-end rapid_llm vs vLLM comparison and the two orthogonal drivers
      behind it (docs/benchmark_models.md, H100 section).
 
@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 FONT_PATH = None  # no TTF on this host; PIL's built-in font is used
 OUTPUT = REPO_ROOT / "docs" / "images" / "rapid_vs_vllm.png"
-RESULTS = REPO_ROOT / "docs/benchmark_logs/bench_fused_moe_h100_20260902_int4byte.json"
+RESULTS = REPO_ROOT / "docs/benchmark_logs/kernels/fused_moe_h100_20260902_int4byte.json"
 
 W, H = 1440, 1720
 BG = (14, 16, 20)
