@@ -50,7 +50,7 @@ Usage::
 
     .venv/bin/python scripts/quant_kv_error.py \\
         --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \\
-        --json docs/benchmark_logs/kv_fp8_error_qwen3-4b_20260901.json
+        --json docs/benchmark_logs/quantization/kv_fp8_error_qwen3-4b_20260901.json
 
     # add the task score (needs the GSM8K cache under ~/.cache/rapid_llm/evals)
     .venv/bin/python scripts/quant_kv_error.py --model-dir ... --gsm8k 200

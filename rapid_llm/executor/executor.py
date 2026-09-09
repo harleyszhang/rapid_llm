@@ -114,7 +114,7 @@ class Executor(ABC):
         """
         return tokens.cpu(), None
 
-    def release_readback(  # noqa: B027 - optional hook, not abstract
+    def release_readback(  # noqa: B027
         self, host: torch.Tensor
     ) -> None:
         """Return a staged token buffer once the host has read it.
@@ -276,6 +276,12 @@ class MultiprocExecutor(Executor):
                 tensor_model_parallel_barrier,
             )
 
+            # Release this rank's captured graphs first — the same discipline the
+            # follower teardown applies to its own: a captured region holds NCCL
+            # kernels registered with the communicator, and the destroy below
+            # would block on them (the deadline then abandons the group, wedging
+            # any engine this process tries to build next).
+            self._worker._runner.release_cuda_graph()
             tensor_model_parallel_barrier()
             _destroy_with_deadline(destroy_parallel, abandon_parallel)
         for process in self._followers:

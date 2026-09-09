@@ -21,7 +21,7 @@ Switch under test: ``LITE_LLAMA_SPLITKV`` = ``adaptive`` (default) | ``fixed``.
 
 Usage:
     python benchmarks/kernels/bench_splitkv.py \
-        --json docs/benchmark_logs/splitkv_<stamp>.json
+        --json docs/benchmark_logs/kernels/splitkv_<stamp>.json
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ def main() -> int:
     )
 
     if args.json:
-        from benchmarks.lib import write_json_log
+        from rapid_llm.benchmark import write_json_log
 
         write_json_log(
             args.json,

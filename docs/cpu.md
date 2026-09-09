@@ -72,8 +72,8 @@ CPU 量化计算会产生反量化临时张量。先测普通权重，再决定�
 模型前向微基准（默认生成随机小 LLaMA，不下载权重）：
 
 ```bash
-.venv/bin/python benchmarks/bench_cpu.py --threads 1 --repeats 30
-.venv/bin/python benchmarks/bench_cpu.py --model-dir my_weight/Qwen2.5-0.5B --prompt-length 128
+.venv/bin/python benchmarks/engine/run.py cpu --threads 1 --repeats 30
+.venv/bin/python benchmarks/engine/run.py cpu --model-dir my_weight/Qwen2.5-0.5B --prompt-length 128
 ```
 
 该脚本测量 batch=1、固定上下文长度的 prefill/decode 中位延迟，不包含加载、调度、采样和分词。它不是服务端 TTFT 或端到端吞吐测试。

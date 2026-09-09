@@ -2,22 +2,18 @@
 
 A :class:`ToolParser` watches the content channel (reasoning already stripped
 by :mod:`~rapid_llm.engine.reasoning`) and pulls structured tool calls out of
-the model's markup as the text arrives — the first delta of a call carries
-its id and name, the arguments stream as raw JSON fragments, and text outside
-any call keeps flowing as ordinary content. Nothing waits for the closing
-markup.
+the markup as it arrives — a call's first delta carries its id and name, the
+arguments stream as raw JSON fragments, and text outside any call keeps
+flowing as ordinary content; nothing waits for the closing markup.
 
-The design follows vLLM's reasoning/tool-parser split but states the contract
-the other way round: vLLM's parsers are re-fed the whole text each step,
-these are incremental state machines over the detokenizer's deltas, and the
-correctness axiom is the same one the reasoning splitter carries — any
-chunking of the stream must concatenate to exactly what :meth:`ToolParser.parse`
-returns in one shot.
-
-Two families ship: DeepSeek-V3's fullwidth-bar markers with fenced JSON, and
-Qwen's tool_call element wrapping a single JSON object. Marker literals are
-assembled at import, never written out (the edit transport strips anything
-that parses as markup).
+Like vLLM's reasoning/tool-parser split, but the contract is stated the other
+way round: vLLM re-feeds the whole text each step, these are incremental state
+machines over the detokenizer's deltas, and the axiom is the reasoning
+splitter's — any chunking must concatenate to what :meth:`ToolParser.parse`
+returns in one shot. Two families ship: DeepSeek-V3's fullwidth-bar markers
+with fenced JSON and Qwen's ``tool_call`` element wrapping one JSON object;
+marker literals are assembled at import, never written out (the edit transport
+strips anything that parses as markup).
 
 Usage:
     parser = ToolParser.for_model("deepseek")

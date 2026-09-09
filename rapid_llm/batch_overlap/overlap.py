@@ -1,15 +1,12 @@
 """Cross-stream overlap: the L1 policy, its stream pool and its timeline.
 
-:class:`OverlapPolicy` (read from ``RAPID_LLM_OVERLAP``) decides whether
-input uploads run on a copy stream; :class:`StreamPool` stages the async
-uploads — and, in the opposite direction, reads results back into pinned
-host memory — while :class:`Timeline` records regions as timeline evidence.
-
-The host↔device axis of the package. Its siblings
-(:mod:`~rapid_llm.batch_overlap.comm_overlap`,
-:mod:`~rapid_llm.batch_overlap.two_batch_overlap`) own the
-compute↔communication axis, and share this module's :class:`Timeline` so a
-copy region and a comm region compare on one device clock.
+The package's host↔device axis. :class:`OverlapPolicy` (``RAPID_LLM_OVERLAP``)
+decides whether input uploads run on a copy stream; :class:`StreamPool`
+stages the async uploads — and, in the other direction, pinned readbacks —
+while :class:`Timeline` records regions as evidence. The siblings
+(``comm_overlap``, ``two_batch_overlap``) own the compute↔communication axis
+and share this :class:`Timeline`, so copy and comm regions compare on one
+device clock.
 
 Usage:
     policy = OverlapPolicy.from_env()

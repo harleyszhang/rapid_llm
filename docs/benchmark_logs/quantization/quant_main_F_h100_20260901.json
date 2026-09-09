@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "torch": "2.13.0+cu130",
+    "triton": "3.7.1",
+    "commit": "v0.8.0-32-g4f256d7-dirty",
+    "command": "benchmarks/engine/run.py quant --model-dir /mnt/otto-temp/modelzoo_with_full_weights/Qwen3/Qwen3-4B-Thinking-2507 --schemes fp8 int4 --dp 2 --cuda-graph --skip-hf --json docs/benchmark_logs/bench_quant_main_F_h100_20260901.json",
+    "batch": 4,
+    "max_gen_len": 64,
+    "date": "2026-09-01"
+  },
+  "rows": [
+    {
+      "config": "fp8+tp1+dp2+graph",
+      "model": "Qwen3-4B-Thinking-2507",
+      "ttft_ms": null,
+      "tpot_ms": null,
+      "tps": 1275.2533183909325,
+      "total_s": 0.40148885920643806,
+      "gen_tokens": 512,
+      "batch": 8,
+      "peak_mem_gb": null,
+      "model_mem_gb": null,
+      "kv_cache_tokens": null,
+      "graph_installed": null,
+      "graph_replays": null,
+      "golden_match_rate": 0.6585648148148148,
+      "golden_prefix_rate": 0.6168981481481481,
+      "golden_exact": "10/26",
+      "token_match_rate": null,
+      "note": ""
+    },
+    {
+      "config": "int4+tp1+dp2+graph",
+      "model": "Qwen3-4B-Thinking-2507",
+      "ttft_ms": null,
+      "tpot_ms": null,
+      "tps": 816.7508500031942,
+      "total_s": 0.6268741562962532,
+      "gen_tokens": 512,
+      "batch": 8,
+      "peak_mem_gb": null,
+      "model_mem_gb": null,
+      "kv_cache_tokens": null,
+      "graph_installed": null,
+      "graph_replays": null,
+      "golden_match_rate": 0.1574074074074074,
+      "golden_prefix_rate": 0.1388888888888889,
+      "golden_exact": "0/26",
+      "token_match_rate": null,
+      "note": ""
+    }
+  ]
+}

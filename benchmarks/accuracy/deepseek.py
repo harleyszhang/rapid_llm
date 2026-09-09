@@ -94,7 +94,7 @@ def hf_greedy(model, input_ids: torch.Tensor, n_steps: int = GREEDY_STEPS):
 
 
 def write_arm(prefix: str, config: dict, results: dict) -> Path:
-    from benchmarks.lib import timestamped_log_path, write_json_log
+    from rapid_llm.benchmark import timestamped_log_path, write_json_log
 
     path = timestamped_log_path(LOG_DIR, f"accuracy_{prefix}")
     write_json_log(path, config, results)
@@ -285,7 +285,7 @@ def run_v3_lite(prompt_ids: list[torch.Tensor], reference: dict) -> dict:
 
 
 def cmd_v3_parity(args) -> int:
-    from benchmarks.lib import require_gpus
+    from rapid_llm.benchmark import require_gpus
 
     require_gpus(1)
     from transformers import AutoTokenizer

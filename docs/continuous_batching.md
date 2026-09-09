@@ -120,7 +120,7 @@ Qwen2.5-1.5B-Instruct，单卡 A10（23 GB），greedy，`max_gen_len=256`，16 
 复现：
 
 ```bash
-python benchmarks/bench_continuous.py --model-dir my_weight/Qwen2.5-1.5B-Instruct \
+python benchmarks/engine/run.py scheduler continuous --model-dir my_weight/Qwen2.5-1.5B-Instruct \
     --scenario all --batch 16 --max-num-seqs 16 --interval 0.25
 ```
 

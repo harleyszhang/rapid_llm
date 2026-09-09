@@ -26,8 +26,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.lib import require_gpus, timestamped_log_path, write_json_log
 from rapid_llm.batch_overlap.overlap import Timeline
+from rapid_llm.benchmark import require_gpus, timestamped_log_path, write_json_log
 from rapid_llm.kernels.tile_signal import (
     TileSignalBuffer,
     pipelined_gemm_swiglu,
@@ -122,12 +122,12 @@ def main() -> int:
         "--json",
         type=str,
         default=None,
-        help="default: docs/benchmark_logs/overlap_l4_<stamp>.json",
+        help="default: docs/benchmark_logs/overlap/overlap_l4_<stamp>.json",
     )
     args = parser.parse_args()
     if args.json is None:
         args.json = timestamped_log_path(
-            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs", "overlap_l4"
+            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "overlap", "overlap_l4"
         )
 
     require_gpus(1)

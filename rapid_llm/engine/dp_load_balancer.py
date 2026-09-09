@@ -59,7 +59,7 @@ class LoadBalancer(ABC):
                 same reason.
         """
 
-    def release(  # noqa: B027 - optional hook, not abstract
+    def release(  # noqa: B027
         self, replica: int, estimated_tokens: int = 0
     ) -> None:
         """Note that a request on ``replica`` has finished.

@@ -50,10 +50,10 @@ TOKENS = [1, 8, 64, 512, 4096]
 
 
 def load_latest_json() -> dict:
-    pattern = str(Path("docs/benchmark_logs/moe_o4_*.json"))
+    pattern = str(Path("docs/benchmark_logs/kernels/moe_o4_*.json"))
     files = sorted(glob.glob(pattern))
     if not files:
-        raise FileNotFoundError(f"No moe_o4_*.json found in docs/benchmark_logs/")
+        raise FileNotFoundError("No moe_o4_*.json found in docs/benchmark_logs/kernels/")
     with open(files[-1]) as f:
         return json.load(f)
 
@@ -78,31 +78,31 @@ def draw_cell(draw: ImageDraw.Draw, x: int, y: int, w: int, h: int, cell: dict, 
     """Draw one grid cell: heuristic tile | tuned tile | speedup bar."""
     # Cell background
     draw.rectangle([x, y, x + w, y + h], fill=HEADER_BG, outline=DIM)
-    
+
     if not reveal:
         return
-    
+
     # Heuristic tile (left third)
     left_w = w // 3
     draw.text((x + 4, y + 4), "heur", fill=DIM, font=font_small)
     draw.text((x + 4, y + 20), cell["heur_tile"], fill=FG, font=font)
-    
+
     # Tuned tile (middle third)
     mid_x = x + left_w
     draw.text((mid_x + 4, y + 4), "tuned", fill=DIM, font=font_small)
     draw.text((mid_x + 4, y + 20), cell["tuned_tile"], fill=FG, font=font)
-    
+
     # Speedup bar (right third)
     right_x = x + 2 * left_w
     bar_w = w - 2 * left_w - 8
     bar_h = h - 30
     bar_x = right_x + 4
     bar_y = y + 20
-    
+
     # Background bar (1.0x baseline)
     baseline_x = bar_x + bar_w // 2
     draw.line([baseline_x, bar_y, baseline_x, bar_y + bar_h], fill=DIM, width=1)
-    
+
     # Speedup bar
     sp = cell["speedup"]
     if sp >= 1.0:
@@ -115,7 +115,7 @@ def draw_cell(draw: ImageDraw.Draw, x: int, y: int, w: int, h: int, cell: dict, 
         bar_len = int((1.0 - sp) * bar_w * 2)
         bar_len = min(bar_len, bar_w // 2)
         draw.rectangle([baseline_x - bar_len, bar_y + 5, baseline_x, bar_y + bar_h - 5], fill=color)
-    
+
     # Speedup text
     sp_text = f"{sp:.2f}x"
     draw.text((bar_x, y + 4), sp_text, fill=color, font=font_label)
@@ -125,30 +125,30 @@ def draw_frame(grid: list[dict], revealed: int, frame_idx: int, total_frames: in
     """Draw one frame with `revealed` cells visible."""
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
-    
+
     # Title
     title = "O4 MoE grouped-GEMM autotune: heuristic vs measured tiles"
     draw.text((MARGIN, 10), title, fill=FG, font=font_title)
-    
+
     subtitle = f"A10 collect round  |  frame {frame_idx + 1}/{total_frames}"
     draw.text((MARGIN, 35), subtitle, fill=DIM, font=font_small)
-    
+
     # Grid layout
     grid_x = MARGIN
     grid_y = 70
     cell_w = (W - 2 * MARGIN) // len(TOKENS)
     cell_h = (H - grid_y - 60) // len(FORMATS)
-    
+
     # Column headers (token counts)
     for j, tokens in enumerate(TOKENS):
         cx = grid_x + j * cell_w + cell_w // 2
         draw.text((cx - 15, grid_y - 18), f"t={tokens}", fill=FG, font=font_label)
-    
+
     # Row headers (formats) and cells
     for i, fmt in enumerate(FORMATS):
         ry = grid_y + i * cell_h + cell_h // 2 - 8
         draw.text((grid_x - 35, ry), FORMAT_LABELS[fmt], fill=FG, font=font_label)
-        
+
         for j, tokens in enumerate(TOKENS):
             cx = grid_x + j * cell_w
             cy = grid_y + i * cell_h
@@ -157,7 +157,7 @@ def draw_frame(grid: list[dict], revealed: int, frame_idx: int, total_frames: in
             cell = next((c for c in grid if c["scheme"] == fmt and c["tokens"] == tokens), None)
             if cell:
                 draw_cell(draw, cx, cy, cell_w - 2, cell_h - 2, cell, reveal)
-    
+
     # Footer
     footer_y = H - 25
     if revealed == len(grid):
@@ -167,28 +167,28 @@ def draw_frame(grid: list[dict], revealed: int, frame_idx: int, total_frames: in
     else:
         footer = "revealing cells..."
         draw.text((MARGIN, footer_y), footer, fill=DIM, font=font_small)
-    
+
     return img
 
 
 def main():
     data = load_latest_json()
     grid = build_grid(data)
-    
+
     # Frames: intro + reveal each cell + final hold
     frames = []
     total_cells = len(grid)
-    
+
     # Intro frame (0 cells revealed)
     frames.append(draw_frame(grid, 0, 0, total_cells + 2))
-    
+
     # Reveal cells one by one
     for i in range(1, total_cells + 1):
         frames.append(draw_frame(grid, i, i, total_cells + 2))
-    
+
     # Final hold frame
     frames.append(draw_frame(grid, total_cells, total_cells + 1, total_cells + 2))
-    
+
     # Save GIF
     out_path = Path("docs/images/moe_o4.gif")
     frames[0].save(

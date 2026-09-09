@@ -16,22 +16,16 @@ from typing import Any, ClassVar
 import torch
 import torch.nn as nn
 
-from ..batch_overlap.comm_overlap import (
-    comm_overlap_policy,
-    current_deferred_ar,
-    skip_row_parallel_all_reduce,
-)
-from ..distributed.parallel_state import get_tensor_model_parallel_world_size
 from ..distributed.sequence_parallel import (
     SequenceParallelPass,
-    is_sequence_parallel,
-    sequence_parallel_eligible,
+    entry_scatter,
+    exit_gather,
+    sequence_parallel_region,
 )
 from ..kernels import (
     fused_add_rmsnorm,
     qk_rmsnorm,
     rope_emb_forward,
-    sequence_parallel_allreduce_rmsnorm,
     skip_rmsnorm,
 )
 from ..modules import (
@@ -123,12 +117,15 @@ class Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Project, reshape to per-head layout, normalise (optionally) and apply RoPE."""
-        batch_size, seq_len, _ = x.shape
-        x = x.view(-1, self.hidden_size)
+        x = x.reshape(-1, self.hidden_size)
 
         xq, xk, xv = self.qkv_proj.project(x)
 
-        num_tokens = batch_size * seq_len
+        # Rows come from the projection, not from ``x``: inside a
+        # sequence-parallel region the fused QKV layer gathers this rank's token
+        # shard back to the full grid, so it returns more rows than it was given
+        # -- and the RoPE tables and attention metadata were built for that grid.
+        num_tokens = xq.shape[0]
         xq = xq.view(num_tokens, self.num_heads, self.head_dim)
         xk = xk.view(num_tokens, self.num_kv_heads, self.head_dim)
         xv = xv.view(num_tokens, self.num_kv_heads, self.head_dim)
@@ -158,9 +155,13 @@ class Attention(nn.Module):
         attn_output = self.attn(
             xq, xk, xv, atten_info, layer_index, is_prefill=atten_info.is_prefill
         )
-        # Back to the residual-stream layout before the output projection.
-        attn_output = attn_output.view(batch_size, seq_len, self.q_size)
-        return self.o_proj(attn_output)
+        # Flat rows into the output projection, which is where a sequence-parallel
+        # region's ``g-bar`` boundary sits: it reduce-scatters, so its row count is
+        # ``x``'s again rather than the attention grid's. Viewing to ``x``'s
+        # leading dims afterwards is therefore right on both paths -- it is the
+        # residual-stream layout the block hands on either way.
+        attn_output = attn_output.reshape(-1, self.q_size)
+        return self.o_proj(attn_output).view(batch_size, seq_len, -1)
 
 
 class DecoderLayer(nn.Module):
@@ -201,22 +202,6 @@ class DecoderLayer(nn.Module):
         # the default is the dense SwiGLU.
         self.mlp = mlp if mlp is not None else FusedMLP(config, quant)
 
-    def _use_sequence_parallel(self, hidden_states: torch.Tensor) -> bool:
-        """Choose SP only when it does not replace an active overlap policy."""
-        if not is_sequence_parallel(self):
-            return False
-        tokens = hidden_states.shape[:-1].numel()
-        policy = comm_overlap_policy()
-        overlap_active = current_deferred_ar() is not None or (
-            policy.enabled and tokens >= policy.min_rows
-        )
-        return sequence_parallel_eligible(
-            self,
-            num_tokens=tokens,
-            world_size=get_tensor_model_parallel_world_size(),
-            overlap_active=overlap_active,
-        )
-
     def forward_attn_stage(
         self,
         hidden_states: torch.Tensor,
@@ -234,23 +219,14 @@ class DecoderLayer(nn.Module):
         at the head of :meth:`forward_mlp_stage`; everyone else keeps using
         :meth:`forward`, which runs the stages back to back.
 
-        An eligible sequence-parallel call replaces that all-reduce at the
-        following norm. TBO and L3 keep precedence because they already overlap
-        the same communication.
+        Nothing here knows whether a sequence-parallel region is open. The norm
+        is per-row, so it computes on whatever rows it is handed, and the two
+        projections take the region's boundaries themselves.
 
         Returns the *un-normalised* attention output plus the running
-        residual — :meth:`forward_mlp_stage`'s fused add-and-norm consumes
+        residual -- :meth:`forward_mlp_stage`'s fused add-and-norm consumes
         the pair.
         """
-        if self._use_sequence_parallel(hidden_states):
-            with skip_row_parallel_all_reduce():
-                hidden_states, residual = skip_rmsnorm(
-                    hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
-                )
-                return (
-                    self.self_attn(hidden_states, atten_info, layer_index, position_embeddings),
-                    residual,
-                )
         hidden_states, residual = skip_rmsnorm(
             hidden_states, residual, self.input_layernorm_weight, self.rms_norm_eps
         )
@@ -264,18 +240,11 @@ class DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The fused add-and-norm both MLP paths start with (dense and EP).
 
-        Sequence parallelism uses a reduce-scatter/local-norm/all-gather rewrite
-        only for evenly sharded token counts and when TBO/L3 are inactive.
-        Otherwise the row-parallel dispatcher completes its reduction before
-        the fused residual-add/RMSNorm kernel.
+        The row-parallel dispatcher has completed its reduction by the time this
+        runs -- an all-reduce over the full grid, or a reduce-scatter to this
+        rank's token shard when a sequence-parallel region is open. Either way the
+        rows arriving here are reduced, and the kernel treats them one at a time.
         """
-        if self._use_sequence_parallel(hidden_states):
-            return sequence_parallel_allreduce_rmsnorm(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm_weight,
-                self.rms_norm_eps,
-            )
         return fused_add_rmsnorm(
             hidden_states,
             residual,
@@ -301,12 +270,11 @@ class DecoderLayer(nn.Module):
     #
     # The layer hands these bound methods to
     # :class:`~rapid_llm.batch_overlap.operations_strategy.OperationsStrategy`,
-    # which orders them and places the yields. Every op takes the
-    # micro-batch's ``StateDict``, pops what it consumes and writes its result
-    # under a *new* key — so an op that clobbers a live key raises instead of
-    # silently feeding a predecessor's stale result downstream. ``op_attn``'s
-    # ``layer_index`` is bound by the strategy at build time, because the layer
-    # takes the index as an argument rather than storing it.
+    # which orders them and places the yields. Ops pop what they consume from
+    # the micro-batch StateDict and write under a *new* key, so clobbering a
+    # live key raises instead of feeding a predecessor's stale result
+    # downstream. ``op_attn``'s ``layer_index`` is bound by the strategy at
+    # build time.
 
     def op_attn(self, state, *, layer_index: int) -> None:
         """Attention segment: fence this half's promise, then run attention.
@@ -459,7 +427,8 @@ class CausalLM(nn.Module):
         self.rotary_emb = self.rotary_class(config.rope_config)
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Optional module pass; runtime guards preserve TBO/L3 and odd batches.
+        # Optional module pass; the region it marks for opens per forward, and
+        # only for steps whose runtime gates clear.
         self.sequence_parallel_pass = SequenceParallelPass()
         self.sequence_parallel_pass.apply(self)
 
@@ -619,25 +588,43 @@ class CausalLM(nn.Module):
         hidden_states = (
             inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(input_ids)
         )
+        # Built on the full grid and left there: the RoPE tables index absolute
+        # positions, and every consumer of them runs between a ``g`` and a
+        # ``g-bar``, where the rows are the whole step's again.
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        residual = None
-        for layer_index, layer in enumerate(self.layers):
-            hidden_states, residual = layer(
-                hidden_states, atten_info, layer_index, position_embeddings, residual
-            )
-            if layer_context:
-                # Adding into `hidden_states` before the next fused add-and-norm is
-                # equivalent to adding into the post-layer output, because that norm
-                # computes `hidden_states + residual`.
-                hidden_states = self._after_layer(hidden_states, layer_index, layer_context)
+        grid_shape = hidden_states.shape
+        with sequence_parallel_region(
+            grid_shape[:-1].numel(),
+            # ``layer_context`` rules the region out: :meth:`_after_layer` adds
+            # whole-grid features (Qwen3-VL's DeepStack) into the stream between
+            # blocks, where a region is holding one rank's token shard.
+            marked=bool(self.sequence_parallel_pass.matched) and not layer_context,
+        ) as region:
+            if region is not None:
+                hidden_states = entry_scatter(hidden_states, region)
 
-        hidden_states, _ = skip_rmsnorm(
-            hidden_states, residual, self.norm_weight, self.rms_norm_eps
-        )
+            residual = None
+            for layer_index, layer in enumerate(self.layers):
+                hidden_states, residual = layer(
+                    hidden_states, atten_info, layer_index, position_embeddings, residual
+                )
+                if layer_context:
+                    # Adding into `hidden_states` before the next fused add-and-norm is
+                    # equivalent to adding into the post-layer output, because that norm
+                    # computes `hidden_states + residual`.
+                    hidden_states = self._after_layer(hidden_states, layer_index, layer_context)
+
+            hidden_states, _ = skip_rmsnorm(
+                hidden_states, residual, self.norm_weight, self.rms_norm_eps
+            )
+            if region is not None:
+                hidden_states = exit_gather(hidden_states, region, grid_shape)
+
         if logits_positions is not None:
             # Prompts differ in length, so each sequence's next-token prediction
-            # sits at its own last real position; pick it before the GEMM.
+            # sits at its own last real position; pick it before the GEMM. After
+            # the gather above, necessarily: these are global row numbers.
             rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
             hidden_states = hidden_states[rows, logits_positions]
         return self.lm_head(hidden_states)

@@ -162,9 +162,18 @@ class SchedulerConfig:
         max_num_batched_tokens: Ceiling on the padded token count of one
             prefill group. Measured on *chunks*, not whole prompts: with
             chunked prefill a step's grid is as wide as its longest chunk.
-        max_chunk_size: Maximum tokens per prefill chunk. When a prompt is
-            longer than this, it is split into chunks and interleaved with
-            decode steps (chunked prefill). Set to 0 to disable chunking.
+        enable_chunked_prefill: Whether one prompt may prefill across several
+            steps. On by default, as in vLLM: a long prompt is split into
+            ``max_chunk_size`` pieces that interleave with decode, so a single
+            32k prefill cannot stall every running request. Off means each
+            prompt prefills in one pass, which needs a token budget wide
+            enough to hold the longest context — ``max_num_batched_tokens >=
+            max_seq_len``, validated here the way vLLM validates it. Passing
+            ``max_chunk_size=0`` is the older spelling of off and still turns
+            this flag off, so there is one source of truth to read.
+        max_chunk_size: Maximum tokens per prefill chunk, once chunking is on.
+            A prompt longer than this is split into chunks interleaved with
+            decode steps. Ignored when ``enable_chunked_prefill`` is False.
         enable_prefix_cache: Whether to reuse blocks across sequences by block
             hash. Blocks are paged and reference-counted either way; this only
             decides whether a completed block is *indexed* so another sequence
@@ -192,6 +201,7 @@ class SchedulerConfig:
     max_seq_len: int = 2048
     max_num_seqs: int = DEFAULT_MAX_NUM_SEQS
     max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS
+    enable_chunked_prefill: bool = True
     max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
     enable_prefix_cache: bool = False
     prefix_cache_blocks: int | None = None
@@ -209,6 +219,17 @@ class SchedulerConfig:
             )
         if self.max_chunk_size < 0:
             raise ValueError(f"max_chunk_size must be >= 0, got {self.max_chunk_size}")
+        # ``max_chunk_size=0`` predates the flag; fold it in so the scheduler
+        # only ever has to consult ``enable_chunked_prefill``.
+        if self.max_chunk_size == 0:
+            object.__setattr__(self, "enable_chunked_prefill", False)
+        if not self.enable_chunked_prefill and self.max_num_batched_tokens < self.max_seq_len:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is smaller than "
+                f"max_seq_len ({self.max_seq_len}) with chunked prefill disabled: a whole "
+                "prompt must fit one prefill pass. Raise max_num_batched_tokens, lower "
+                "max_seq_len, or leave chunked prefill on."
+            )
         # Two is the floor rather than one: block 0 is the reserved null block.
         if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 2:
             raise ValueError(
@@ -562,9 +583,9 @@ class Scheduler:
         """
         progress = request.num_computed_tokens if computed is None else computed
         remaining = request.prompt_len - progress
-        size = self.config.max_chunk_size
-        if size <= 0:
+        if not self.config.enable_chunked_prefill:
             return remaining
+        size = self.config.max_chunk_size
         # vLLM's chunked prefill consumes at most the iteration token budget.
         # Without this cap, one long request violates the advertised ceiling.
         return min(remaining, size, self.config.max_num_batched_tokens)

@@ -1,16 +1,15 @@
 """Standalone dynamic activation quantisation (per-token-group).
 
-The W8A8 GEMM files quantise activations per *token*, because that is what
-their GEMM epilogues consume; this is the finer-grained op the block-wise
-schemes need, mirroring sglang's ``per_token_group_quant`` — the
-activation-side companion of a ``block_shape=[128, 128]`` W8A8 checkpoint,
-where every ``group_size``-element slice of every token carries its own scale.
+The W8A8 GEMM files quantise per *token* (what their epilogues consume); this
+is the finer op block-wise schemes need, mirroring sglang's
+``per_token_group_quant`` — one scale per ``group_size``-element slice of
+every token, the activation side of a ``block_shape=[128, 128]`` W8A8
+checkpoint.
 
-One launch, one pass. A per-token scale needs the whole row's amax before any
-element can be scaled, which is why the per-token quantisers walk their row
-twice; a *group* fits in one tile, so the amax reduction and the scaling are
-register work and the row is read once. Each program carries ``_QUANT_TILE``
-elements' worth of groups (eight at ``group_size=128``) where sglang's flat
+One launch, one pass: a *group* fits one tile, so the amax reduction and the
+scaling are register work and the row is read once (a per-token scale needs
+the whole row's amax first, hence the two-pass walk). Each program carries
+``_QUANT_TILE`` elements' worth of groups (eight at 128) where sglang's flat
 kernel carries one.
 
 Usage:
@@ -18,7 +17,7 @@ Usage:
 
 Scale layout is decided at allocation, not consumption: pass ``layout=`` and
 the grid is born in the consumer's storage order (``scale_layout.py``), or
-hand in caller-owned buffers and their strides declare the layout.
+hand in caller-owned buffers whose strides declare the layout.
 """
 
 from __future__ import annotations

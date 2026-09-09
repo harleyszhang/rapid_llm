@@ -112,7 +112,7 @@ test-cli:
 
 # Prints the table in docs/continuous_batching.md. Needs a checkpoint and a GPU.
 bench-continuous:
-	cd benchmarks && $(PYTHON) bench_continuous.py --model-dir ../$(MODEL_DIR) \
+	$(PYTHON) benchmarks/engine/run.py scheduler continuous --model-dir $(MODEL_DIR) \
 		--scenario all --batch 16 --max-num-seqs 16
 
 serving-gif:

@@ -36,7 +36,7 @@ synchronised on the host, would fail to capture rather than fail to compute.
 ``int4`` is absent for a checkpoint reason, not a graph one — AWQ needs
 ``in_features`` to be a multiple of its 128-wide group, and this checkpoint's 896
 becomes 448 when split two ways. int4 x TP x graph is covered on a wider model in
-``benchmarks/bench_quant.py``.
+``benchmarks/engine/run.py quant``.
 
 Usage:
     pytest tests/distributed/test_tp_cuda_graph.py    # skips below 2 GPUs

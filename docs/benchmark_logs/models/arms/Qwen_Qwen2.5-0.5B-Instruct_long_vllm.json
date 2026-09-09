@@ -1,0 +1,57 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "engine": "vllm",
+    "iters": 2,
+    "greedy": true,
+    "tensor_parallel_size": 1,
+    "data_parallel_size": 1,
+    "max_seq_len": 32768,
+    "max_num_seqs": 0,
+    "gpu_mem_util": 0.92,
+    "engine_args": {},
+    "vllm_args": {},
+    "disable_ignore_eos": false,
+    "num_prompts": 8,
+    "dataset_name": "random-ids",
+    "random_input_len": 31744,
+    "random_output_len": 256,
+    "random_range_ratio": 1.0,
+    "seed": 42,
+    "gpu": "h100",
+    "timestamp": "2026-09-08T12:58:29",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.2",
+      "torch_version": "2.13.0+cu132",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "vllm": {
+      "ttft_ms": 1219.8029570281506,
+      "tpot_ms": -0.205553717472974,
+      "total_s": 1.1673867590725422,
+      "steps": 256,
+      "batch": 8,
+      "gen_tokens": 2048,
+      "tpot_p50_ms": 2.7559188906760776,
+      "ttft_p50_ms": 24.012099020183086,
+      "ttft_p99_ms": 31.551337540149685,
+      "tpot_p99_ms": 3.4237518233849724,
+      "tps": 1754.3457505266563,
+      "input_tokens": 253952,
+      "ignore_eos": true
+    }
+  }
+}

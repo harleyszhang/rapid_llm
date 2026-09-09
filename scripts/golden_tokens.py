@@ -35,7 +35,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rapid_llm import SamplingParams, TextGenerator
 from tests.golden.cases import (
     CASES,
-    CB_CASES,
     MAX_GPU_NUM_BLOCKS,
     MAX_SEQ_LEN,
     PENALTIES,

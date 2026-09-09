@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "model_dir": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "torch": "2.13.0+cu130",
+    "triton": "3.7.1",
+    "commit": "v0.10.0-17-g5c953b6",
+    "command": "benchmarks/engine/run.py quant --model-dir /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8 --schemes fp16 --kv-cache-dtype auto --tp 1 --dp 2 --cuda-graph --skip-hf --json docs/benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8-dp_20260901.json",
+    "batch": 4,
+    "max_gen_len": 64,
+    "date": "2026-09-01"
+  },
+  "rows": [
+    {
+      "config": "bf16+tp1+dp2+graph",
+      "model": "Qwen3-30B-A3B-Instruct-2507-FP8",
+      "ttft_ms": null,
+      "tpot_ms": null,
+      "tps": 559.1839107291241,
+      "total_s": 0.9156200494617224,
+      "gen_tokens": 512,
+      "batch": 8,
+      "peak_mem_gb": null,
+      "model_mem_gb": null,
+      "kv_cache_tokens": null,
+      "graph_installed": null,
+      "graph_replays": null,
+      "golden_match_rate": 0.8715277777777778,
+      "golden_prefix_rate": 0.8715277777777778,
+      "golden_exact": "19/26",
+      "token_match_rate": null,
+      "note": ""
+    }
+  ]
+}

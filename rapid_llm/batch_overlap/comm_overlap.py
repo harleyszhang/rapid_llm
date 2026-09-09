@@ -1,34 +1,23 @@
 """Compute-communication overlap: the C-axis plumbing shared by L2 and L3.
 
-:mod:`rapid_llm.batch_overlap.overlap` owns the host↔device axis (L1 uploads
-and readbacks); this module owns the compute↔communication one. Both policies
-that ride it stand on a single primitive — an all-reduce issued on a dedicated
-communication stream, fenced with events:
+:mod:`rapid_llm.batch_overlap.overlap` owns the host↔device axis; this module
+owns the compute↔communication one. Both policies stand on one primitive — an
+all-reduce on a dedicated comm stream, fenced with events:
 
-* **L3 (chunked all-reduce)** — :class:`CommOverlapPolicy` splits a
-  row-parallel GEMM's tokens into chunks; each chunk's all-reduce is posted on
-  the comm stream the moment its GEMM lands, so chunk ``k+1``'s GEMM computes
-  while chunk ``k``'s reduction is on the wire.
+* **L3** — :class:`CommOverlapPolicy` chunks a row-parallel GEMM's tokens, so
+  chunk ``k+1``'s GEMM computes while chunk ``k``'s all-reduce is on the wire.
 * **L2 (TBO)** — :func:`deferred_all_reduce` switches every
-  :class:`~rapid_llm.modules.linear.RowParallelLinear` inside the context to
-  *deferred* mode: the all-reduce is posted async and the caller fences on the
-  returned events where the data is actually consumed, which is what lets two
-  micro-batches ping-pong (see :mod:`rapid_llm.batch_overlap.two_batch_overlap`).
-
-:meth:`~rapid_llm.modules.linear.RowParallelLinear.forward` delegates to
-:func:`row_parallel_forward`, the single dispatch point: a world of one passes
-straight through, a deferred context defers, the L3 policy chunks, everything
-else blocks.
+  :class:`~rapid_llm.modules.linear.RowParallelLinear` in the context to
+  deferred mode: the all-reduce posts async, the caller fences where the data
+  is consumed — what lets two micro-batches ping-pong.
 
 Usage:
-    with deferred_all_reduce() as ctx:   # TBO mode
-        ...                               # RowParallelLinear forwards defer
-    # exit drains: outstanding events fenced on the compute stream
+    with deferred_all_reduce():          # TBO: RowParallelLinear forwards defer
+        ...                              # exit fences outstanding events
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -43,7 +32,9 @@ from ..distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from ..distributed.sequence_parallel import is_g_bar_boundary, row_parallel_g_bar
 from ..tools.observability import Collective, CollectiveStats
+from ..utils.env_compat import env_flag, getenv
 from ..utils.logger import get_logger
 from .overlap import Timeline
 
@@ -89,11 +80,10 @@ class CommOverlapPolicy:
     @classmethod
     def from_env(cls) -> CommOverlapPolicy:
         """Read ``RAPID_LLM_COMM_OVERLAP``; anything but ``0``/``false``/``off`` means on."""
-        raw = os.environ.get(COMM_OVERLAP_ENV, "0").strip().lower()
         return cls(
-            enabled=raw not in ("", "0", "false", "off"),
-            min_rows=int(os.environ.get(L3_MIN_ROWS_ENV, "512")),
-            chunks=max(2, int(os.environ.get(L3_CHUNKS_ENV, "2"))),
+            enabled=env_flag(COMM_OVERLAP_ENV),
+            min_rows=int(getenv(L3_MIN_ROWS_ENV, "512")),
+            chunks=max(2, int(getenv(L3_CHUNKS_ENV, "2"))),
         )
 
     def chunk_count(self, rows: int) -> int:
@@ -257,18 +247,14 @@ class CommStreamPool:
             CollectiveStats.record(Collective.ALL_REDUCE, payload)
             return None
         if torch.cuda.is_current_stream_capturing():
-            # Capture keeps the fork/join shape, not a flattened queue. While
-            # a capture is open PyTorch records kernels from *every* stream:
-            # a side stream that first waits an event the capture stream
-            # recorded becomes a branch of the graph, and the consumer's wait
-            # on the returned event becomes the join edge. Posting the
-            # collective on the capture stream itself would erase those edges
-            # — the graph would replay comm and compute strictly in issue
-            # order, and the overlap a TBO step exists to create would be
-            # gone. The fork itself is mandatory (an unordered side stream
-            # would race the capture stream), and the event is real: unlike
-            # eager, a capture cannot lean on the host to synchronise, only
-            # on the graph's own edges.
+            # Keep the fork/join shape during capture: PyTorch records kernels
+            # from every stream while a capture is open, so the comm stream's
+            # wait becomes a graph branch and the consumer's wait on the event
+            # the join edge. Posting on the capture stream itself would flatten
+            # those edges into strict issue order -- the overlap a TBO step
+            # exists to create. The fork is mandatory (an unordered side stream
+            # would race the capture stream) and the event is real: a capture
+            # cannot lean on the host to synchronise, only on graph edges.
             capture = torch.cuda.current_stream(self._device)
             comm = self.stream
             comm.wait_stream(capture)
@@ -464,24 +450,11 @@ class DeferredArContext:
 _deferred: ContextVar[DeferredArContext | None] = ContextVar(
     "rapid_llm_deferred_all_reduce", default=None
 )
-_skip_row_parallel_reduce: ContextVar[bool] = ContextVar(
-    "rapid_llm_skip_row_parallel_reduce", default=False
-)
 
 
 def current_deferred_ar() -> DeferredArContext | None:
     """The deferred-AR context this call site runs in, if any."""
     return _deferred.get()
-
-
-@contextmanager
-def skip_row_parallel_all_reduce() -> Iterator[None]:
-    """Expose a row-parallel partial to an explicit replacement collective."""
-    token = _skip_row_parallel_reduce.set(True)
-    try:
-        yield
-    finally:
-        _skip_row_parallel_reduce.reset(token)
 
 
 @contextmanager
@@ -532,13 +505,24 @@ def row_parallel_forward(layer: LinearBase, x: torch.Tensor) -> torch.Tensor:
 
     Args:
         layer: The row-parallel layer; only :meth:`apply_linear
-            <rapid_llm.modules.linear.LinearBase.apply_linear>` is called.
+            <rapid_llm.modules.linear.LinearBase.apply_linear>` is called, plus
+            its ``reduce_results`` flag.
         x: ``[..., input_size]`` activations — the leading dims are tokens.
     """
     world_size = get_tensor_model_parallel_world_size()
     rows = x.shape[:-1].numel()
-    if _skip_row_parallel_reduce.get():
+    # A layer built with ``reduce_results=False`` promised its caller the raw
+    # partial sum (it reduces elsewhere, or not at all); honour that here, since
+    # this dispatcher is the only place the flag can still be read.
+    if not getattr(layer, "reduce_results", True):
         return layer.apply_linear(x)
+    # Inside a sequence-parallel region a marked layer is the *g-bar* boundary:
+    # its partial is reduce-scattered to this rank's token shard, which replaces
+    # the all-reduce outright instead of rescheduling it. Ahead of the overlap
+    # modes because there is then nothing left for them to defer or chunk — and
+    # the region declined to open next to either of them in the first place.
+    if is_g_bar_boundary(layer):
+        return row_parallel_g_bar(layer, x)
     if x.device.type == "cpu" and _deferred.get() is None:
         return tensor_model_parallel_all_reduce(layer.apply_linear(x))
     mode = _dispatch_mode(world_size, _deferred.get() is not None, comm_overlap_policy(), rows)

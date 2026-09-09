@@ -218,7 +218,7 @@ python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                  
 
 ```bash
 # 全量复现（上表 14 个模型，含各量化路径与多模态的差异化参数）：
-PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_benchmark_suite.sh
+PYTHON=/home/honggao/projects/.venv/bin/python benchmarks/suites/run.py compare
 # 单模型：
 python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
     --batch-size 8 --gen-len 128 --iters 2      # 结果打印并存入 docs/benchmark_logs/*.json
@@ -296,6 +296,86 @@ rapid_llm 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录
 
 ![rapid_llm 流式输出](images/qwen2.5-3b-output.gif)
 
+#### 2×H100 80GB 复测（2026-09-08，short 128 / medium 4k / long 32k × 三方）
+
+新基准框架（sglang 式重构后的 `benchmarks/`）首次全模型套件：`bench_models.py` 预检/计划/编排，`bench_offline_throughput.py` 三方引擎臂（rapid_llm / transformers / vllm 0.28 跨 venv），RandomDataset 精确 token 长度（vLLM 同款 decode→re-encode 校正，三档零漂移），greedy、batch 8、iters 2。rapid_llm 按生产默认开三件套（CUDA graph + prefix cache + chunked prefill），完整 engine args 落 JSON。TTFT/TPOT 列为逐请求 p50/p99（transformers 为 batch 级均值，标 `*`）；TPS 两端口径一致可直接比。逐臂原始 JSON 与扩展点明细见 [benchmark_logs/models_suite_h100_20260908_125429.md](benchmark_logs/models_suite_h100_20260908_125429.md)。
+
+**Qwen2.5-0.5B-Instruct（bf16，TP1；long 档因 max_position_embeddings=32768 收缩为 31744 输入）**
+
+| 场景 | 引擎 | TTFT p50/p99 (ms) | TPOT p50/p99 (ms) | TPS (tok/s) |
+| --- | --- | ---: | ---: | ---: |
+| short | rapid_llm | 43.4/43.4 | 1.57/1.57 | 2775.4 |
+| short | transformers | 1014.0* | 15.58* | 171.0 |
+| short | vllm | 20.7/31.6 | 2.93/3.04 | 1974.7 |
+| medium | rapid_llm | 328.5/328.5 | 15.19/15.94 | 453.6 |
+| medium | transformers | 1068.2* | 41.19* | 162.6 |
+| medium | vllm | 19.2/22.8 | 1.91/2.07 | 3385.1 |
+| long | rapid_llm | 3438.6/3438.6 | 15.59/22.56 | 276.2 |
+| long | transformers | 2359.2* | 45.14* | 147.7 |
+| long | vllm | 24.0/31.6 | 2.76/3.42 | 1754.3 |
+
+DP2 扩展点（medium, 64 请求）：TP1 1342.1 / TP2 863.6（0.64×）/ DP2 2787.1（2.08×）
+
+**Qwen3-4B-Thinking-2507（bf16，TP1）**
+
+| 场景 | 引擎 | TTFT p50/p99 (ms) | TPOT p50/p99 (ms) | TPS (tok/s) |
+| --- | --- | ---: | ---: | ---: |
+| short | rapid_llm | 52.3/52.3 | 4.79/4.79 | 1274.5 |
+| short | transformers | 970.0* | 28.48* | 138.2 |
+| short | vllm | 24.6/40.1 | 4.04/4.04 | 1483.0 |
+| medium | rapid_llm | 905.2/905.2 | 25.40/29.59 | 217.1 |
+| medium | transformers | 1630.9* | 51.40* | 125.5 |
+| medium | vllm | 53.9/68.4 | 5.60/5.92 | 1217.1 |
+| long | rapid_llm | 21764.3/21764.3 | 30.18/100.27 | 69.5 |
+| long | transformers | 10344.0* | 80.87* | 66.1 |
+| long | vllm | 35.9/39.1 | 16.29/16.50 | 435.6 |
+
+DP2 扩展点：TP1 580.7 / TP2 487.3（0.84×）/ DP2 1039.6（1.79×）。4B long 的 transformers 臂套件内因 caching-allocator 碎片 OOM，以 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 补跑成功（表内即补跑值，arm JSON `retried` 字段有标注）。
+
+**Qwen3-30B-A3B-Instruct-2507（bf16，61.1GB；long 档 KV+权重超单卡切 TP2，其余 TP1）**
+
+| 场景 | 引擎 | TP | TTFT p50/p99 (ms) | TPOT p50/p99 (ms) | TPS (tok/s) |
+| --- | --- | --- | ---: | ---: | ---: |
+| short | rapid_llm | 1 | 88.1/88.1 | 9.95/9.95 | 645.5 |
+| short | transformers | 1 | 1293.9* | 91.57* | 61.9 |
+| short | vllm | 1 | 21.2/29.1 | 9.14/9.14 | 803.5 |
+| medium | rapid_llm | 1 | 1325.4/1325.4 | 48.74/98.20 | 102.7 |
+| medium | transformers | 1 | 2241.5* | 121.04* | 58.1 |
+| medium | vllm | 1 | 21.9/33.7 | 8.82/8.95 | 825.0 |
+| long | rapid_llm | 2 | 19001.5/19001.5 | 76.00/124.82 | 53.3 |
+| long | transformers | 2 | OOM | OOM | — |
+| long | vllm | 2 | 17.4/21.5 | 10.02/10.18 | 646.1 |
+
+TP2+EP2 A/B（long）：53.3 → 33.4 tok/s（0.63×，batch 8 下 all-to-all 开销超过专家并行收益；EP 归属 `bench_expert_parallel` 特性 A/B）。
+
+**Qwen3-30B-A3B-Instruct-2507-FP8（fp8，31.2GB，TP1；transformers 无原生 fp8 加载，计划内单侧）**
+
+| 场景 | 引擎 | TTFT p50/p99 (ms) | TPOT p50/p99 (ms) | TPS (tok/s) |
+| --- | --- | ---: | ---: | ---: |
+| short | rapid_llm | 92.6/92.6 | 10.34/10.34 | 619.5 |
+| short | vllm | 21.6/32.3 | 6.78/6.78 | 1019.1 |
+| medium | rapid_llm | 1999.1/1999.1 | 52.54/103.71 | 88.9 |
+| medium | vllm | 29.9/40.0 | 6.82/7.14 | 1038.1 |
+| long | rapid_llm | 34202.8/34202.8 | 53.91/163.37 | 42.7 |
+| long | vllm | 35.1/38.7 | 14.27/14.40 | 485.4 |
+
+DP2 扩展点：TP1 245.9 / TP2 254.6（1.04×）/ DP2 518.5（2.11×）。
+
+读法（详细分析见汇总 md）：
+
+- **short 档 rapid_llm 0.5B 夺冠（1.41×）**：小上下文 decode graph 全程 replay（71 次），TPOT 1.57 ms 低于 vllm 的 2.93 ms；4B/30B short 档与 vllm 差距 0.80–0.86×。
+- **medium/long 档 rapid_llm TPOT 恶化 3–8×，根因是 decode graph 按 `seq_len_buckets=(…,4096)` 封顶**：context 超 4096 即回退 eager（medium 档仅 replay 2 次、long 档 0 次），0.5B medium TPOT 15.19 ms 是 launch 开销主导的 eager decode——vllm 同负载 1.91 ms。这是本轮套件发现的首要引擎优化点（扩大/解耦 seq_len buckets 或 decode-only graph），本次按约定不改引擎仅记录。TPOT p99/p50 比值同源：rapid_llm long 档 1.6–3.3×，vllm 仅 1.02–1.24×。
+- **TTFT 不可跨引擎直比**：vllm 逐请求 TTFT 在 chunked prefill 下是首 chunk 延迟（故 long 档 vllm "TTFT" 反而低于 short 档），rapid_llm 表内为全 prefill 完成的 1-token 轮批量口径；TPS/TPOT p50/p99 可比。
+- **DP2 干净扩展 1.79×–2.11×；TP2 在单卡放得下的模型上全负收益（0.64×/0.84×/1.04×）**——TP 只当显存开关，与计划决策一致；30B bf16 long 切 TP2 后 rapid_llm/vllm 均可跑（KV 25.9GB 超单卡预算），transformers 则本质 OOM（权重/TP+KV/TP+MoE permute ≈ 75GB+ > 79GB，reserved-unallocated 仅 564MB，非碎片）。
+- skip 清单（qwen3_5(_moe) 不支持、顶层 30B 不完整分片、compressed-tensors 无 loader、DeepSeek-V4 超预算、Wan2.2 非 LLM）与运行注记（臂间显存排空、accelerate、expandable_segments）见汇总 md。
+
+复现：
+
+```bash
+python benchmarks/suites/run.py models --dry-run   # 打印将执行的完整命令
+python benchmarks/suites/run.py models             # 全套实跑（tee 到 docs/benchmark_logs/）
+```
+
 ### eager vs CUDA graph（benchmarks/bench_e2e.py）
 
 **测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/bench_e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
@@ -325,8 +405,8 @@ rapid_llm 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录
 复现（套件脚本一次跑全矩阵，产出同口径 JSON；解释器要有能跑 CUDA 的 torch 构建—项目 `.venv` 若装了比驱动新的 cu 版本，脚本预检会拦下并提示换 `PYTHON=`）：
 
 ```bash
-./benchmarks/run_e2e_suite.sh /tmp/e2e                        # 全部模型
-PYTHON=/home/honggao/projects/.venv/bin/python ./benchmarks/run_e2e_suite.sh
+python benchmarks/suites/run.py e2e --out /tmp/e2e             # 全部模型
+PYTHON=/home/honggao/projects/.venv/bin/python benchmarks/suites/run.py e2e
 .venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-14B-AWQ \
     --greedy --mode both --json out.json                     # 单模型
 PYTHONPATH=. python benchmarks/bench_e2e.py \

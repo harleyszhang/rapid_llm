@@ -81,7 +81,7 @@ def test_smoke() -> None:
         print(
             f"rank {rank}: peak {r['peak_gib']:.2f} GiB | "
             f"prefill mean {r['prefill_mean']:.4f} std {r['prefill_std']:.4f} "
-            f"top5 {['%.3f' % v for v in r['prefill_top5']]} | "
+            f"top5 {[f'{v:.3f}' for v in r['prefill_top5']]} | "
             f"decode mean {r['decode_mean']:.4f} std {r['decode_std']:.4f}"
         )
     # The head is vocabulary-parallel: each rank's statistics describe a

@@ -278,7 +278,7 @@ class CliCommand(ABC):
         sub.set_defaults(handler=self)
         return sub
 
-    def add_arguments(self, sub: argparse.ArgumentParser) -> None:  # noqa: B027 -- opt-in hook
+    def add_arguments(self, sub: argparse.ArgumentParser) -> None:  # noqa: B027
         """注册命令特有参数;默认无。"""
 
     @staticmethod

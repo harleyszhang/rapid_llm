@@ -35,7 +35,13 @@ _TP_GROUP: dist.ProcessGroup | None = None
 _TP_CPU_GROUP: dist.ProcessGroup | None = None
 _DP_RANK: int = 0
 _DP_WORLD_SIZE: int = 1
+_DP_GROUP: dist.ProcessGroup | None = None
+_DP_CPU_GROUP: dist.ProcessGroup | None = None
+_DP_ATTENTION: bool = False
 _EP_ENABLED: bool = False
+_EP_GROUP: dist.ProcessGroup | None = None
+_EP_RANK: int = 0
+_EP_WORLD_SIZE: int = 1
 
 
 def grid_coordinates(global_rank: int, tp_size: int, dp_size: int) -> tuple[int, int]:
@@ -75,16 +81,29 @@ def init_parallel(
     master_port: int = 29500,
     backend: str | None = None,
     enable_expert_parallel: bool = False,
+    enable_dp_attention: bool = False,
 ) -> None:
     """Place this process in the ``dp_size x tp_size`` rank grid.
 
     The coordinates come from :func:`grid_coordinates`, so a caller only has to hand
-    out consecutive global ranks. A process group is created only when ``tp_size > 1``
-    — DP replicas share no tensors, so for pure DP there is nothing to rendezvous about
-    and NCCL is never touched.
+    out consecutive global ranks. Which groups get built depends on what the DP axis
+    *means*:
 
-    Note that with ``tp_size > 1`` this call *blocks* until all ``tp_size * dp_size``
-    ranks have joined: that is what ``init_process_group`` means.
+    * **Replica DP** (the default): each replica is a whole, independent model and
+      the replicas share no tensors, so there is nothing to rendezvous about across
+      the DP axis and NCCL is never touched — with ``tp_size == 1`` this call does
+      not touch ``torch.distributed`` at all.
+    * **DP-attention** (``enable_dp_attention``, vLLM's ``data_parallel_size`` with
+      ``enable_expert_parallel``): the replicas hold *one* model between them. Each
+      DP rank keeps a full copy of the attention weights and its own KV cache, so
+      attention stays local and needs no collective; the MoE stage then pools every
+      rank's tokens, which means the DP axis needs a group of its own *and* the EP
+      group has to span the whole ``dp_size x tp_size`` grid rather than one
+      replica's TP group. That is vLLM's topology, where the TP group is
+      ``all_ranks.view(-1, tp)`` and the EP group is the DP/TP transpose flattened.
+
+    Note that once any group is built this call *blocks* until all
+    ``tp_size * dp_size`` ranks have joined: that is what ``init_process_group`` means.
 
     Args:
         global_rank: This process's rank in ``[0, tp_size * dp_size)``.
@@ -94,23 +113,40 @@ def init_parallel(
         backend: ``torch.distributed`` backend; ``None`` picks ``nccl`` on a machine
             with GPUs and ``gloo`` without, which is what lets the sharded layers and
             the vocabulary-parallel sampler be verified on CPU.
+        enable_expert_parallel: Whether MoE experts split whole-expert across the EP
+            group instead of being sliced along their intermediate dimension.
+        enable_dp_attention: Whether the DP axis is a shard of one model (see above)
+            rather than a set of independent replicas. Ignored when ``dp_size == 1``,
+            where the two are the same topology.
 
     Raises:
         ValueError: If the sizes are not positive, or ``global_rank`` falls outside
             the grid.
     """
     global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
-    global _EP_ENABLED
+    global _DP_GROUP, _DP_CPU_GROUP, _DP_ATTENTION
+    global _EP_ENABLED, _EP_GROUP, _EP_RANK, _EP_WORLD_SIZE
 
     _DP_RANK, _TP_RANK = grid_coordinates(global_rank, tp_size, dp_size)
     _DP_WORLD_SIZE = dp_size
     _TP_WORLD_SIZE = tp_size
     _EP_ENABLED = enable_expert_parallel
-    if tp_size <= 1:
+    _DP_ATTENTION = enable_dp_attention and dp_size > 1
+    world_size = tp_size * dp_size
+    # How wide the expert split is: over one replica's TP group by default, over
+    # the whole grid under DP-attention — which is the point of pairing the two.
+    # The flag alone never implies a distributed path; a world of one answers 1.
+    if not _EP_ENABLED:
+        _EP_RANK, _EP_WORLD_SIZE = 0, 1
+    elif _DP_ATTENTION:
+        _EP_RANK, _EP_WORLD_SIZE = global_rank, world_size
+    else:
+        _EP_RANK, _EP_WORLD_SIZE = _TP_RANK, _TP_WORLD_SIZE
+    if tp_size <= 1 and not _DP_ATTENTION:
+        _EP_RANK, _EP_WORLD_SIZE = 0, 1
         return
 
     backend = backend or ("nccl" if torch.cuda.is_available() else "gloo")
-    world_size = tp_size * dp_size
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(master_port))
     os.environ.setdefault("NCCL_GRAPH_MIXING_SUPPORT", "1")
@@ -118,25 +154,58 @@ def init_parallel(
     if not dist.is_initialized():
         dist.init_process_group(backend=backend, rank=global_rank, world_size=world_size)
 
-    for replica in range(dp_size):
-        members = list(range(replica * tp_size, (replica + 1) * tp_size))
-        group = dist.new_group(members, backend=backend)
-        # A second, CPU-backed group over the same ranks carries the *control*
-        # plane: :func:`tensor_model_parallel_broadcast_object_list` ships pickled
-        # plans, and nccl can only move device memory, so it would have to stage
-        # every plan through the GPU. gloo sends the bytes straight from host memory.
-        cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
-        if replica == _DP_RANK:
-            _TP_GROUP = group
-            _TP_CPU_GROUP = cpu_group
+    # ``new_group`` is itself collective: every rank must build every group, in
+    # the same order, even the ones it is not a member of. Hence the loops.
+    if tp_size > 1:
+        for replica in range(dp_size):
+            members = list(range(replica * tp_size, (replica + 1) * tp_size))
+            group = dist.new_group(members, backend=backend)
+            # A second, CPU-backed group over the same ranks carries the *control*
+            # plane: :func:`tensor_model_parallel_broadcast_object_list` ships pickled
+            # plans, and nccl can only move device memory, so it would have to stage
+            # every plan through the GPU. gloo sends the bytes straight from host memory.
+            cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
+            if replica == _DP_RANK:
+                _TP_GROUP = group
+                _TP_CPU_GROUP = cpu_group
+
+    if _DP_ATTENTION:
+        # The DP axis is the *stride* through the grid: rank ``lane`` of every
+        # replica forms one group, which is vLLM's transpose of the (DP, TP)
+        # plane. Peers in a DP group hold identical shards of the weights and
+        # differ only in which requests they are serving.
+        for lane in range(tp_size):
+            members = list(range(lane, world_size, tp_size))
+            group = dist.new_group(members, backend=backend)
+            # The lockstep handshake (how many tokens each rank brings to this
+            # step) is host-side control, so it wants gloo for the same reason
+            # the plan broadcast does.
+            cpu_group = group if backend == "gloo" else dist.new_group(members, backend="gloo")
+            if lane == _TP_RANK:
+                _DP_GROUP = group
+                _DP_CPU_GROUP = cpu_group
+
+    if _EP_ENABLED:
+        # Without DP-attention EP is a mode over the TP grid, not a new
+        # rendezvous: the same ranks that all-reduce attention partials exchange
+        # MoE tokens, so the group object is literally shared. With it, the
+        # experts spread over every rank in the grid and need their own group.
+        _EP_GROUP = (
+            dist.new_group(list(range(world_size)), backend=backend)
+            if _DP_ATTENTION
+            else _TP_GROUP
+        )
+
     _log.info(
-        "parallel state: global rank %d/%d (dp %d/%d, tp %d/%d)",
+        "parallel state: global rank %d/%d (dp %d/%d, tp %d/%d)%s%s",
         global_rank,
         world_size,
         _DP_RANK,
         dp_size,
         _TP_RANK,
         tp_size,
+        ", dp-attention" if _DP_ATTENTION else "",
+        f", ep {_EP_RANK}/{_EP_WORLD_SIZE}" if _EP_ENABLED else "",
     )
 
 
@@ -171,15 +240,9 @@ def init_tensor_parallel(
 
 def destroy_parallel() -> None:
     """Tear down the process group and reset the grid to a world of one."""
-    global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
-    if _TP_GROUP is not None:
+    if _TP_GROUP is not None or _DP_GROUP is not None:
         dist.destroy_process_group()
-    _TP_RANK = 0
-    _TP_WORLD_SIZE = 1
-    _TP_GROUP = None
-    _TP_CPU_GROUP = None
-    _DP_RANK = 0
-    _DP_WORLD_SIZE = 1
+    _reset_grid()
 
 
 def abandon_parallel() -> None:
@@ -190,13 +253,27 @@ def abandon_parallel() -> None:
     in a futex no rank can wake — a PyTorch/NCCL interaction, not something this
     module can unstick from inside the call.
     """
+    _reset_grid()
+
+
+def _reset_grid() -> None:
+    """Return every module-level coordinate to its single-process default."""
     global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
+    global _DP_GROUP, _DP_CPU_GROUP, _DP_ATTENTION
+    global _EP_ENABLED, _EP_GROUP, _EP_RANK, _EP_WORLD_SIZE
     _TP_RANK = 0
     _TP_WORLD_SIZE = 1
     _TP_GROUP = None
     _TP_CPU_GROUP = None
     _DP_RANK = 0
     _DP_WORLD_SIZE = 1
+    _DP_GROUP = None
+    _DP_CPU_GROUP = None
+    _DP_ATTENTION = False
+    _EP_ENABLED = False
+    _EP_GROUP = None
+    _EP_RANK = 0
+    _EP_WORLD_SIZE = 1
 
 
 def destroy_tensor_parallel() -> None:
@@ -244,7 +321,7 @@ def get_tensor_model_parallel_group() -> dist.ProcessGroup | None:
 
 
 def expert_parallel_enabled() -> bool:
-    """Whether MoE experts split whole-expert across this replica's ranks.
+    """Whether MoE experts split whole-expert across the EP group.
 
     The flag alone does not imply a distributed EP path: a world of one (or a
     TP-disabled process) answers ``True`` here but :func:`get_ep_world_size`
@@ -253,24 +330,49 @@ def expert_parallel_enabled() -> bool:
     return _EP_ENABLED
 
 
-def get_ep_group() -> dist.ProcessGroup | None:
-    """The EP process group — the TP group when EP is enabled, else ``None``.
+def dp_attention_enabled() -> bool:
+    """Whether the DP axis shards one model rather than holding whole replicas.
 
-    EP is a mode over the TP grid, not a new rendezvous: the same ranks that
-    all-reduce attention partials exchange MoE tokens, so the group object is
-    literally shared.
+    ``True`` only when ``init_parallel`` was asked for DP-attention *and* there is
+    more than one replica — with ``dp_size == 1`` the two topologies coincide, so
+    every DP-attention branch in the codebase can stay off.
     """
-    return _TP_GROUP if _EP_ENABLED else None
+    return _DP_ATTENTION
+
+
+def get_data_parallel_group() -> dist.ProcessGroup | None:
+    """The DP process group under DP-attention, else ``None``.
+
+    Its members are the ranks holding the *same* weight shard for different
+    requests — rank ``tp_rank`` of every replica. ``None`` for replica-level DP,
+    where by construction there is nothing to say across the axis.
+    """
+    return _DP_GROUP
+
+
+def get_data_parallel_cpu_group() -> dist.ProcessGroup | None:
+    """The gloo twin of :func:`get_data_parallel_group`, for the token handshake."""
+    return _DP_CPU_GROUP
+
+
+def get_ep_group() -> dist.ProcessGroup | None:
+    """The EP process group, or ``None`` when EP is off.
+
+    One replica's TP group for plain EP; the whole ``dp_size x tp_size`` grid
+    under DP-attention, which is what lets ``dp2 x tp2`` host a 4-way expert
+    split instead of two independent 2-way ones.
+    """
+    return _EP_GROUP if _EP_ENABLED else None
 
 
 def get_ep_rank() -> int:
-    """This process's rank within the EP group (its TP rank; 0 when EP is off)."""
-    return _TP_RANK if _EP_ENABLED else 0
+    """This process's rank within the EP group (0 when EP is off)."""
+    return _EP_RANK
 
 
 def get_ep_world_size() -> int:
-    """Number of ranks experts split across (the TP world size; 1 when EP is off)."""
-    return _TP_WORLD_SIZE if _EP_ENABLED else 1
+    """Number of ranks experts split across (1 when EP is off)."""
+    return _EP_WORLD_SIZE
 
 
 def divide(a: int, b: int, what: str = "") -> int:
@@ -357,6 +459,52 @@ def tensor_model_parallel_all_gather(tensor: torch.Tensor, dim: int = -1) -> tor
     dist.all_gather(parts, tensor, group=_TP_GROUP)
     CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
     return torch.cat(parts, dim=dim)
+
+
+def data_parallel_all_gather(
+    tensor: torch.Tensor, dim: int = 0, *, group: dist.ProcessGroup | None = None
+) -> torch.Tensor:
+    """Concatenate every DP peer's ``tensor`` along ``dim``, rank order.
+
+    The DP-attention pooling primitive. Attention ran on this rank's slice of the
+    batch, so the MoE stage only holds ``1/dp`` of the step's tokens; gathering
+    them is what lets one expert exchange carry the whole global batch, and it is
+    also the only reason a DP group exists. Every rank must pass the same shape,
+    which is what the lockstep padding in
+    :mod:`rapid_llm.distributed.dp_attention` is for.
+
+    Args:
+        tensor: This rank's contribution.
+        dim: Axis to concatenate along (0 — the token axis — for hidden states).
+        group: Defaults to the DP group; pass the CPU twin for control traffic.
+
+    Returns:
+        ``tensor`` itself when the DP axis holds one rank.
+    """
+    group = _DP_GROUP if group is None else group
+    if group is None or dist.get_world_size(group) <= 1:
+        return tensor
+    tensor = tensor.contiguous()
+    parts = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(parts, tensor, group=group)
+    CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
+    return torch.cat(parts, dim=dim)
+
+
+def data_parallel_all_reduce(
+    tensor: torch.Tensor, op: dist.ReduceOp = dist.ReduceOp.SUM
+) -> torch.Tensor:
+    """Reduce ``tensor`` across the DP group in place. No-op without DP-attention.
+
+    Carries the *decisions* the DP ranks have to take together — how many tokens
+    this step pads to, whether any rank still has unfinished work — rather than
+    activations, so it is a handful of ints per step.
+    """
+    if _DP_GROUP is None or dist.get_world_size(_DP_GROUP) <= 1:
+        return tensor
+    dist.all_reduce(tensor, op=op, group=_DP_GROUP)
+    CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
+    return tensor
 
 
 def reduce_scatter(

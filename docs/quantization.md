@@ -126,7 +126,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 > 复现（同口径重跑，A10 或任意设备）：
 >
 > ```bash
-> python benchmarks/bench_quant.py --model-dir <Qwen3-0.6B> \
+> python benchmarks/engine/run.py quant --model-dir <Qwen3-0.6B> \
 >     --schemes fp16 int8 int8-blockwise fp8 smoothquant \
 >     --batch 4 --max-gen 64 --cuda-graph --json out.json   # HF 基线行去掉 --skip-hf
 > ```
@@ -171,7 +171,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 - 同 checkpoint 在 A10×2（22 GiB、TP2 eager 旧口径）TPOT 82.77 ms / TPS 48.3——H100 单卡 graph 是它的 5.9×。
 
 > Model Mem 为全 replica 权重总量（rank 0 分片 × TP）；KV Capacity 为每卡容量（KV 按 TP 切分后同一数字即 replica 的 token 容量）。
-> 复现：`python benchmarks/bench_quant.py --model-dir <Qwen3-30B-A3B-Instruct-2507-FP8> --schemes fp16 --kv-cache-dtype auto fp8 --tp 1 2 --cuda-graph --no-cuda-graph --skip-hf --json docs/benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8_20260901.json`；DP 行另跑 `--tp 1 --dp 2 --cuda-graph`；golden 基线：`python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-2507-FP8.json --model-dir <...>`。
+> 复现：`python benchmarks/engine/run.py quant --model-dir <Qwen3-30B-A3B-Instruct-2507-FP8> --schemes fp16 --kv-cache-dtype auto fp8 --tp 1 2 --cuda-graph --no-cuda-graph --skip-hf --json docs/benchmark_logs/bench_quant_Qwen3-30B-A3B-FP8_20260901.json`；DP 行另跑 `--tp 1 --dp 2 --cuda-graph`；golden 基线：`python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-2507-FP8.json --model-dir <...>`。
 > e2e 指标见 [`benchmark_models.md`](benchmark_models.md)；量化 kernel 精度回归：`python -m pytest tests/kernels/test_fused_moe.py -k fp8`（fp16 与 bf16 激活各一例，对 fp32 反量化参考）
 
 ### 未覆盖的 FP8 checkpoint
@@ -370,7 +370,7 @@ kernel 级的收益要在 e2e 上兑现。第四轮代码对 modelzoo 全部可�
 - **设备：sm90 门槛，A10 恢复实测旧表。** 三个 8-bit kernel 的 launcher 加 `sm_version` 门槛（缓存查询，`has_native_fp8` 同源）：sm90+ 用 H100 表，pre-Hopper 回到被第三次重扫替换掉的 A10 表（sm86 实测，三个 kernel 当年同一张）。`EPILOGUE_SCALE` 同步 gate 到 sm90——A10 保持其 tile 表被测量时的 in-loop kernel 形态，而非未经实测的 epilogue 组合。
 - **shape：检验后否定。** 五个投影（N=1536–19456）按窄（≤2560）/宽（≥6144）分组重析：三个 8-bit kernel 每档两组的 geomean-best 都是同一配置（fp8/w8a8）或差在噪声内（w8a16）——`n` 不是选表的有效输入，这个否定结论写进了 launcher docstring，避免后人重走一遍。
 
-控制行验证（fp8 W8A8、w8a16 fp8 block-scale、smoothquant——本轮未动路径）见 [`bench_quant_gemm_h100_20260903e.json`](benchmark_logs/bench_quant_gemm_h100_20260903e.json) 对 [`..._20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1）；负载：int8 per-channel 补扫 1360 候选（五投影 × 五档，与 launcher 同 EPILOGUE_SCALE 分档），launcher 级 A/B 25 个测试点。复现：kernel 级 `RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`；e2e 级 `python benchmarks/bench_quant.py --model-dir <ckpt> --schemes int8 --cuda-graph --no-cuda-graph`（int8 per-channel 即 `--quantization int8` 路径）。
+控制行验证（fp8 W8A8、w8a16 fp8 block-scale、smoothquant——本轮未动路径）见 [`bench_quant_gemm_h100_20260903e.json`](benchmark_logs/bench_quant_gemm_h100_20260903e.json) 对 [`..._20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)。测量环境：NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1）；负载：int8 per-channel 补扫 1360 候选（五投影 × 五档，与 launcher 同 EPILOGUE_SCALE 分档），launcher 级 A/B 25 个测试点。复现：kernel 级 `RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --json out.json`；e2e 级 `python benchmarks/engine/run.py quant --model-dir <ckpt> --schemes int8 --cuda-graph --no-cuda-graph`（int8 per-channel 即 `--quantization int8` 路径）。
 
 ### 量化为什么常常比 bf16 慢：roofline 判断
 
@@ -405,7 +405,7 @@ decode graph 过去在 `tp_world_size > 1` 时一律拒绝。现在它们会被�
 测于 2× NVIDIA H100 80GB HBM3（torch 2.13.0+cu130 / triton 3.7.1，2026-09-01），Qwen3-4B-Thinking-2507，`fp8+tp2+graph`：77 次 replay，每 rank 权重 2.06 GB（tp1 为 4.11 GB），KV 容量 955,832 token（对 465,750）——省下的权重显存变成了缓存。这个模型的吞吐*低于* tp1（622 vs 664 tok/s）：4B 时每步 all-reduce 的代价超过第二张卡算力的收益。这里的 TP 是容量特性，不是速度特性。负载：batch 8，max_gen_len=256，greedy；日志：[`bench_quant_Qwen3-4B-Thinking-2507_h100_20260901.json`](benchmark_logs/) 同批次的 quant 矩阵运行（quant_matrix_20260901.md §3）。复现：
 
 ```bash
-python benchmarks/bench_quant.py --model-dir <Qwen3-4B-Thinking-2507> \
+python benchmarks/engine/run.py quant --model-dir <Qwen3-4B-Thinking-2507> \
     --schemes fp8 --tp 2 --cuda-graph --skip-hf --json out.json
 python -m pytest tests/distributed/test_tp_cuda_graph.py   # TP×graph×quant 交叉验证门
 ```
@@ -464,14 +464,14 @@ python scripts/quant_kv_error.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-
 
 ```bash
 # 单模型 + 指定方案
-python benchmarks/bench_quant.py --model-dir /data/shared/llm_weights/Qwen3-0.6B \
+python benchmarks/engine/run.py quant --model-dir /data/shared/llm_weights/Qwen3-0.6B \
     --schemes fp16 int8 fp8
 
 # 全部代表性模型（plan 子集）
-python benchmarks/bench_quant.py --all
+python benchmarks/engine/run.py quant --all
 
 # 输出 JSON 供 CI 跟踪
-python benchmarks/bench_quant.py --model-dir ... --json results.json
+python benchmarks/engine/run.py quant --model-dir ... --json results.json
 ```
 
 ## 视觉-语言模型支持

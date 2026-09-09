@@ -1,0 +1,164 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen/Qwen2.5-0.5B-Instruct",
+    "batch_sizes": [
+      1,
+      2,
+      4
+    ],
+    "input_len": 128,
+    "output_len": 32,
+    "iters": 2,
+    "max_seq_len": 0,
+    "engine_args": {
+      "enable_prefix_cache": true
+    },
+    "seed": 42,
+    "gpu": "h100",
+    "timestamp": "2026-09-08T11:07:40",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "graph": {
+      "1": {
+        "ttft_ms": 18.160386011004448,
+        "tpot_ms": 1.3515067206123683,
+        "total_s": 0.18993268348276615,
+        "steps": 128,
+        "batch": 1,
+        "gen_tokens": 128,
+        "tpot_p50_ms": 1.3515067206123683,
+        "ttft_p50_ms": 18.160386011004448,
+        "ttft_p99_ms": 18.160386011004448,
+        "tpot_p99_ms": 1.3515067206123683,
+        "tps": 673.9229797256789,
+        "steady_state_output_tps": 739.9149295734908,
+        "texts": [
+          "\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u4f7f\u7528\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u6765\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u901a\u5e38\u4f7f\u7528\u5927\u5199\u82f1\u6587\u5b57\u6bcd\u4f5c\u4e3a\u62fc\u97f3\u7684\u9996\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u4f8b\u5982\uff0c\u6c49\u5b57\u201c\u9a6c\u201d\u5728\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u4e2d\u662f\u201cM\u01ce\u201d\u3002\n\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u3002\u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u770b\u5230\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u662f\u5927\u5199\u82f1\u6587\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\n2. \u63a5\u4e0b\u6765"
+        ]
+      },
+      "2": {
+        "ttft_ms": 28.244586661458015,
+        "tpot_ms": 1.449485404754248,
+        "total_s": 0.21323680318892002,
+        "steps": 129,
+        "batch": 2,
+        "gen_tokens": 256,
+        "tpot_p50_ms": 1.449485404754248,
+        "ttft_p50_ms": 28.244586661458015,
+        "ttft_p99_ms": 35.94185870140791,
+        "tpot_p99_ms": 1.5037066116929052,
+        "tps": 1200.5432278648136,
+        "steady_state_output_tps": 1381.8133237876573,
+        "texts": [
+          "\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u4f7f\u7528\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u6765\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u901a\u5e38\u4f7f\u7528\u5927\u5199\u82f1\u6587\u5b57\u6bcd\u4f5c\u4e3a\u62fc\u97f3\u7684\u9996\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u4f8b\u5982\uff0c\u6c49\u5b57\u201c\u9a6c\u201d\u5728\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u4e2d\u662f\u201cM\u01ce\u201d\u3002\n\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u3002\u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u770b\u5230\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u662f\u5927\u5199\u82f1\u6587\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\n2. \u63a5\u4e0b\u6765",
+          "%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^"
+        ]
+      },
+      "4": {
+        "ttft_ms": 41.5898934006691,
+        "tpot_ms": 1.535947859932588,
+        "total_s": 0.2376524992287159,
+        "steps": 129,
+        "batch": 4,
+        "gen_tokens": 512,
+        "tpot_p50_ms": 1.535915080311261,
+        "ttft_p50_ms": 41.5898934006691,
+        "ttft_p99_ms": 49.500156193971634,
+        "tpot_p99_ms": 1.5915402674710188,
+        "tps": 2154.40612516872,
+        "steady_state_output_tps": 2607.6390432623407,
+        "texts": [
+          "\ufffd\u6710\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u5217\u8868\uff0c\u6211\u4eec\u53ef\u4ee5\u770b\u5230\u201c\u979b\u201d\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u201ck\u0113ng\u201d\u3002\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u8ba4\u201c\u979b\u201d\u8fd9\u4e2a\u6c49\u5b57\u5728\u5b57\u5178\u4e2d\u7684\u62fc\u97f3\u3002\u6839\u636e\u5b57\u5178\uff0c\"\u979b\"\u7684\u62fc\u97f3\u662f\u201ck\u0113ng\u201d\u3002\n2. \u7136\u540e\uff0c\u6211\u4eec\u9700\u8981\u786e\u8ba4\u8fd9\u4e2a\u62fc\u97f3\u662f\u5426\u7b26\u5408\u9898\u76ee\u8981\u6c42\u3002\u9898\u76ee\u8981\u6c42\u63d0\u4f9b\u6c49\u5b57\u7684\u62fc\u97f3\uff0c\u800c\u6211\u4eec\u5df2\u7ecf\u786e\u8ba4\u4e86\u201c\u979b\u201d\u7684\u62fc\u97f3\u662f\u201ck\u0113ng\u201d\uff0c\u56e0\u6b64\u8fd9\u4e2a",
+          "%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^",
+          "\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e",
+          "\u0e15\u0e23\u7684 2020 2021 2022 2023 2024 2025 2026 2027 2028 2029 2030 2031 2032 2033 2034 2035 2036 2037 2038 2039 2040 2041 2042 2043 2044 "
+        ]
+      },
+      "footprint": {
+        "model_mem_gb": 0.9202077388763428,
+        "kv_cache_tokens": 5853772,
+        "graph_installed": true,
+        "graph_replays": 793
+      }
+    },
+    "eager": {
+      "1": {
+        "ttft_ms": 17.169147729873657,
+        "tpot_ms": 17.63991446886945,
+        "total_s": 2.257582552731037,
+        "steps": 128,
+        "batch": 1,
+        "gen_tokens": 128,
+        "tpot_p50_ms": 17.63991446886945,
+        "ttft_p50_ms": 17.169147729873657,
+        "ttft_p99_ms": 17.169147729873657,
+        "tpot_p99_ms": 17.63991446886945,
+        "tps": 56.69781592046597,
+        "steady_state_output_tps": 56.68961727477642,
+        "texts": [
+          "\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u4f7f\u7528\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u6765\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u901a\u5e38\u4f7f\u7528\u5927\u5199\u82f1\u6587\u5b57\u6bcd\u4f5c\u4e3a\u62fc\u97f3\u7684\u9996\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u4f8b\u5982\uff0c\u6c49\u5b57\u201c\u9a6c\u201d\u5728\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u4e2d\u662f\u201cM\u01ce\u201d\u3002\n\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u3002\u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u6211\u4eec\u53ef\u4ee5\u770b\u5230\u6c49\u5b57\u7684\u62fc\u97f3\u7f16\u7801\u7cfb\u7edf\u662f\u5927\u5199\u82f1\u6587\u5b57\u6bcd\uff0c\u7136\u540e\u662f\u6c49\u5b57\u7684\u62fc\u97f3\u3002\n2. \u63a5\u4e0b\u6765"
+        ]
+      },
+      "2": {
+        "ttft_ms": 19.428666681051254,
+        "tpot_ms": 15.763553490084927,
+        "total_s": 2.021540105342865,
+        "steps": 128,
+        "batch": 2,
+        "gen_tokens": 256,
+        "tpot_p50_ms": 15.763553490084927,
+        "ttft_p50_ms": 19.428666681051254,
+        "ttft_p99_ms": 19.428666681051254,
+        "tpot_p99_ms": 15.763837273899965,
+        "tps": 126.63612229280056,
+        "steady_state_output_tps": 126.87494618094092,
+        "texts": [
+          "\ufffd\u6710\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u53ef\u4ee5\u63a8\u65ad\u51fa\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u201cy\u00f9\u201d\u3002\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u8fd9\u4e2a\u6c49\u5b57\u7684\u7b14\u753b\u6570\u3002\u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u8fd9\u4e2a\u6c49\u5b57\u5171\u670910\u4e2a\u7b14\u753b\u3002\n\n2. \u63a5\u4e0b\u6765\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u6839\u636e\u6c49\u5b57\u7684\u62fc\u97f3\u89c4\u5219\uff0c\u6c49\u5b57\u7684\u62fc\u97f3\u7531\u5176\u7b14\u753b\u6570\u51b3\u5b9a\u3002\u56e0\u6b64\uff0c\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u201cy\u00f9\u201d\u3002\n\n3. \u6700\u540e\uff0c\u6211\u4eec\u9700\u8981\u786e\u8ba4\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u5426",
+          "%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^"
+        ]
+      },
+      "4": {
+        "ttft_ms": 55.800351314246655,
+        "tpot_ms": 15.086033986514714,
+        "total_s": 1.979598879814148,
+        "steps": 129,
+        "batch": 4,
+        "gen_tokens": 512,
+        "tpot_p50_ms": 15.086019983676476,
+        "ttft_p50_ms": 55.800351314246655,
+        "ttft_p99_ms": 70.101797580719,
+        "tpot_p99_ms": 15.13805248385926,
+        "tps": 258.6382550631007,
+        "steady_state_output_tps": 265.14901289967503,
+        "texts": [
+          "\ufffd\u6710\ufffd\n   \n  \u8bf7\u95ee\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u4ec0\u4e48\uff1f\n\u56de\u7b54\u4e0a\u9762\u7684\u95ee\u9898\uff0c\u7ed9\u51fa\u5177\u4f53\u7684\u63a8\u7406\u903b\u8f91\u3002 \u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u53ef\u4ee5\u63a8\u65ad\u51fa\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u201cy\u00f9\u201d\u3002\u63a8\u7406\u903b\u8f91\u5982\u4e0b\uff1a\n\n1. \u9996\u5148\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u8fd9\u4e2a\u6c49\u5b57\u7684\u7b14\u753b\u6570\u3002\u6839\u636e\u63d0\u4f9b\u7684\u6c49\u5b57\u4fe1\u606f\uff0c\u8fd9\u4e2a\u6c49\u5b57\u5171\u670910\u4e2a\u7b14\u753b\u3002\n\n2. \u63a5\u4e0b\u6765\uff0c\u6211\u4eec\u9700\u8981\u786e\u5b9a\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u3002\u6839\u636e\u6c49\u5b57\u7684\u62fc\u97f3\u89c4\u5219\uff0c\u6c49\u5b57\u7684\u62fc\u97f3\u7531\u5176\u7b14\u753b\u6570\u51b3\u5b9a\u3002\u56e0\u6b64\uff0c\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u201cy\u00f9\u201d\u3002\n\n3. \u6700\u540e\uff0c\u6211\u4eec\u9700\u8981\u786e\u8ba4\u8fd9\u4e2a\u6c49\u5b57\u7684\u62fc\u97f3\u662f\u5426",
+          "%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^%^",
+          "\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e\u5b50\u306e",
+          "\u0e15\u0e23\u7684 2020 2021 2022 2023 2024 2025 2026 2027 2028 2029 2030 2031 2032 2033 2034 2035 2036 2037 2038 2039 2040 2041 2042 2043 2044 "
+        ]
+      },
+      "footprint": {
+        "model_mem_gb": 0.9202077388763428,
+        "kv_cache_tokens": 5935521,
+        "graph_installed": false,
+        "graph_replays": null
+      }
+    }
+  }
+}

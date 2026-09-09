@@ -53,7 +53,7 @@ def payload(rank: int) -> dict:
 
         def maxdiff(a, b):
             if isinstance(a, (tuple, list)):
-                return max((x - y).abs().max().item() for x, y in zip(a, b))
+                return max((x - y).abs().max().item() for x, y in zip(a, b, strict=True))
             return (a - b).abs().max().item()
 
         def mean(t):
@@ -80,7 +80,8 @@ def payload(rank: int) -> dict:
                         dist.barrier()
                 except Exception:
                     pass
-                g.replay(); torch.cuda.synchronize()
+                g.replay()
+                torch.cuda.synchronize()
                 cur = flat(out)
                 seq.append({"i": i, "mean": round(mean(cur), 6),
                             "vs_eager": round(maxdiff(cur, ref), 6)})

@@ -39,3 +39,20 @@ def getenv(name: str, default: str | None = None) -> str | None:
                 stacklevel=2,
             )
     return value if value is not None else default
+
+
+def env_flag(name: str, *, default: bool = False) -> bool:
+    """Read *name* as an opt-in switch: anything but ``0``/``false``/``off`` is on.
+
+    The spelling every optional-feature switch shares (the overlap policies, the
+    sequence-parallel pass), in one place so the accepted words cannot drift
+    between them. An empty value reads as *off* — an exported-but-blank variable
+    is how a shell script spells "not set".
+
+    Args:
+        name: Variable name, resolved through :func:`getenv` (legacy spelling
+            still honoured).
+        default: Value used when the variable is absent.
+    """
+    raw = (getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw not in ("", "0", "false", "off")

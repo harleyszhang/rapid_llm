@@ -19,6 +19,7 @@ from ..distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from ..distributed.sequence_parallel import column_parallel_g, is_g_boundary
 from .quantization import QuantizationConfig, UnquantizedLinearMethod
 
 
@@ -70,6 +71,13 @@ class LinearBase(nn.Module):
         return self.quant_method.apply(self, x, self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Inside a sequence-parallel region a marked layer is the *g* boundary:
+        # this rank's token shard is all-gathered back to the full grid before
+        # the GEMM, because attention reads across tokens. The mark decides, not
+        # the class: ``ReplicatedLinear`` shares this method without being on the
+        # residual path, and only the pass knows which projections bound a region.
+        if is_g_boundary(self):
+            return column_parallel_g(self, x)
         return self.apply_linear(x)
 
     def _weight_loader(
@@ -219,8 +227,13 @@ class QKVParallelLinear(LinearBase):
         return torch.split(qkv, (self.q_size, self.kv_size, self.kv_size), dim=-1)
 
     def project(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One GEMM, then three views — the call every attention block wants."""
-        return self.split(self.apply_linear(x))
+        """One GEMM, then three views — the call every attention block wants.
+
+        Through :meth:`~LinearBase.forward` rather than straight to the multiply,
+        so a sequence-parallel region's ``g`` boundary applies here too; the rows
+        it returns are the full grid's, not the caller's shard.
+        """
+        return self.split(self.forward(x))
 
     def _weight_loader(self, param, loaded, shard_id=None):
         # ``shard_id`` is which of [q | k | v] arrived. Block boundaries come from this

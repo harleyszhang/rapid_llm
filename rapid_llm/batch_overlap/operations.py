@@ -1,16 +1,15 @@
 """The two-batch-overlap executor primitives: op streams, stages, and state.
 
-sglang's ``operations.py`` discipline, ported one-for-one: an op stream is a list
-of ops separated by :class:`YieldOperation` markers, and ops between two yields
-form one indivisible *stage*; every op takes the micro-batch's :class:`StateDict`
-and mutates it, writing under a *new* key and popping what it consumes;
-:func:`execute_overlapped_operations` walks two streams in lockstep, the lead
-``delta_stages`` ahead, so A's GEMMs occupy the SMs while B sits in a comm op.
+sglang's ``operations.py`` discipline, ported one-for-one: ops separated by
+:class:`YieldOperation` markers form indivisible *stages*; every op takes the
+micro-batch's :class:`StateDict`, pops what it consumes and writes under a
+*new* key; :func:`execute_overlapped_operations` walks two streams in
+lockstep, the lead ``delta_stages`` ahead, so A's GEMMs occupy the SMs while
+B sits in a comm op.
 
-:class:`StateDict` is the part worth porting: a key may be written once until it
-is popped, so an op that clobbers a predecessor's result raises instead of
-silently feeding stale data -- the bug the TBO closure snapshot produced, when
-every layer read the embedding output captured at build time.
+:class:`StateDict` is the part worth porting: a key may be written once until
+popped, so clobbering a predecessor's result raises instead of silently
+feeding stale data -- the bug the TBO closure snapshot produced.
 
 Usage:
     state = StateDict({"hidden_states": h, "residual": None})

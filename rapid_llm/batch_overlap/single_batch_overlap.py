@@ -1,31 +1,17 @@
 """Single-batch overlap (SBO): MoE two-stream overlap *inside* one batch.
 
 The counterpart of sglang's ``srt/batch_overlap/single_batch_overlap.py``.
-Where TBO splits a *batch* into two halves that ping-pong, SBO splits the
-*work inside one MoE layer* across two streams — so it pays on the EP decode
-shape, where there is only one batch and no second half to interleave with.
+Where TBO splits a *batch* into two ping-ponging halves, SBO splits the *work
+inside one MoE layer* across two streams — the overlap that pays on the EP
+decode shape, where there is no second half to interleave with. The shipped
+pair is dispatch↔shared: the exchange goes first, the shared MLP computes on
+an alternate stream; ``_forward_ep`` owns both fences.
 
-What ships is sglang's dispatch↔shared pair: the forward exchange goes on the
-wire first, and the shared MLP moves onto an alternate compute stream so it
-computes while the tokens travel. :meth:`SparseMoeBlock._forward_ep` drives it
-and owns both fences; this module supplies the switch and the stream.
-
-Two of sglang's three overlaps are deliberately absent, and the reasons are
-worth stating rather than leaving implicit:
-
-* **combine↔down GEMM** (tile signaled) — needs the down GEMM to publish each
-  output tile and the reduction to wait on it. ``fused_moe``'s second GEMM
-  scatters its output by ``sorted_token_ids`` while ``_moe_sum_kernel`` reads
-  contiguous token rows, so a finished tile does not line up with a ready row
-  block; wiring it needs an inverse mapping plus an atomic count.
-* **combine↔shared** — wants the same alternate stream the dispatch pair
-  already occupies.
-
-One more adaptation: sglang sizes the communication side through
-``DeepEPConfig.num_sms``, pinning the exchange to a fixed subset of SMs.
-rapid_llm's combine rides ``all_to_all_single``, whose NCCL kernels take no
-SM budget from the caller — how many SMs the exchange actually occupies is an
-external variable here, measured by the benchmark rather than controlled.
+Two of sglang's three overlaps are deliberately absent: **combine↔down GEMM**
+needs per-tile events, but ``fused_moe`` scatters by ``sorted_token_ids``
+while the sum reads contiguous rows; **combine↔shared** wants the alternate
+stream the dispatch pair occupies. ``all_to_all_single``'s NCCL kernels take
+no caller SM budget (unlike ``DeepEPConfig.num_sms``) — measured, not controlled.
 
 Usage:
     os.environ["RAPID_LLM_SBO"] = "1"   # the MoE block picks the overlap up itself

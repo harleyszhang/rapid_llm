@@ -1,0 +1,82 @@
+{
+  "config": {
+    "model": "Qwen3-30B-A3B-Instruct-2507-FP8",
+    "model_type": "qwen3_moe",
+    "quant": "fp8",
+    "weight_gb": 31.2,
+    "scenario": "medium",
+    "effective": {
+      "input_len": 4096,
+      "max_seq_len": 8192
+    },
+    "tp_by_arm": {
+      "rapid_llm": 1,
+      "vllm": 1
+    },
+    "batch": 8,
+    "iters": 2,
+    "timestamp": "2026-09-08T13:26:16",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 2,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNODE\tPIX\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tPIX\tNODE\tSYS\t48-95,144-191\t1\t\tN/A",
+      "cuda_version": "13.0",
+      "torch_version": "2.14.0+cu130",
+      "triton_version": "3.8.0",
+      "transformers_version": "5.16.1",
+      "python_version": "3.14.7",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "rapid_llm": {
+      "ttft_ms": 1784.259274834767,
+      "tpot_ms": 61.73401036801569,
+      "total_s": 8.671475477516651,
+      "steps": 135,
+      "batch": 8,
+      "gen_tokens": 771,
+      "tpot_p50_ms": 52.535778263539775,
+      "ttft_p50_ms": 1999.0641456097364,
+      "ttft_p99_ms": 1999.0641456097364,
+      "tpot_p99_ms": 103.70519891762595,
+      "tps": 88.9122043877128,
+      "input_tokens": 32768,
+      "engine_args": {
+        "use_cuda_graph": true,
+        "enable_prefix_cache": true,
+        "max_seq_len": 8192
+      },
+      "steady_state_output_tps": 120.41277321927456,
+      "steady_state_window_s": 0.05324564687907696,
+      "footprint": {
+        "model_mem_gb": 29.033557891845703,
+        "kv_cache_tokens": 420881,
+        "graph_installed": true,
+        "graph_replays": 2
+      },
+      "wall_s": 45.2
+    },
+    "vllm": {
+      "ttft_ms": 509.57225263118744,
+      "tpot_ms": 3.7549984326043466,
+      "total_s": 0.9864570535719395,
+      "steps": 128,
+      "batch": 8,
+      "gen_tokens": 1024,
+      "tpot_p50_ms": 6.821633991235354,
+      "ttft_p50_ms": 29.891297221183777,
+      "ttft_p99_ms": 40.002019349485636,
+      "tpot_p99_ms": 7.140526550961292,
+      "tps": 1038.0583688789272,
+      "input_tokens": 32768,
+      "ignore_eos": true,
+      "wall_s": 95.9
+    }
+  }
+}

@@ -1,4 +1,16 @@
-"""CPU dispatch entries; registration does not import PyTorch or Triton."""
+"""CPU backend dispatch entries: one registered KernelSpec row per op.
+
+``_TARGETS`` maps each op to its implementation in
+:mod:`rapid_llm.kernels.backend.cpu`, and the import-time loop registers the
+``cpu/*`` rows: ``CapabilityRequirement("cpu")`` gating, ``priority=1`` behind
+CUDA, ``graph_safe=False`` (the targets loop and plan per call), ``fp8_kv``
+only where decode consumes scales, and the ``kv:mla_latent`` layout
+requirement on the MLA rows. Registration imports no PyTorch and no Triton —
+the specs are metadata; the ops load lazily through ``target=``.
+
+Usage:
+    import rapid_llm.kernels.backend.cpu_specs  # registers the cpu/* rows
+"""
 
 from ...platform import CapabilityRequirement
 from ..dispatcher import GoldenRecord, KernelSpec, LayoutRequirement, register

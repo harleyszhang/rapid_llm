@@ -1,20 +1,17 @@
 """DeepSeek-V4 model definition: the mHC stream stack over mixed attention.
 
 :class:`DeepseekV4DecoderLayer` is deliberately *not* the shared
-:class:`~rapid_llm.models.base.DecoderLayer` — the mHC residual turns each
+:class:`~rapid_llm.models.base.DecoderLayer`: the mHC residual turns each
 block into a stream mixer ``streams = post ⊙ sublayer(collapsed) +
 comb @ streams`` over ``[B, S, hc_mult, hidden]``, which the standard
-attention/MLP two-stage split cannot express (and TBO along with it; see
-:meth:`DeepseekV4Model.forward_tbo`). :class:`DeepseekV4Model` therefore
-overrides the full forward template while keeping the shared skeleton's
-weight-loading, tied-embedding and vocabulary-parallel plumbing.
-
-The MoE side (:class:`DeepseekV4MoE`) subclasses
-:class:`~rapid_llm.modules.SparseMoeBlock` to swap in V4's
-``sqrtsoftplus`` router (with the additive ``e_score_correction_bias``
-selection of ``noaux_tc``, but softmax-free), the hash router the leading
-``hash_moe`` layers use, and the bounded SwiGLU (``swiglu_limit``) the
-routed experts clamp with.
+attention/MLP two-stage split cannot express (and TBO with it; see
+:meth:`DeepseekV4Model.forward_tbo`). :class:`DeepseekV4Model` overrides the
+full forward template while keeping the shared skeleton's weight-loading,
+tied-embedding and vocabulary-parallel plumbing. The MoE side
+(:class:`DeepseekV4MoE`) subclasses :class:`~rapid_llm.modules.SparseMoeBlock`
+to swap in V4's ``sqrtsoftplus`` router (``noaux_tc``'s additive
+``e_score_correction_bias`` selection, softmax-free), the hash router the
+leading ``hash_moe`` layers use, and the bounded SwiGLU (``swiglu_limit``).
 
 Usage:
     model = DeepseekV4Model(config)   # model_type deepseek_v4

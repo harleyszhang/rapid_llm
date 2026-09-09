@@ -138,6 +138,23 @@ def test_world_of_one_passes_the_gemm_straight_through(grid):
     assert torch.equal(layer.forward(x), layer.apply_linear(x))
 
 
+def test_reduce_results_false_hands_back_the_partial_sum(grid):
+    """``reduce_results=False`` means the caller reduces; the dispatcher must not.
+
+    The flag is the layer's documented escape hatch for a caller that wants to
+    time, batch or skip the collective, and this dispatcher is the only place it
+    can still be honoured — reducing anyway would silently double-count the
+    partial for whoever reduces downstream.
+    """
+    grid(0, 2)
+    layer = RowParallelLinear(IN, OUT, params_dtype=torch.float32, reduce_results=False)
+    gen = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(OUT, IN // 2, generator=gen))
+    x = torch.randn(2, 3, IN // 2)
+    assert torch.equal(layer.forward(x), layer.apply_linear(x))
+
+
 def test_deferred_context_on_a_world_of_one_is_value_preserving(grid):
     """Defer with no peer to reduce with returns the tensor untouched."""
     grid(0, 1)

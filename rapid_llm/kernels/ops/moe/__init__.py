@@ -1,25 +1,18 @@
 """MoE domain: the fused expert GEMMs, one row per implementation.
 
-Registers the domain's spec rows and re-exports the grouped-GEMM entry
-points :func:`~rapid_llm.kernels.ops.moe.fused_moe.fused_moe`,
-:func:`~rapid_llm.kernels.ops.moe.fused_moe.fused_moe_w8a8_fp8` and
-:func:`~rapid_llm.kernels.ops.moe.fused_moe.fused_moe_w8a8_int8` plus the
-alignment helper.
+Registers the domain's spec rows and re-exports the grouped-GEMM entry points
+``fused_moe`` / ``fused_moe_w8a8_fp8`` / ``fused_moe_w8a8_int8`` plus the
+alignment helper. One weight-only row on purpose: ``fused_moe`` derives the
+expert format from ``w1.dtype`` (uint8 fp8-e4m3 / int8 / packed int32), so a
+spec row per scheme would just restate a dispatch the kernel already does
+internally.
 
-The first native row covers every *weight-only* scheme on purpose: ``fused_moe``
-derives the expert format from ``w1.dtype`` (uint8 fp8-e4m3 / int8 / packed
-int32) rather than from a flag, so splitting that row per scheme would be one
-spec claim per branch of the same dispatch the kernel already does internally.
-
-``w8a8_fp8`` and ``w8a8_int8`` are the exceptions and therefore their own
-rows: they quantise the activation too, and no dtype can say so — weight-only
-fp8 and W8A8 fp8 both store ``uint8`` experts, weight-only int8 and W8A8 int8
-both store ``int8`` experts. The scheme is the only thing that distinguishes
-them, so the scheme has to pick the row, or dispatching a W8A8 scheme would
-quietly return the weight-only kernel.
-
-DeepGEMM's grouped variant is the sm90+ contender — same grouped-contiguous
-semantics, Hopper tensor cores, unverified until it runs on real hardware.
+``w8a8_fp8``/``w8a8_int8`` are their own rows — they quantise the activation
+too, and no dtype can say so: weight-only and W8A8 store identical expert
+dtypes, so the scheme must pick the row, or a W8A8 scheme would quietly get
+the weight-only kernel. DeepGEMM's grouped variant is the sm90+ contender —
+same grouped-contiguous semantics, Hopper tensor cores, unverified until it
+runs on real hardware.
 
 Usage:
     from rapid_llm.kernels import fused_moe

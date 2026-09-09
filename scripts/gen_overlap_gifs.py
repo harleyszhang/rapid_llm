@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.batch_overlap.overlap import RegionRecord  # noqa: E402
+from rapid_llm.batch_overlap.overlap import RegionRecord
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -73,9 +73,9 @@ def record_l2(model_dir: str) -> list[RegionRecord]:
     """TP=2 decode with TBO on: half-A/B segments plus the deferred reductions."""
     os.environ["RAPID_LLM_TBO"] = "1"
     os.environ[TIMELINE_ENV] = "1"
-    from benchmarks.common import make_backend
     from rapid_llm.batch_overlap.comm_overlap import CommStreamPool
     from rapid_llm.batch_overlap.two_batch_overlap import reset_tbo_policy
+    from rapid_llm.benchmark import make_backend
 
     reset_tbo_policy()  # the policy is cached per process; this run opts in
     CommStreamPool.reset()
@@ -109,8 +109,8 @@ def record_l3(model_dir: str) -> list[RegionRecord]:
     """TP=2 chunked prefill with L3 on: ``l3.gemm.k`` against ``l3.all_reduce.k``."""
     os.environ["RAPID_LLM_COMM_OVERLAP"] = "1"
     os.environ[TIMELINE_ENV] = "1"
-    from benchmarks.common import PROMPTS, expand_prompts, make_backend
     from rapid_llm.batch_overlap.comm_overlap import CommStreamPool, reset_comm_overlap_policy
+    from rapid_llm.benchmark import PROMPTS, expand_prompts, make_backend
 
     reset_comm_overlap_policy()
     CommStreamPool.reset()

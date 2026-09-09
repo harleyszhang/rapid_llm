@@ -52,8 +52,8 @@ def run_payload(overlap: bool) -> int:
     Two passes: the first warms allocator blocks, JIT paths and the NCCL
     communicator, so the traced second pass holds steady-state steps.
     """
-    from benchmarks.lib import PROMPTS, expand_prompts, make_backend
     from benchmarks.overlap.arms import l1_switch, l3_switch, make_arm, tbo_switch
+    from rapid_llm.benchmark import PROMPTS, expand_prompts, make_backend
 
     arm = make_arm(
         "payload",
