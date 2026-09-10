@@ -140,12 +140,12 @@ class DeepseekV2MLAAttention(nn.Module):
         if self._bound_device == device_type:
             return
         if device_type == "cpu":
-            from functools import partial
-
             from ..kernels.backend import cpu
 
             self._prefill = cpu.mla_prefill
-            self._decode = partial(cpu.mla_decode, qk_rope_head_dim=self.qk_rope_head_dim)
+            # No partial: the contract fix pinned ``qk_rope_head_dim`` to the
+            # kernel's internal 64-token constant, so there is nothing to pass.
+            self._decode = cpu.mla_decode
         else:
             self._prefill = dispatch(
                 "attention.mla_prefill",
