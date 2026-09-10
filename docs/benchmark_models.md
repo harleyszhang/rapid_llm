@@ -508,7 +508,9 @@ V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、h
 ```bash
 cd /home/honggao/projects/rapid_llm
 
-# 0) 一次性：DSpark checkpoint -> transformers bf16 落盘（CPU-only，约 2.5 min，产物 75.6 GiB）：
+# 0) 一次性：DSpark checkpoint -> transformers bf16 落盘（CPU-only，约 2.5 min，产物 75.6 GiB；
+#    默认读 my_weight/DeepSeek-V4-Flash-6layers、写 my_weight/DeepSeek-V4-Flash-6layers-hf-bf16-v2，
+#    RAPID_LLM_TEST_DSV4_DIR / RAPID_LLM_TEST_DSV4_HF_DIR 可指到别处的源 checkpoint 与产物）：
 .venv/bin/python -m tests.layer.convert_v4_hf
 
 # 1) rapid_llm TP2（--no-cuda-graph：V4 的滑窗缓存每步重绑 Python 侧张量，
@@ -558,6 +560,8 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 - seq 64 step 30：双方 margin 0.125 / 0.037，互相落在对方 top-2，logprob 差 0.04；
 - 即所有独立分歧都发生在 margin < 0.13 的近平局步、对方选择都在自己 top-2 内。bf16 权重 + bf16 计算相对 fp32 参考的数值差在这个量级属预期，非结构差异；256-token prefill 下 32 步全对进一步排除了路由 / attention / 量化路径的结构性偏差。
 
+这两条性质（首 token 共享决策 + 独立分歧均为近平局）与各长度的匹配步数下限一起固化为 pytest 精度门 `tests/golden/test_deepseek_v4_flash_parity.py`（gpu+slow 档）：门不锁逐 token 相等，缺 checkpoint / 双卡 / ~200 GB 空闲内存时显式 xfail（UNVERIFIED）而非静默跳过。
+
 复现：
 
 ```bash
@@ -571,6 +575,8 @@ python -m tests.layer.deepseek v4 lite
 python -m tests.layer.deepseek v4 hf
 python -m tests.layer.deepseek v4 compare \
     docs/benchmark_logs/accuracy/accuracy_v4_lite_<ts>.json docs/benchmark_logs/accuracy/accuracy_v4_hf_<ts>.json
+# 同两臂的 pytest 精度门（单文件直跑；需要双卡 + ~200 GB 空闲内存）：
+pytest tests/golden/test_deepseek_v4_flash_parity.py
 ```
 
 ## 三 性能优化历史记录

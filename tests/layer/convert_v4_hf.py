@@ -12,12 +12,15 @@ over the filled model, and a reopen of the written shards.
 
     rapid_llm venv (CPU only, no GPU needed):
         python -X pycache_prefix=/tmp/pyc_v4conv -m tests.layer.convert_v4_hf
-Output: /data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2
+Output: my_weight/DeepSeek-V4-Flash-6layers-hf-bf16-v2 by default, next to the
+source checkpoint — override the source with ``RAPID_LLM_TEST_DSV4_DIR`` and
+the output location with ``RAPID_LLM_TEST_DSV4_HF_DIR``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -29,8 +32,23 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-CKPT = "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers"
-OUT = Path("/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Source checkpoint and output directory, both repository-rooted unless an
+#: environment override names an absolute location (the benchmark artifact
+#: lives outside the repository on the lab box; reproducing that run means
+#: pointing the overrides at it).
+_V4_DEFAULT = "my_weight/DeepSeek-V4-Flash-6layers"
+
+
+def _resolve_ckpt(default: str, env: str) -> Path:
+    """An absolute override wins; the relative default is repository-rooted."""
+    chosen = Path(os.environ.get(env, default)).expanduser()
+    return chosen if chosen.is_absolute() else _REPO_ROOT / chosen
+
+
+CKPT = _resolve_ckpt(_V4_DEFAULT, "RAPID_LLM_TEST_DSV4_DIR")
+OUT = _resolve_ckpt(f"{_V4_DEFAULT}-hf-bf16-v2", "RAPID_LLM_TEST_DSV4_HF_DIR")
 DTYPE = torch.bfloat16
 
 #: Keys outside the decoder stack.

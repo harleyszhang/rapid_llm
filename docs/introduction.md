@@ -424,7 +424,7 @@ benchmarks/ 全部脚本的分工：
 | [bench_observability.py](../benchmarks/serving/bench_observability.py) | 每个可观测开关的每 token 开销一行 |
 | [bench_mla.py](../benchmarks/models/bench_mla.py) | MLA KV 经济学：config 解析 KV 几何，同一 workload 量延迟与显存足迹 |
 | [bench_parser.py](../benchmarks/serving/bench_parser.py) | 推理/工具解析器的每 token CPU 成本（流式增量口径） |
-| [eval/](../benchmarks/eval/) | 按数据集组织的精度基准（sglang 布局）：gsm8k / boolq / hellaswag 各自 `bench_rapid_vllm.py`（引擎臂，CUDA graph 默认开）+ `bench_hf.py`（HF baseline）+ `common.py`（口径单点定义），实测数字见 [eval_models.md](eval_models.md)；DeepSeek 裁剪版逐层等价性套件已移至 `tests/layer/` |
+| [eval/](../benchmarks/eval/) | 按数据集组织的精度基准（sglang 布局）：gsm8k / boolq / hellaswag 各自 `bench_rapid_vllm.py`（引擎臂，CUDA graph 默认开）+ `bench_hf.py`（HF baseline）+ `common.py`（口径单点定义），实测数字见 [eval_models.md](eval_models.md)；DeepSeek 裁剪版逐层等价性套件已移至 `tests/layer/`，V4-Flash 的 TP2-vs-fp32-oracle 精度门在 `tests/golden/test_deepseek_v4_flash_parity.py`（gpu+slow 档，pytest 直跑） |
 | [lib/](lib/) | 共享库：workloads（工作负载）· metrics（TTFT/TPOT/TPS 口径）· backends（被测系统 ABC + 工厂）· utils（显存足迹、JSON 落盘、表格）· dp（DP 脚手架） |
 | kernels/microbench.py | 微基准 harness：三种计时器 + 正确性门 + SOL 报告 |
 | kernels/kv_pool.py | 分页 KV 池 fixture（7.3 节的四个属性） |
