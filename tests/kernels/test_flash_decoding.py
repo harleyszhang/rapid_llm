@@ -433,8 +433,16 @@ def test_packed_fp8_cache_matches_widened_reference():
 
     k8, v8 = _quantize_kv(k_cache, v_cache, k_scale=0.5, v_scale=2.0)
     out = flash_decoding(
-        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens),
-        k_scale=0.5, v_scale=2.0,
+        q,
+        k8,
+        v8,
+        scale,
+        table,
+        b_req_idx,
+        b_seq_len,
+        max(seq_lens),
+        k_scale=0.5,
+        v_scale=2.0,
     )
     ref = flash_decoding(
         q,

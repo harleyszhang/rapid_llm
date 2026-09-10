@@ -63,6 +63,7 @@ def _resolve(path: str) -> Path:
     resolved = Path(path)
     return resolved if resolved.is_absolute() else REPO_ROOT / resolved
 
+
 _PROMPTS = [
     "The capital of France is",
     "Write a haiku about the sea.",

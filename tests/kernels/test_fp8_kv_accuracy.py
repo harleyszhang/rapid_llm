@@ -57,9 +57,7 @@ def _round_trip_error(x: torch.Tensor, scale: float | None = None) -> dict[str, 
     # Cosine similarity: captures directional fidelity, not just magnitude.
     x_flat = x.float().reshape(-1)
     x_hat_flat = x_hat.reshape(-1)
-    cos = torch.nn.functional.cosine_similarity(
-        x_flat.unsqueeze(0), x_hat_flat.unsqueeze(0)
-    ).item()
+    cos = torch.nn.functional.cosine_similarity(x_flat.unsqueeze(0), x_hat_flat.unsqueeze(0)).item()
 
     return {"max_abs_diff": max_abs, "rel_err": rel_err, "cosine_sim": cos}
 
@@ -143,9 +141,7 @@ def test_fp8_kv_k_v_separate():
     v_metrics = _round_trip_error(v)
 
     for name, m in [("K", k_metrics), ("V", v_metrics)]:
-        assert m["rel_err"] < 0.05, (
-            f"fp8 KV {name} rel_err={m['rel_err']:.4f} exceeds 5%"
-        )
+        assert m["rel_err"] < 0.05, f"fp8 KV {name} rel_err={m['rel_err']:.4f} exceeds 5%"
         assert m["cosine_sim"] > 0.999, (
             f"fp8 KV {name} cosine_sim={m['cosine_sim']:.6f} below 0.999"
         )

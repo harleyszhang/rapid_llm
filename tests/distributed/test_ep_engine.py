@@ -145,10 +145,7 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
             enable_expert_parallel=spec["ep"],
         )
         try:
-            records = [
-                _record(output.outputs[0])
-                for output in engine.generate(_PROMPTS, _GREEDY)
-            ]
+            records = [_record(output.outputs[0]) for output in engine.generate(_PROMPTS, _GREEDY)]
             report = {
                 "records": records,
                 "executor": type(engine._executor).__name__,
@@ -194,7 +191,9 @@ def _run_probe(model_dir: Path, *, ep: bool, tbo: bool, graph: bool = False) -> 
         try:
             status, payload = results.get(timeout=_PROBE_TIMEOUT_S)
         except queue_module.Empty:
-            pytest.fail(f"EP probe (ep={ep}, tbo={tbo}) produced nothing in {_PROBE_TIMEOUT_S:.0f}s")
+            pytest.fail(
+                f"EP probe (ep={ep}, tbo={tbo}) produced nothing in {_PROBE_TIMEOUT_S:.0f}s"
+            )
         if status == "error":
             pytest.fail(f"EP probe (ep={ep}, tbo={tbo}) failed:\n{payload}")
         return payload

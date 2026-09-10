@@ -204,12 +204,14 @@ def _pass_refuses_payload(rank: int) -> list[dict[str, Any]]:
     out = []
     for name, model in cases:
         passer = SequenceParallelPass(enabled=True)
-        out.append({
-            "case": name,
-            "count": passer.apply(model),
-            "refusal": passer.refusal,
-            "marks": _marks(model),
-        })
+        out.append(
+            {
+                "case": name,
+                "count": passer.apply(model),
+                "refusal": passer.refusal,
+                "marks": _marks(model),
+            }
+        )
     return out
 
 
@@ -337,13 +339,15 @@ def _round_trip_payload(rank: int) -> list[dict[str, Any]]:
         flat = grid.reshape(-1, _HIDDEN)
         start = rank * region.local_tokens
         want = flat[start : min(start + region.local_tokens, flat.shape[0])]
-        out.append({
-            "shard_shape": tuple(shard.shape),
-            "expected_shard": (1, region.local_tokens, _HIDDEN),
-            "shard_is_slice": torch.equal(shard[0, : want.shape[0]], want),
-            "padding_is_zero": bool((shard[0, want.shape[0] :] == 0).all()),
-            "round_trip": torch.equal(back, grid),
-        })
+        out.append(
+            {
+                "shard_shape": tuple(shard.shape),
+                "expected_shard": (1, region.local_tokens, _HIDDEN),
+                "shard_is_slice": torch.equal(shard[0, : want.shape[0]], want),
+                "padding_is_zero": bool((shard[0, want.shape[0] :] == 0).all()),
+                "round_trip": torch.equal(back, grid),
+            }
+        )
     return out
 
 
@@ -407,17 +411,19 @@ def _boundaries_payload(rank: int) -> list[dict[str, Any]]:
         padded = torch.cat((reduced, reduced.new_zeros(region.padded_tokens - num_tokens, _HIDDEN)))
         want_g_bar = padded[lo:hi]
 
-        out.append({
-            "num_tokens": num_tokens,
-            "g_shape": tuple(got_g.shape),
-            "g_expected_shape": (num_tokens, g_layer.output_size),
-            "g_close": torch.allclose(got_g, want_g, rtol=1e-5, atol=1e-5),
-            "g_max_diff": (got_g - want_g).abs().max().item(),
-            "g_bar_shape": tuple(got_g_bar.shape),
-            "g_bar_expected_shape": (region.local_tokens, _HIDDEN),
-            "g_bar_close": torch.allclose(got_g_bar, want_g_bar, rtol=1e-5, atol=1e-5),
-            "g_bar_max_diff": (got_g_bar - want_g_bar).abs().max().item(),
-        })
+        out.append(
+            {
+                "num_tokens": num_tokens,
+                "g_shape": tuple(got_g.shape),
+                "g_expected_shape": (num_tokens, g_layer.output_size),
+                "g_close": torch.allclose(got_g, want_g, rtol=1e-5, atol=1e-5),
+                "g_max_diff": (got_g - want_g).abs().max().item(),
+                "g_bar_shape": tuple(got_g_bar.shape),
+                "g_bar_expected_shape": (region.local_tokens, _HIDDEN),
+                "g_bar_close": torch.allclose(got_g_bar, want_g_bar, rtol=1e-5, atol=1e-5),
+                "g_bar_max_diff": (got_g_bar - want_g_bar).abs().max().item(),
+            }
+        )
     return out
 
 

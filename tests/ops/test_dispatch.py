@@ -445,30 +445,22 @@ class TestStepPrepare:
         # hook of the losing row must not fire.
         reg = make_reg(
             native(op="attention.decode", priority=10),
-            external(
-                "ext/decode", op="attention.decode", priority=5, step_prepare=self.HOOK
-            ),
+            external("ext/decode", op="attention.decode", priority=5, step_prepare=self.HOOK),
         )
         assert step_prepare_for("attention.decode", registry=reg) is None
 
     def test_winning_row_with_hook_is_returned(self) -> None:
         reg = make_reg(
             native(op="attention.decode"),
-            external(
-                "ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK
-            ),
+            external("ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK),
         )
         assert step_prepare_for("attention.decode", registry=reg) is _fake_prepare
 
-    def test_pinned_backend_without_hook_gives_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_pinned_backend_without_hook_gives_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(op_backend_env("attention.decode"), "native")
         reg = make_reg(
             native(op="attention.decode"),
-            external(
-                "ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK
-            ),
+            external("ext/decode", op="attention.decode", priority=10, step_prepare=self.HOOK),
         )
         assert step_prepare_for("attention.decode", registry=reg) is None
 
@@ -480,9 +472,7 @@ class TestStepPrepare:
         monkeypatch.setenv(op_backend_env("attention.decode"), "flashinfer")
         reg = make_reg(
             native(op="attention.decode", priority=10),
-            external(
-                "flashinfer/dec", op="attention.decode", priority=0, step_prepare=self.HOOK
-            ),
+            external("flashinfer/dec", op="attention.decode", priority=0, step_prepare=self.HOOK),
         )
         assert step_prepare_for("attention.decode", registry=reg) is _fake_prepare
 
