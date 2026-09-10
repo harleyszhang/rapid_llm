@@ -20,13 +20,18 @@ import math
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    CYAN, YELLOW, GREEN, BLUE, RED, BAR_BG,
+    TITLE_H, PAD, LINE_H,
+    FontPack,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 OUTPUT = REPO_ROOT / "docs" / "images" / "logprobs.gif"
 
 #: Short and factual: the prompt table has to fit on screen, and a prompt the
@@ -35,21 +40,11 @@ PROMPT = "The capital of France is"
 TOP_K = 5
 MAX_GEN = 6
 
-# Terminal palette (shared look with the other README GIFs)
 W, H = 1080, 640
-TITLE_H, PAD, LINE_H = 36, 16, 24
-BG = (14, 16, 20)
-TITLE_BG = (32, 36, 44)
-TITLE_FG = (222, 226, 232)
-PROMPT_FG = (118, 214, 118)
-DIM = (128, 136, 148)
-TEXT_FG = (222, 226, 232)
-CYAN = (86, 198, 224)
-YELLOW = (253, 188, 64)
-GREEN = (94, 193, 117)
-BLUE = (110, 160, 226)
-RED = (245, 99, 72)
-BAR_BG = (38, 42, 52)
+
+# Helper: re-use _viz_lib _fonts but with a 4th 'big' slot
+PAD = 16
+LINE_H = 24
 
 
 def _fonts():

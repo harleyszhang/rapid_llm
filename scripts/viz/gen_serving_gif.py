@@ -17,22 +17,24 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, YELLOW,
+    RUNNING, QUEUED, DONE,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
 from rapid_llm.utils.prompt_templates import get_prompter
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-
-# Six requests, three slots, and a different length cap each. The staggered caps
-# are what puts slot recycling on camera repeatedly instead of once at the end:
-# an instruct model left to its own devices answers all six at similar length, so
-# they would finish together and the queue would drain in one jump. Per-request
-# caps are also something the one-shot path cannot express at all.
+# Six requests, three slots, and a different length cap each.
 PROMPTS = [
     ("Name the capital of Japan.", 18),
     ("List three prime numbers.", 30),
@@ -43,12 +45,7 @@ PROMPTS = [
 ]
 MAX_NUM_SEQS = 3
 
-# Terminal palette
 W, H = 1180, 400
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-RUNNING, QUEUED, DONE = (118, 214, 118), (226, 184, 92), (110, 160, 226)
 
 
 @dataclass
@@ -128,13 +125,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text(
-        (12, 9), f"rapid-llm  —  continuous batching  ({model_name})", fill=TITLE_FG, font=small
-    )
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, f"rapid-llm  —  continuous batching  ({model_name})", small=fonts.small)
 
     y = TITLE_H + PAD
     draw.text(
@@ -197,11 +188,7 @@ def main() -> int:
     frames = record(args.model_dir, args.max_gen_len)
     print(f"{len(frames)} steps recorded")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 17),
-        ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 17),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(17, 17, 15)
     model_name = Path(args.model_dir).name
     kept = frames[:: args.every]
     kept += [frames[-1]] * 8  # hold the finished state so the loop is readable
@@ -211,10 +198,7 @@ def main() -> int:
         render(f, fonts, model_name).convert("P", palette=Image.ADAPTIVE, colors=64) for f in kept
     ]
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    images[0].save(
-        out, save_all=True, append_images=images[1:], duration=args.duration, loop=0, optimize=True
-    )
+    save_gif(images, out, duration=args.duration)
     print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB)")
     return 0
 

@@ -70,7 +70,7 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from rapid_llm import LLM, SamplingParams
 from rapid_llm.modules.attention import PagedAttention
@@ -137,7 +137,7 @@ def _selfcheck(device: str) -> None:
     theirs = quantize_fp8_per_tensor(x, 1.0).view(torch.float8_e4m3fn).float()
     if not torch.equal(mine, theirs):
         bad = (mine != theirs).nonzero().flatten()[:8].tolist()
-        raise SystemExit(f"round-trip reference disagrees with production at indices {bad}")
+        sys.exit(f"round-trip reference disagrees with production at indices {bad}")
 
 
 class _Accumulator:
@@ -315,12 +315,12 @@ def probe_ranges(
                 continue
             method = module.kv_cache_method
             if method is None:
-                raise SystemExit(f"{name} has no kv_cache_method — is this build fp8-capable?")
+                sys.exit(f"{name} has no kv_cache_method — is this build fp8-capable?")
             probe = _Probe(method.quantize_kv, device)
             method.quantize_kv = probe  # type: ignore[method-assign]
             probes[name] = probe
         if not probes:
-            raise SystemExit("no PagedAttention layers found; nothing to probe")
+            sys.exit("no PagedAttention layers found; nothing to probe")
 
         params = SamplingParams(
             temperature=0.0, max_gen_len=max_gen_len, repetition_penalty=1.0, stop_on_repeat=False
@@ -328,7 +328,7 @@ def probe_ranges(
         for prompt in PROMPTS:
             out = llm.generate([prompt], params)[0]
             if not out.outputs[0].text.strip():
-                raise SystemExit("fp8 KV cache produced an empty completion — read path is broken")
+                sys.exit("fp8 KV cache produced an empty completion — read path is broken")
 
         return {
             name: {"k": probe.k.finish(), "v": probe.v.finish()} for name, probe in probes.items()
@@ -496,7 +496,7 @@ def _metadata(model_dir: str) -> dict:
             capture_output=True,
             text=True,
             check=True,
-            cwd=Path(__file__).resolve().parent.parent,
+            cwd=Path(__file__).resolve().parent.parent.parent,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         commit = "unknown"

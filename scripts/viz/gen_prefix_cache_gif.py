@@ -20,16 +20,20 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, YELLOW, AMBER,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.engine.sampler import SamplingParams
 from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
 #: A shared 768-token system prompt (48 blocks of 16), then a short unique tail.
 SYSTEM_PROMPT_LEN = 768
@@ -37,10 +41,11 @@ USER_TAIL_LEN = 32
 BLOCK_SIZE = 16
 
 W, H = 1180, 430
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-CACHED_FG, PREFILL_FG, MISS_FG = (94, 193, 117), (226, 184, 92), (245, 99, 72)
+
+# Map _viz_lib aliases for render use
+CACHED_FG = GREEN
+PREFILL_FG = AMBER
+MISS_FG = RED
 
 
 @dataclass
@@ -106,11 +111,7 @@ def render(frame: Frame, fonts) -> Image.Image:
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "rapid-llm  —  prefix caching (shared system prompt)", fill=TITLE_FG, font=small)
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, "rapid-llm  —  prefix caching (shared system prompt)", small=fonts.small)
 
     y = TITLE_H + PAD
     draw.text((PAD, y), "$ rapid-llm serve --enable-prefix-cache", fill=PROMPT_FG, font=body)
@@ -168,26 +169,12 @@ def main() -> int:
         print(f"step {f.step}: {f.request_id:<28s} cached={f.cached:>4d} "
               f"prefill={f.to_prefill:>4d}  hit_rate={f.hit_rate * 100:.1f}%")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 17),
-        ImageFont.truetype(BOLD_PATH, 17),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(17, 17, 15)
     images = [render(f, fonts) for f in frames]
     images += [images[-1]] * 3  # hold the final warm state
-    palette = [im.convert("P", palette=Image.ADAPTIVE, colors=64) for im in images]
-
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    palette[0].save(
-        out,
-        save_all=True,
-        append_images=palette[1:],
-        duration=args.duration,
-        loop=0,
-        optimize=True,
-    )
-    print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(palette)} frames)")
+    save_gif(images, out, duration=args.duration)
+    print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(images)} frames)")
     return 0
 
 

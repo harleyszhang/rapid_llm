@@ -24,18 +24,23 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, YELLOW, BLUE, PURPLE, PANEL_BG,
+    RUNNING, QUEUED, DONE,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.dp_load_balancer import RoundRobinBalancer
 from rapid_llm.engine.sampler import SamplingParams
 from rapid_llm.utils.prompt_templates import get_prompter
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
 # Eight short prompts over two replicas: enough that round-robin visibly stripes them
 # 0,1,0,1,... into two lanes of four, and short enough that the GIF stays a few seconds.
@@ -51,12 +56,7 @@ PROMPTS = [
 ]
 DP_SIZE = 2
 
-# Terminal palette (shared with the continuous-batching GIF for a consistent look).
 W, H = 1180, 470
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-RUNNING, QUEUED, DONE = (118, 214, 118), (226, 184, 92), (110, 160, 226)
 LANE_BG = (22, 25, 31)
 LANE_COLOURS = [(120, 190, 240), (200, 150, 240)]  # GPU 0, GPU 1
 
@@ -129,13 +129,7 @@ def render(step: int, lanes: list[LaneStep], fonts, model_name: str) -> Image.Im
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text(
-        (12, 9), f"rapid-llm  —  data parallelism  ({model_name})", fill=TITLE_FG, font=small
-    )
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, f"rapid-llm  —  data parallelism  ({model_name})", small=fonts.small)
 
     y = TITLE_H + PAD
     draw.text(
@@ -224,11 +218,7 @@ def main() -> int:
     n_steps = max(len(lane) for lane in lanes)
     print(f"{n_steps} steps (lane sizes {[len(lane) for lane in lanes]})")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 16),
-        ImageFont.truetype(FONT_BOLD, 16),
-        ImageFont.truetype(FONT_PATH, 14),
-    )
+    fonts = FontPack.mono(16, 16, 14)
     model_name = Path(args.model_dir).name
     frame_steps = list(range(0, n_steps, args.every))
     images = [
@@ -238,12 +228,8 @@ def main() -> int:
         for step in frame_steps
     ]
     images += [images[-1]] * 8  # hold the finished state so the loop is readable
-
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    images[0].save(
-        out, save_all=True, append_images=images[1:], duration=args.duration, loop=0, optimize=True
-    )
+    save_gif(images, out, duration=args.duration)
     print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB)")
     return 0
 

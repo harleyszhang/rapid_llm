@@ -30,7 +30,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from rapid_llm import SamplingParams, TextGenerator
 from tests.golden.cases import (

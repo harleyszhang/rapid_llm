@@ -30,9 +30,18 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, YELLOW, BLUE, PURPLE, PANEL_BG, BAR_BG,
+    DATA_FG, CONTROL_FG, ALERT,
+    RUNNING, QUEUED, DONE,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
@@ -45,9 +54,6 @@ from rapid_llm.tools.observability import (
     human_bytes,
 )
 from rapid_llm.utils.prompt_templates import get_prompter
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
 TP_SIZE = 2
 
@@ -70,15 +76,7 @@ VOCAB_OPS = (Collective.ALL_REDUCE_MAX, Collective.ALL_GATHER)
 #: that a gathering sampler moves *at least* this much.
 LOGIT_BYTES = 2
 
-# Terminal palette, shared with the other README GIFs.
 W, H = 1180, 476
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-RUNNING, QUEUED, DONE = (118, 214, 118), (226, 184, 92), (110, 160, 226)
-PANEL_BG, BAR_BG = (22, 25, 31), (34, 38, 46)
-DATA_FG, CONTROL_FG = (120, 190, 240), (200, 150, 240)
-ALERT = (240, 140, 110)
 
 
 @dataclass
@@ -267,16 +265,7 @@ def render(frame: Frame, fonts, model_name: str) -> Image.Image:
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text(
-        (12, 9),
-        f"rapid-llm  —  tensor parallelism: what crosses the wire  ({model_name})",
-        fill=TITLE_FG,
-        font=small,
-    )
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, f"rapid-llm  —  tensor parallelism: what crosses the wire  ({model_name})", small=fonts.small)
 
     y = TITLE_H + PAD
     draw.text(
@@ -321,23 +310,15 @@ def main() -> int:
     frames, report = record(args.model_dir, args.max_gen_len)
     print(f"{len(frames)} steps\n{report}")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 16),
-        ImageFont.truetype(FONT_BOLD, 16),
-        ImageFont.truetype(FONT_PATH, 14),
-    )
+    fonts = FontPack.mono(16, 16, 14)
     model_name = Path(args.model_dir).name
     images = [
         render(frame, fonts, model_name).convert("P", palette=Image.ADAPTIVE, colors=64)
         for frame in frames[:: args.every]
     ]
     images += [images[-1]] * 8  # hold the finished state so the loop is readable
-
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    images[0].save(
-        out, save_all=True, append_images=images[1:], duration=args.duration, loop=0, optimize=True
-    )
+    save_gif(images, out, duration=args.duration)
     print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB)")
     return 0
 

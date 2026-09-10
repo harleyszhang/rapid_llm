@@ -20,34 +20,24 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import BG, DIM, GREEN, RED, BLUE, AMBER, PURPLE, PANEL_BG, PANEL_EDGE, draw_panel
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-FONT_PATH = None  # no TTF on this host; PIL's built-in font is used
 OUTPUT = REPO_ROOT / "docs" / "images" / "rapid_vs_vllm.png"
 RESULTS = REPO_ROOT / "docs/benchmark_logs/kernels/fused_moe_h100_20260902_int4byte.json"
 
 W, H = 1440, 1720
-BG = (14, 16, 20)
-PANEL = (24, 28, 34)
-PANEL_EDGE = (58, 64, 74)
 FG = (226, 232, 240)
-DIM = (148, 158, 172)
-BLUE = (96, 165, 250)
-GREEN = (74, 222, 128)
-RED = (248, 113, 113)
-AMBER = (251, 191, 36)
-PURPLE = (192, 132, 252)
 
 
 def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    """PIL's built-in font; it has no bold face, so bold is emulated by size."""
     return ImageFont.load_default(size=size + (2 if bold else 0))
 
 
-def panel(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], title: str) -> None:
-    draw.rounded_rectangle(box, radius=10, fill=PANEL, outline=PANEL_EDGE, width=1)
-    draw.text((box[0] + 18, box[1] + 12), title, font=font(19, True), fill=FG)
+def panel(draw, box, title):
+    draw_panel(draw, box, title)
 
 
 def byte_cell(

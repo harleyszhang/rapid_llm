@@ -21,23 +21,28 @@ import os
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, AMBER, GRID_LINE,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.batch_overlap.overlap import RegionRecord
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
 W, H = 1180, 430
-TITLE_H, PAD, LINE_H = 36, 18, 25
 LANE_H, LANE_GAP = 92, 34
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-COPY_FG, COMPUTE_FG, OVERLAP_FG = (226, 184, 92), (94, 193, 117), (245, 99, 72)
-AXIS_FG = (52, 58, 68)
+
+# Map _viz_lib aliases for render use
+COPY_FG = AMBER
+COMPUTE_FG = GREEN
+OVERLAP_FG = RED
+AXIS_FG = GRID_LINE
 
 #: Left lane label column width; the lanes themselves span the rest.
 LABEL_W = 110
@@ -119,11 +124,7 @@ def render(records, t0: float, scale: float, fonts, note: str) -> Image.Image:
     _body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "rapid-llm  —  L1 cross-stream overlap (copy stream vs compute stream)", fill=TITLE_FG, font=small)
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, "rapid-llm  —  L1 cross-stream overlap (copy stream vs compute stream)", small=small)
 
     lanes = {"copy": TITLE_H + PAD + LINE_H, "compute": TITLE_H + PAD + LINE_H + LANE_H + LANE_GAP}
     for name, y in lanes.items():
@@ -176,11 +177,7 @@ def main() -> int:
     scale = (W - PAD - LABEL_W) / max(span, 1e-3)
     print(f"{len(records)} regions recorded, window shows {len(window)} over {span:.1f} ms")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 17),
-        ImageFont.truetype(BOLD_PATH, 17),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(17, 17, 15)
     note = (
         "the next pass's input upload lands inside the still-running forward: that is the overlap"
         if overlapped
@@ -191,19 +188,8 @@ def main() -> int:
     for count in range(1, len(window) + 1):
         frames.append(render(window[:count], t0, scale, fonts, note))
     frames += [frames[-1]] * 3
-    palette = [im.convert("P", palette=Image.ADAPTIVE, colors=64) for im in frames]
-
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    palette[0].save(
-        out,
-        save_all=True,
-        append_images=palette[1:],
-        duration=args.duration,
-        loop=0,
-        optimize=True,
-    )
-    print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(palette)} frames)")
+    save_gif(frames, out, duration=args.duration)
     return 0
 
 

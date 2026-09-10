@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 # ---------------------------------------------------------------------------
@@ -321,12 +321,7 @@ def _render_frame(
         font=small,
     )
 
-    lane_y = {
-        "eager_cpu": TITLE_H + PAD + LINE_H,
-        "eager_gpu": TITLE_H + PAD + LINE_H + LANE_H + LANE_GAP,
-        "graph_cpu": TITLE_H + PAD + LINE_H + 2 * (LANE_H + LANE_GAP),
-    }
-    # We actually use a 2-lane layout: top = eager, bottom = graph
+    # 2-lane layout: top = eager, bottom = graph
     lane_y = {
         "eager": TITLE_H + PAD + LINE_H,
         "graph": TITLE_H + PAD + LINE_H + LANE_H + LANE_GAP,

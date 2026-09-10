@@ -18,25 +18,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
-
-from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
-NUM_SLOTS = 2
-MAX_NUM_SEQS = 3
-
-W, H = 1180, 430
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM = (118, 214, 118), (128, 136, 148)
-PREFILL_FG, DECODE_FG, PREEMPT_FG = (226, 184, 92), (94, 193, 117), (245, 99, 72)
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, PROMPT_FG, DIM, TEXT_FG, GREEN, RED, AMBER,
+    PREFILL_FG, DECODE_OK, STALLED,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
 
 
 @dataclass
