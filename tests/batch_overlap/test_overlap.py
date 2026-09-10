@@ -5,7 +5,7 @@ spellings (``1``/``0``, ``on``/``off``) and the extend-row planning are
 checked without a GPU.
 
 Usage:
-    pytest tests/executor/test_overlap.py
+    pytest tests/batch_overlap/test_overlap.py
 """
 
 from __future__ import annotations

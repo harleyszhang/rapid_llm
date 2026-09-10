@@ -13,12 +13,21 @@ streams identical with TBO on and off — on a dense (Qwen3-0.6B) and a MoE
 (DeepSeek-V2-Lite) checkpoint.
 
 Usage:
-    pytest tests/executor/test_tbo.py
+    pytest tests/batch_overlap/test_two_batch_overlap.py
+
+The NCCL payloads and the engine-level tests need two CUDA devices. The dense
+claims run on Qwen3-0.6B and the MoE seam claim on DeepSeek-V2-Lite, both under
+``my_weight/`` and both overridable (``RAPID_LLM_TEST_QWEN3_DIR`` /
+``RAPID_LLM_TEST_DSV2_DIR``); a machine without the checkpoint reports the claim
+UNVERIFIED rather than passing it against a stand-in.
 """
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
+import traceback
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -37,13 +46,40 @@ from rapid_llm.executor.attention_metadata import AttentionMetadata
 from rapid_llm.executor.cuda_graph import _GraphKey
 from rapid_llm.executor.model_runner import ModelRunner
 from rapid_llm.executor.slot_batch import SlotBatch
+from tests.conftest import checkpoint_problem
 from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-QWEN = str(ROOT / "my_weight" / "Qwen3-0.6B")
-DSV2L = str(ROOT / "my_weight" / "DeepSeek-V2-Lite")
+
+#: The dense checkpoint the payloads and the dense engine arms run, and the MoE
+#: checkpoint the seam claim needs — named rather than the shared ``model_dir``:
+#: the MoE claim would be vacuous against a dense stand-in, and the shared
+#: default is whichever checkpoint a machine happens to hold. Each has an
+#: override, so a machine that keeps weights outside ``my_weight/`` still runs
+#: the claims instead of skipping them.
+QWEN = "my_weight/Qwen3-0.6B"
+QWEN_ENV = "RAPID_LLM_TEST_QWEN3_DIR"
+DSV2L = "my_weight/DeepSeek-V2-Lite"
+DSV2_ENV = "RAPID_LLM_TEST_DSV2_DIR"
 
 ROWS = 8
+
+
+def _checkpoint(reference: str, env_var: str) -> str:
+    """The named checkpoint, or a visible xfail naming what this machine lacks.
+
+    xfail, not skip: without its checkpoint a claim is UNVERIFIED, and that
+    must stay visible rather than read as green. No ``weights`` mark either —
+    that gate answers about one shared checkpoint, and these claims are
+    checked per architecture.
+    """
+    path = Path(os.environ.get(env_var, reference))
+    if not path.is_absolute():
+        path = ROOT / path
+    problem = checkpoint_problem(path)
+    if problem:
+        pytest.xfail(f"UNVERIFIED: {problem}")
+    return str(path)
 
 
 @pytest.fixture(autouse=True)
@@ -211,8 +247,8 @@ def _decode_step(runner: ModelRunner, slot_batch: SlotBatch, slots, seq_lens, to
     return ids, positions
 
 
-def _payload_parity_and_overlap(rank: int) -> dict:
-    """One rank of the parity + overlap payload over a real 2-shard Qwen3."""
+def _payload_parity_and_overlap(rank: int, model: str) -> dict:
+    """One rank of the parity + overlap payload over a real 2-shard checkpoint."""
     os.environ[TBO_ENV] = "1"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
     os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
@@ -220,7 +256,7 @@ def _payload_parity_and_overlap(rank: int) -> dict:
     CommStreamPool.reset()
     device = torch.device("cuda", rank)
 
-    runner = ModelRunner.build(QWEN, max_seq_len=128, max_gpu_num_blocks=4096)
+    runner = ModelRunner.build(model, max_seq_len=128, max_gpu_num_blocks=4096)
     slot_batch = SlotBatch(runner)
 
     # A stable fake running set: slot i's position p lives at cache row i*64+p,
@@ -275,8 +311,10 @@ def _payload_parity_and_overlap(rank: int) -> dict:
 
 
 @needs_gpus(2)
+@pytest.mark.slow
 def test_forward_tbo_matches_eager_and_overlaps_on_two_ranks():
-    results = run_on_tp_ranks(_payload_parity_and_overlap, tp_size=2)
+    model = _checkpoint(QWEN, QWEN_ENV)
+    results = run_on_tp_ranks(partial(_payload_parity_and_overlap, model=model), tp_size=2)
     assert all(r["argmax"] for r in results)
     assert all(r["overlap_ms"] > 0.0 for r in results)
 
@@ -284,7 +322,7 @@ def test_forward_tbo_matches_eager_and_overlaps_on_two_ranks():
 # --------------------------------------------------------------------------- #
 # Two-rank NCCL payload: the TBO interleave captured inside a CUDA graph
 # --------------------------------------------------------------------------- #
-def _payload_graph_tbo_replay_parity(rank: int) -> dict:
+def _payload_graph_tbo_replay_parity(rank: int, model: str) -> dict:
     """One rank: capture the TBO interleave as a graph, replay it, compare.
 
     Capture runs before the eager pass, the way the engine orders them:
@@ -302,7 +340,7 @@ def _payload_graph_tbo_replay_parity(rank: int) -> dict:
     reset_tbo_policy()
     CommStreamPool.reset()
 
-    runner = ModelRunner.build(QWEN, max_seq_len=128, max_gpu_num_blocks=4096, use_cuda_graph=True)
+    runner = ModelRunner.build(model, max_seq_len=128, max_gpu_num_blocks=4096, use_cuda_graph=True)
     slot_batch = SlotBatch(runner)
 
     slots = list(range(ROWS))
@@ -339,6 +377,7 @@ def _payload_graph_tbo_replay_parity(rank: int) -> dict:
 
 
 @needs_gpus(2)
+@pytest.mark.slow
 def test_tbo_graph_replay_matches_eager_tbo_on_two_ranks():
     """A captured TBO graph replays the interleave faithfully.
 
@@ -347,39 +386,64 @@ def test_tbo_graph_replay_matches_eager_tbo_on_two_ranks():
     as ordinary cross-stream dependencies and replay keeps the overlap —
     and numerically the recorded kernel sequence is the eager interleave's.
     """
-    results = run_on_tp_ranks(_payload_graph_tbo_replay_parity, tp_size=2)
+    model = _checkpoint(QWEN, QWEN_ENV)
+    results = run_on_tp_ranks(partial(_payload_graph_tbo_replay_parity, model=model), tp_size=2)
     assert all(r["replayed"] for r in results)
 
 
 # --------------------------------------------------------------------------- #
 # Engine-level greedy parity: dense and MoE checkpoints
 # --------------------------------------------------------------------------- #
-def _greedy_tokens(model_dir: str, tbo_on: bool) -> list[list[int]]:
-    """One arm of the end-to-end comparison: greedy stream with TBO on/off."""
+#: The prompts every arm runs, so the arms cannot drift apart: the comparison
+#: is only meaningful over identical inputs.
+_PROMPTS = [
+    "The capital of France is",
+    "One two three four five",
+    "Water boils at a temperature of",
+    "The first president of the United States was",
+]
+
+
+def _boot(model_dir: str, *, use_cuda_graph: bool):
+    """Boot a two-rank engine for one arm, inside the arm's own process.
+
+    ``MASTER_PORT`` is cleared first so the fresh port ``launch_tensor_parallel``
+    picks actually reaches the rendezvous: ``init_parallel`` resolves the port
+    through that variable with ``setdefault``, so an inherited value hijacks the
+    boot -- ``free_port()``'s result is ignored and the group binds a port this
+    process has no business with.
+    """
+    os.environ.pop("MASTER_PORT", None)
+    from rapid_llm.engine import ContinuousBatchingEngine
+
+    return ContinuousBatchingEngine.from_pretrained(
+        model_dir,
+        tensor_parallel_size=2,
+        max_seq_len=1024,
+        max_num_seqs=8,
+        use_cuda_graph=use_cuda_graph,
+    )
+
+
+def _greedy_stream(model_dir: str, *, tbo_on: bool, use_cuda_graph: bool) -> list[list[int]]:
+    """One arm of the end-to-end comparison: the shared greedy stream.
+
+    Same prompts and sampling on every arm by construction, differing only in
+    the TBO switch and whether decode replays a captured interleave
+    (``min_rows=2`` makes every captured batch size in the engine's grid,
+    clamped to ``max_num_seqs=8``, record the interleave, while the batch-1
+    graph keeps the plain shape -- both paths in one run). The eager arms are
+    the comparison's point: the policy stands down when a graph is active, so
+    only eager decode exercises the interleave.
+    """
     os.environ[TBO_ENV] = "1" if tbo_on else "0"
     os.environ[TBO_MIN_ROWS_ENV] = "2"
-    reset_tbo_policy()  # rank0 process outlives the first arm; followers do not
     from rapid_llm import SamplingParams
-    from rapid_llm.engine import ContinuousBatchingEngine
 
-    # No CUDA graph: the policy stands down when one is active, so both arms
-    # must run eager decode for the comparison to exercise TBO at all.
-    engine = ContinuousBatchingEngine.from_pretrained(
-        model_dir,
-        tensor_parallel_size=2,
-        max_seq_len=1024,
-        max_num_seqs=8,
-        use_cuda_graph=False,
-    )
+    engine = _boot(model_dir, use_cuda_graph=use_cuda_graph)
     try:
         params = SamplingParams(max_gen_len=12, temperature=0.0, top_p=1.0, repetition_penalty=1.0)
-        prompts = [
-            "The capital of France is",
-            "One two three four five",
-            "Water boils at a temperature of",
-            "The first president of the United States was",
-        ]
-        requests = [engine.add_request(prompt, params) for prompt in prompts]
+        requests = [engine.add_request(prompt, params) for prompt in _PROMPTS]
         while engine.has_unfinished_requests():
             engine.step()
         return [list(request.output_token_ids) for request in requests]
@@ -387,58 +451,74 @@ def _greedy_tokens(model_dir: str, tbo_on: bool) -> list[list[int]]:
         engine.shutdown()
 
 
-def _greedy_tokens_graph(model_dir: str) -> list[list[int]]:
-    """The captured arm: graphs on, TBO on — decode replays the interleave.
+def _arm_in_process(model_dir: str, tbo_on: bool, use_cuda_graph: bool, results: mp.Queue) -> None:
+    """Child entry of :func:`_run_arm`: run the arm, report streams or traceback."""
+    try:
+        streams = _greedy_stream(model_dir, tbo_on=tbo_on, use_cuda_graph=use_cuda_graph)
+    except BaseException:  # travels as text: a child's exception is invisible to pytest
+        results.put((None, traceback.format_exc()))
+    else:
+        results.put((streams, None))
 
-    Same prompts and sampling as :func:`_greedy_tokens`, so the streams are
-    directly comparable. ``min_rows=2`` makes every captured batch size in
-    the engine's grid (clamped to ``max_num_seqs=8``) record the interleave,
-    while the batch-1 graph keeps the plain shape — both paths in one run.
+
+def _run_arm(model_dir: str, *, tbo_on: bool, use_cuda_graph: bool) -> list[list[int]]:
+    """Run one comparison arm in a fresh process and return its greedy streams.
+
+    A process per arm, not two arms in the pytest process: the engine's second
+    in-process boot is not safe to lean on -- ``init_parallel`` freezes the
+    rendezvous port in ``MASTER_PORT`` with ``setdefault`` on the first boot,
+    and the engine's teardown does not reliably release the group or its store,
+    which has failed the second arm with EADDRINUSE and left a grid standing
+    for later tests. A process that exits takes the group, the store, the port
+    and the env with it, so the arms cannot leak into each other -- or into
+    the rest of the suite.
     """
-    os.environ[TBO_ENV] = "1"
-    os.environ[TBO_MIN_ROWS_ENV] = "2"
-    reset_tbo_policy()
-    from rapid_llm import SamplingParams
-    from rapid_llm.engine import ContinuousBatchingEngine
-
-    engine = ContinuousBatchingEngine.from_pretrained(
-        model_dir,
-        tensor_parallel_size=2,
-        max_seq_len=1024,
-        max_num_seqs=8,
-        use_cuda_graph=True,
+    context = mp.get_context("spawn")
+    results: mp.Queue = context.Queue()
+    arm = context.Process(
+        target=_arm_in_process,
+        args=(model_dir, tbo_on, use_cuda_graph, results),
+        name="rapid-llm-tbo-arm",
+        daemon=True,
     )
-    try:
-        params = SamplingParams(max_gen_len=12, temperature=0.0, top_p=1.0, repetition_penalty=1.0)
-        prompts = [
-            "The capital of France is",
-            "One two three four five",
-            "Water boils at a temperature of",
-            "The first president of the United States was",
-        ]
-        requests = [engine.add_request(prompt, params) for prompt in prompts]
-        while engine.has_unfinished_requests():
-            engine.step()
-        return [list(request.output_token_ids) for request in requests]
-    finally:
-        engine.shutdown()
+    arm.start()
+    arm.join(timeout=600)
+    if arm.is_alive():
+        arm.terminate()
+        arm.join(timeout=30)
+        raise TimeoutError(f"tbo_on={tbo_on}, use_cuda_graph={use_cuda_graph}: no result in 600s")
+    if arm.exitcode != 0:
+        raise AssertionError(
+            f"tbo_on={tbo_on}, use_cuda_graph={use_cuda_graph}: arm exited {arm.exitcode}"
+        )
+    streams, error = results.get(timeout=30)
+    if error is not None:
+        raise AssertionError(
+            f"tbo_on={tbo_on}, use_cuda_graph={use_cuda_graph} arm failed:\n{error}"
+        )
+    return streams
 
 
 @needs_gpus(2)
+@pytest.mark.slow
 def test_tbo_greedy_tokens_match_baseline_dense():
-    baseline = _greedy_tokens(QWEN, tbo_on=False)
-    overlapped = _greedy_tokens(QWEN, tbo_on=True)
+    model = _checkpoint(QWEN, QWEN_ENV)
+    baseline = _run_arm(model, tbo_on=False, use_cuda_graph=False)
+    overlapped = _run_arm(model, tbo_on=True, use_cuda_graph=False)
     assert baseline == overlapped, "TBO must not change the greedy token stream"
 
 
 @needs_gpus(2)
+@pytest.mark.slow
 def test_tbo_greedy_tokens_match_baseline_moe():
-    baseline = _greedy_tokens(DSV2L, tbo_on=False)
-    overlapped = _greedy_tokens(DSV2L, tbo_on=True)
+    model = _checkpoint(DSV2L, DSV2_ENV)
+    baseline = _run_arm(model, tbo_on=False, use_cuda_graph=False)
+    overlapped = _run_arm(model, tbo_on=True, use_cuda_graph=False)
     assert baseline == overlapped, "the MoE stack interleaves through the same seam"
 
 
 @needs_gpus(2)
+@pytest.mark.slow
 def test_tbo_graph_greedy_tokens_match_baseline_dense():
     """The whole pipeline with the interleave captured: graphs on, TBO on.
 
@@ -449,6 +529,7 @@ def test_tbo_graph_greedy_tokens_match_baseline_dense():
     is bit-for-bit the eager interleave, which the eager parity test already
     pinned to the baseline.
     """
-    baseline = _greedy_tokens(QWEN, tbo_on=False)
-    graphed = _greedy_tokens_graph(QWEN)
+    model = _checkpoint(QWEN, QWEN_ENV)
+    baseline = _run_arm(model, tbo_on=False, use_cuda_graph=False)
+    graphed = _run_arm(model, tbo_on=True, use_cuda_graph=True)
     assert baseline == graphed, "a captured interleave must not change the greedy stream"

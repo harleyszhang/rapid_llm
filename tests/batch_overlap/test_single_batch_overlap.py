@@ -10,6 +10,9 @@ half to interleave against: that is the gap TBO cannot cover.
 
 Usage:
     pytest tests/batch_overlap/test_single_batch_overlap.py
+
+The two-rank NCCL payloads need two CUDA devices; the policy and flag tests
+run anywhere.
 """
 
 from __future__ import annotations
@@ -301,10 +304,9 @@ def test_sbo_shared_mlp_overlaps_dispatch_on_two_ranks():
     assert all(r["rounds"] >= 0 for r in results)
 
 
+@pytest.mark.gpu
 def test_sbo_alt_stream_is_cached_per_device():
     """One stream per device, handed back on every later call."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs a CUDA device")
     first = sbo_alt_stream("cuda")
     assert sbo_alt_stream("cuda") is first, "the pool must hand back the same stream"
     reset_sbo_streams()
