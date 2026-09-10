@@ -67,34 +67,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--iters", type=int, default=2, help="Timed rounds (median reported)")
     parser.add_argument(
-        "--greedy", action=argparse.BooleanOptionalAction, default=True,
+        "--greedy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Greedy decoding (the benchmark default; off = rapid_llm's SAMPLE_KW)",
     )
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument(
-        "--data-parallel-size", type=int, default=1,
+        "--data-parallel-size",
+        type=int,
+        default=1,
         help="Rapid_llm arm only: run the batch through N in-process replicas "
         "(vLLM-style inline sharding; no framework-level dp module)",
     )
-    parser.add_argument("--max-seq-len", type=int, default=0,
-                        help="Context window; 0 = engine default / config")
-    parser.add_argument("--max-num-seqs", type=int, default=0,
-                        help="Concurrency ceiling; 0 = engine default")
-    parser.add_argument("--gpu-mem-util", type=float, default=0.90,
-                        help="vLLM gpu_memory_utilization")
     parser.add_argument(
-        "--engine-arg", action="append", default=[],
+        "--max-seq-len", type=int, default=0, help="Context window; 0 = engine default / config"
+    )
+    parser.add_argument(
+        "--max-num-seqs", type=int, default=0, help="Concurrency ceiling; 0 = engine default"
+    )
+    parser.add_argument(
+        "--gpu-mem-util", type=float, default=0.90, help="vLLM gpu_memory_utilization"
+    )
+    parser.add_argument(
+        "--engine-arg",
+        action="append",
+        default=[],
         help="rapid_llm engine kwarg, key=value (repeatable; feature A/B goes here)",
     )
     parser.add_argument(
-        "--vllm-arg", action="append", default=[],
+        "--vllm-arg",
+        action="append",
+        default=[],
         help="vLLM LLM() kwarg, key=value (repeatable)",
     )
-    parser.add_argument("--disable-ignore-eos", action="store_true",
-                        help="vLLM arm: let requests stop at EOS (default: run to length)")
+    parser.add_argument(
+        "--disable-ignore-eos",
+        action="store_true",
+        help="vLLM arm: let requests stop at EOS (default: run to length)",
+    )
     parser.add_argument("--log-dir", default=None, help="Write a JSON log here")
     parser.add_argument(
-        "--json-out", default=None,
+        "--json-out",
+        default=None,
         help="Write the JSON log to this exact path (suite orchestration mode)",
     )
     parser.add_argument("--tag", default="bench_offline", help="JSON filename prefix")
@@ -112,21 +127,27 @@ def _fmt_pct(row, p50_key, p99_key, mean_key, width, decimals) -> str:
 def print_summary(results: dict) -> None:
     """The comparison table: one line per arm, in :data:`ARMS` order."""
     print(f"\n{'─' * 78}")
-    print(f"{'engine':<14}{'TTFT p50/p99 ms':>22}{'TPOT p50/p99 ms':>20}"
-          f"{'TPS tok/s':>12}{'tokens':>10}")
+    print(
+        f"{'engine':<14}{'TTFT p50/p99 ms':>22}{'TPOT p50/p99 ms':>20}"
+        f"{'TPS tok/s':>12}{'tokens':>10}"
+    )
     print(f"{'─' * 78}")
     for name, row in results.items():
         if "error" in row or "skipped" in row:
             print(f"{name:<14}{row.get('error') or row.get('skipped')}")
             continue
         if "data_parallel_size" in row:  # DP reports throughput, not latency
-            print(f"{name:<14}{'DP throughput basis':>22}{'—':>20}"
-                  f"{row['tps']:>12.1f}{row['gen_tokens']:>10}")
+            print(
+                f"{name:<14}{'DP throughput basis':>22}{'—':>20}"
+                f"{row['tps']:>12.1f}{row['gen_tokens']:>10}"
+            )
             continue
-        print(f"{name:<14}"
-              f"{_fmt_pct(row, 'ttft_p50_ms', 'ttft_p99_ms', 'ttft_ms', 10, 1):>22}"
-              f"{_fmt_pct(row, 'tpot_p50_ms', 'tpot_p99_ms', 'tpot_ms', 9, 2):>20}"
-              f"{row['tps']:>12.1f}{row['gen_tokens']:>10}")
+        print(
+            f"{name:<14}"
+            f"{_fmt_pct(row, 'ttft_p50_ms', 'ttft_p99_ms', 'ttft_ms', 10, 1):>22}"
+            f"{_fmt_pct(row, 'tpot_p50_ms', 'tpot_p99_ms', 'tpot_ms', 9, 2):>20}"
+            f"{row['tps']:>12.1f}{row['gen_tokens']:>10}"
+        )
     if any(row.get("basis") for row in results.values()):
         print("(* = batch-level basis: this row has no per-request latency distribution)")
     print(f"{'─' * 78}")

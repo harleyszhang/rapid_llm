@@ -99,9 +99,7 @@ def get_quant_config_from_hf(hf_config: Any) -> QuantizationConfig | None:
     # DeepSeek-V4 fp8 checkpoints share quant_method="fp8" with plain
     # blockwise-fp8 models, but add ue8m0 scales and (usually) mxfp4 routed
     # experts; the model_type picks the V4-aware config.
-    if method_name == "fp8" and str(getattr(hf_config, "model_type", "") or "") == (
-        "deepseek_v4"
-    ):
+    if method_name == "fp8" and str(getattr(hf_config, "model_type", "") or "") == ("deepseek_v4"):
         method_name = "deepseek_v4_fp8"
     cls = BASE_QUANTIZATION_METHODS.get(method_name)
     if cls is None:

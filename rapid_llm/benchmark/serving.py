@@ -87,7 +87,7 @@ async def request_chat_completions(
             async for raw in response.aiter_lines():
                 if not raw.startswith("data:"):
                     continue
-                chunk = raw[len("data:"):].strip()
+                chunk = raw[len("data:") :].strip()
                 if chunk == "[DONE]":
                     break
                 body = json.loads(chunk)
@@ -187,9 +187,7 @@ async def run_benchmark(rows, args, api_url: str, input_tokens: int, tokenizer=N
                 await asyncio.sleep(delay)
             return await one(row, semaphore, done)
 
-        outputs = await asyncio.gather(
-            *(launch(i, row) for i, row in enumerate(rows))
-        )
+        outputs = await asyncio.gather(*(launch(i, row) for i, row in enumerate(rows)))
         duration = time.perf_counter() - started
 
     return collect_metrics(outputs, duration, args, input_tokens=input_tokens)
@@ -235,8 +233,11 @@ def collect_metrics(outputs, duration: float, args, input_tokens: int = 0) -> di
             1
             for o in completed
             if (not args.ttft_slo_ms or o.ttft * 1000 <= args.ttft_slo_ms)
-            and (not args.tpot_slo_ms or o.output_tokens <= 1
-                 or (o.latency - o.ttft) / (o.output_tokens - 1) * 1000 <= args.tpot_slo_ms)
+            and (
+                not args.tpot_slo_ms
+                or o.output_tokens <= 1
+                or (o.latency - o.ttft) / (o.output_tokens - 1) * 1000 <= args.tpot_slo_ms
+            )
         )
         metrics["goodput"] = good / duration if duration else 0.0
     return metrics
@@ -248,14 +249,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--model", required=True, help="The served model name")
     parser.add_argument("--request-rate", type=float, default=4.0, help="Requests/s")
-    parser.add_argument("--burstiness", type=float, default=1.0,
-                        help="Poisson at 1; Gamma gaps otherwise (vLLM convention)")
-    parser.add_argument("--max-concurrency", type=int, default=0,
-                        help="In-flight cap; 0 = unbounded")
+    parser.add_argument(
+        "--burstiness",
+        type=float,
+        default=1.0,
+        help="Poisson at 1; Gamma gaps otherwise (vLLM convention)",
+    )
+    parser.add_argument(
+        "--max-concurrency", type=int, default=0, help="In-flight cap; 0 = unbounded"
+    )
     parser.add_argument("--warmup-requests", type=int, default=4)
     parser.add_argument("--timeout-s", type=float, default=3600.0)
-    parser.add_argument("--ignore-eos", action="store_true",
-                        help="Send ignore_eos in the payload (vLLM servers honour it)")
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Send ignore_eos in the payload (vLLM servers honour it)",
+    )
     parser.add_argument("--ttft-slo-ms", type=float, default=None, help="Goodput SLO: TTFT")
     parser.add_argument("--tpot-slo-ms", type=float, default=None, help="Goodput SLO: TPOT")
     parser.add_argument("--log-dir", default=None)
@@ -283,18 +292,23 @@ def main(argv=None) -> int:
     metrics["heartbeat_latency_s"] = heartbeat_s
 
     print(f"\n{'─' * 66}")
-    print(f"Successful: {metrics['completed']} / {len(rows)}   "
-          f"duration {metrics['duration_s']:.2f} s")
+    print(
+        f"Successful: {metrics['completed']} / {len(rows)}   duration {metrics['duration_s']:.2f} s"
+    )
     print(f"Request throughput:  {metrics['request_throughput']:9.2f} req/s")
     print(f"Output throughput:   {metrics['output_token_throughput']:9.1f} tok/s")
     if metrics.get("goodput") is not None:
-        print(f"Goodput (SLO {args.ttft_slo_ms}ms/{args.tpot_slo_ms}ms): "
-              f"{metrics['goodput']:9.2f} req/s")
+        print(
+            f"Goodput (SLO {args.ttft_slo_ms}ms/{args.tpot_slo_ms}ms): "
+            f"{metrics['goodput']:9.2f} req/s"
+        )
     for key in ("ttft_ms", "tpot_ms", "itl_ms"):
         stats = metrics.get(key)
         if isinstance(stats, dict):
-            print(f"{key.upper():>8}: mean {stats['mean']:8.2f} | median {stats['median']:8.2f}"
-                  f" | p99 {stats['p99']:8.2f} ms")
+            print(
+                f"{key.upper():>8}: mean {stats['mean']:8.2f} | median {stats['median']:8.2f}"
+                f" | p99 {stats['p99']:8.2f} ms"
+            )
     print(f"{'─' * 66}")
 
     if args.log_dir:

@@ -51,10 +51,10 @@ class StandardCombineInput(NamedTuple):
 class StandardDispatcher(BaseDispatcher):
     """Non-EP dispatch/combine: identity, since every rank holds all tokens."""
 
-    def dispatch(self, hidden_states: torch.Tensor, topk_output: TopKOutput) -> StandardDispatchOutput:
-        return StandardDispatchOutput(
-            hidden_states, topk_output.topk_weights, topk_output.topk_ids
-        )
+    def dispatch(
+        self, hidden_states: torch.Tensor, topk_output: TopKOutput
+    ) -> StandardDispatchOutput:
+        return StandardDispatchOutput(hidden_states, topk_output.topk_weights, topk_output.topk_ids)
 
     def combine(self, combine_input) -> torch.Tensor:
         # Accept either the tensor directly (the layer's fast path) or the

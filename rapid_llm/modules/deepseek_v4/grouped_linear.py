@@ -61,9 +61,7 @@ class DeepseekV4GroupedLinear(nn.Module):
                 torch.empty(out_features, in_per_group, dtype=quant.storage_dtype)
             )
             self.weight_scale_inv = RawParameter(
-                torch.empty(
-                    *quant.scale_shape(out_features, in_per_group), dtype=torch.float32
-                )
+                torch.empty(*quant.scale_shape(out_features, in_per_group), dtype=torch.float32)
             )
             self.weight_scale_inv.weight_loader = self._loader
         self.weight.weight_loader = self._loader
@@ -96,9 +94,7 @@ class DeepseekV4GroupedLinear(nn.Module):
         input_shape = x.shape[:-2]
         hidden_dim = x.shape[-1]
         if hidden_dim != self.in_per_group:
-            raise ValueError(
-                f"grouped linear input width {hidden_dim} != {self.in_per_group}"
-            )
+            raise ValueError(f"grouped linear input width {hidden_dim} != {self.in_per_group}")
         if self.quant is None:
             w = self.weight.view(self.n_groups, -1, hidden_dim).transpose(1, 2)
             x = x.reshape(-1, self.n_groups, hidden_dim).transpose(0, 1)

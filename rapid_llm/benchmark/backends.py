@@ -153,9 +153,7 @@ class LiteBackend(Backend):
         total = time.perf_counter() - t_start
 
         texts = ["".join(step[i] for step in step_texts) for i in range(len(prompts))]
-        result = steps_to_result(
-            step_ends, t_start=t_start, total_s=total, batch=len(prompts)
-        )
+        result = steps_to_result(step_ends, t_start=t_start, total_s=total, batch=len(prompts))
         return result, texts
 
     def texts(self) -> list[str]:
@@ -239,8 +237,9 @@ class DPBackend(Backend):
     :class:`BenchResult` documents as "not measured".
     """
 
-    def __init__(self, model_dir: str, *, data_parallel_size: int, max_num_seqs: int = 0,
-                 **engine_kwargs):
+    def __init__(
+        self, model_dir: str, *, data_parallel_size: int, max_num_seqs: int = 0, **engine_kwargs
+    ):
         from rapid_llm import DataParallelEngine
 
         self._engine = DataParallelEngine(
@@ -570,8 +569,7 @@ class VLLMBackend(Backend):
 
         # Warm up capture/autotune so the measured run is steady state.
         for _ in range(2):
-            self.llm.generate(warmup, SamplingParams(max_tokens=8, temperature=0.0),
-                              use_tqdm=False)
+            self.llm.generate(warmup, SamplingParams(max_tokens=8, temperature=0.0), use_tqdm=False)
 
         rounds = [self._one_round(prompts, per_row) for _ in range(iters)]
         ttft, total, outputs = median_round(rounds, key=lambda r: r[1])

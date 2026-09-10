@@ -203,7 +203,11 @@ class KernelSpec:
             raise ValueError(f"name prefix {head!r} != backend {self.backend!r} in {self.name!r}")
         if not _OP_RE.match(self.op):
             raise ValueError(f"KernelSpec.op must be a lowercase dotted id, got {self.op!r}")
-        for role, ref in (("target", self.target), ("available", self.available), ("step_prepare", self.step_prepare)):
+        for role, ref in (
+            ("target", self.target),
+            ("available", self.available),
+            ("step_prepare", self.step_prepare),
+        ):
             if ref is not None and not _TARGET_RE.match(ref):
                 raise ValueError(f"KernelSpec.{role} must be 'module:attr', got {ref!r}")
         if self.available is None and self.backend != "native":

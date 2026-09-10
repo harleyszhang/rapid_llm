@@ -576,11 +576,7 @@ def packed_decode_supported(num_heads: int, num_kv_heads: int, head_dim: int) ->
     if num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
         return False
     group = num_heads // num_kv_heads
-    return (
-        4 <= group <= _PACKED_BLOCK_M
-        and head_dim >= 16
-        and (head_dim & (head_dim - 1)) == 0
-    )
+    return 4 <= group <= _PACKED_BLOCK_M and head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
 
 
 @triton.jit

@@ -32,9 +32,7 @@ except ImportError:  # Triton is optional on CPU-only and macOS installs.
     tl = _TritonLanguageStub()
 
 
-def _validate_geometry(
-    n_experts: int, top_k: int, num_expert_group: int, topk_group: int
-) -> int:
+def _validate_geometry(n_experts: int, top_k: int, num_expert_group: int, topk_group: int) -> int:
     """Validate routing geometry and return experts per group."""
     if n_experts < 1:
         raise ValueError("num_experts must be positive")
@@ -50,6 +48,7 @@ def _validate_geometry(
             f"top_k must be in [1, {topk_group * per_group}] for the selected groups, got {top_k}"
         )
     return per_group
+
 
 _jit = triton.jit if triton is not None else lambda function: function
 

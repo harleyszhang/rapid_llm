@@ -81,8 +81,10 @@ def grouped_moe(
         ``[tokens, hidden]`` in ``hidden_states.dtype``.
     """
     if mxfp4:
-        raise ValueError("the deepgemm backend does not decode MXFP4 experts; "
-                         "route the block at the native Triton row instead")
+        raise ValueError(
+            "the deepgemm backend does not decode MXFP4 experts; "
+            "route the block at the native Triton row instead"
+        )
     import deep_gemm  # the JIT kernels live with the library; import at call time
 
     tokens, hidden = hidden_states.shape

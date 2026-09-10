@@ -149,7 +149,12 @@ class RequestRun:
         tpots = []
         for r in self.requests:
             n = len(r.output_token_ids)
-            if r.first_token_time and r.finish_time and n > 1 and r.finish_time > r.first_token_time:
+            if (
+                r.first_token_time
+                and r.finish_time
+                and n > 1
+                and r.finish_time > r.first_token_time
+            ):
                 tpots.append((r.finish_time - r.first_token_time) / (n - 1) * 1000)
         return tpots
 
@@ -165,9 +170,7 @@ class RequestRun:
         """
         firsts = [r.first_token_time for r in self.requests if r.first_token_time]
         finishes = [
-            (r.finish_time, len(r.output_token_ids))
-            for r in self.requests
-            if r.finish_time
+            (r.finish_time, len(r.output_token_ids)) for r in self.requests if r.finish_time
         ]
         if len(firsts) < len(self.requests) or len(finishes) < len(self.requests):
             return None

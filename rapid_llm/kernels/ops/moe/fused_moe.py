@@ -559,9 +559,7 @@ def _fused_moe_kernel(
                 # Both planes share the k-block's scale (GROUP_K is a multiple
                 # of BLOCK_K -- the group_k check in _fused_moe guarantees it),
                 # so one multiply covers the two half-K dots together.
-                accumulator += (
-                    tl.dot(a_even, b_lo) + tl.dot(a_odd, b_hi)
-                ) * b_scale[None, :]
+                accumulator += (tl.dot(a_even, b_lo) + tl.dot(a_odd, b_hi)) * b_scale[None, :]
             # ``_INT4_PACK_FACTOR`` spelled as its literal: Triton kernels only
             # resolve globals that are tl.constexpr instances (see the modes'
             # note above), so the kernel body cannot name the launcher's constant.
@@ -587,9 +585,7 @@ def _fused_moe_kernel(
             sign = ((nibbles >> 3) & 1).to(tl.float32)
             e = (nibbles >> 1) & 3
             m = (nibbles & 1).to(tl.float32)
-            mag = tl.where(
-                e == 0, m * 0.5, (1.0 + 0.5 * m) * tl.exp2((e - 1).to(tl.float32))
-            )
+            mag = tl.where(e == 0, m * 0.5, (1.0 + 0.5 * m) * tl.exp2((e - 1).to(tl.float32)))
             val = tl.where(sign == 1, -mag, mag)
             # GROUP_K (32) is narrower than BLOCK_K, so one k-tile spans
             # BLOCK_K // GROUP_K scale groups: load one scale per group
@@ -954,8 +950,7 @@ def _invoke_moe_gemm(
         # so it hoisted) to ~scale^2 of the right answer. Block-wise fp8 keeps the
         # in-loop form too because its scale genuinely changes with k.
         SCALE_HOISTED=(
-            quant_mode not in (_QUANT_NONE, _QUANT_INT4, _QUANT_MXFP4)
-            and group_k_eff >= k_logical
+            quant_mode not in (_QUANT_NONE, _QUANT_INT4, _QUANT_MXFP4) and group_k_eff >= k_logical
         ),
         compute_type=torch_to_triton_dtype[c.dtype],
         # A_QUANT quantises the activation inside the kernel (see
@@ -1383,8 +1378,11 @@ def fused_moe(
     quant_mode = _quant_mode(w1, w1_scale, w1_zeros, mxfp4)
     if quant_mode != _quant_mode(w2, w2_scale, w2_zeros, mxfp4):
         raise ValueError("w1 and w2 must use the same quantisation format")
-    if quant_mode and quant_mode != _QUANT_MXFP4 and group_k % 128 != 0 and (
-        group_k < min(hidden, intermediate)
+    if (
+        quant_mode
+        and quant_mode != _QUANT_MXFP4
+        and group_k % 128 != 0
+        and (group_k < min(hidden, intermediate))
     ):
         raise ValueError(f"group_k ({group_k}) must be a multiple of 128 unless it covers K")
     if quant_mode == _QUANT_MXFP4 and group_k != 32:

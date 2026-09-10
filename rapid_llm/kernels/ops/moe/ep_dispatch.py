@@ -213,9 +213,7 @@ def ep_dispatch_place(
     return send_pos
 
 
-def ep_local_ids(
-    payload_ids: torch.Tensor, *, expert_offset: int, num_local: int
-) -> torch.Tensor:
+def ep_local_ids(payload_ids: torch.Tensor, *, expert_offset: int, num_local: int) -> torch.Tensor:
     """Local-window ids for the received payload (``[buf]`` int32, pads -1)."""
     buf = payload_ids.shape[0]
     out = torch.empty(buf, dtype=torch.int32, device=payload_ids.device)

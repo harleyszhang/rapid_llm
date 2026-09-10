@@ -251,7 +251,7 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
 
     Under tensor parallelism the intended call pattern is::
 
-        partial = row_parallel_linear(x)          # all-reduce completes in-place
+        partial = row_parallel_linear(x)  # all-reduce completes in-place
         residual, y = fused_add_rmsnorm(partial, residual, weight, eps)
 
     so the all-reduce's write and the norm's read hit the same cache line.
@@ -272,9 +272,20 @@ def fused_add_rmsnorm(x, residual, weight, eps=1e-5):
     Y = torch.empty_like(x)
     residual = residual.contiguous().view(-1, N)
     fused_add_rms_norm_kernel[M,](
-        Y, x, residual, weight,
-        N, 1, N, 1, N, 1, N, eps,
-        BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps,
+        Y,
+        x,
+        residual,
+        weight,
+        N,
+        1,
+        N,
+        1,
+        N,
+        1,
+        N,
+        eps,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=num_warps,
     )
     return Y.view(orig_shape), residual.view(orig_shape)
 
