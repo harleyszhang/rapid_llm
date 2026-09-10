@@ -418,12 +418,11 @@ def _fused_moe_kernel(
 
     if QUANT_MODE == 3:
         # INT4: B is [E, N, K//2] uint8, two nibbles per byte (low nibble = lower
-        # K), the layout ``repack_int4_experts`` leaves. Replicated addressing --
-        # each byte is loaded for both its nibble rows (``offs_k // 2``) -- makes
-        # the k-tile [BLOCK_K, BLOCK_N] like the 8-bit paths, so the in-loop unpack
-        # is one shift-and-mask with no reshape; the 2x load is an L1 hit (see
+        # K), the layout ``repack_int4_experts`` leaves. One byte row serves the
+        # two k columns its nibbles decode to, so the k-tile is [BLOCK_K // 2,
+        # BLOCK_N] bytes and each plane below multiplies its own half of A (see
         # ``_INT4_PACK_FACTOR``).
-        offs_kb = offs_k // 2
+        offs_kb = tl.arange(0, BLOCK_K // 2)
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
@@ -509,10 +508,10 @@ def _fused_moe_kernel(
         if QUANT_MODE == 3:
             # INT4 path: one dense [BLOCK_K // 2, BLOCK_N] byte tile; the two
             # nibble planes come out in registers (see the addressing note
-            # above the loop). The masked form predicates per element along k,
-            # which decomposes the load into scalar bytes -- the same reason
-            # replicated addressing was slow -- so it is compiled out whenever
-            # K is tile-aligned, which both Qwen3-30B-A3B GEMMs are.
+            # above the loop). The masked form predicates per byte row along
+            # k, which decomposes the load into scalar bytes -- so it is
+            # compiled out whenever K is tile-aligned, which both
+            # Qwen3-30B-A3B GEMMs are.
             if EVEN_K:
                 b_byte = tl.load(b_ptrs)
             else:
@@ -600,7 +599,7 @@ def _fused_moe_kernel(
             val_g = tl.reshape(val, (BLOCK_K // GROUP_K, GROUP_K, BLOCK_N))
             b = tl.reshape(val_g * s[:, None, :], (BLOCK_K, BLOCK_N)).to(a.dtype)
             accumulator += tl.dot(a, b)
-            b_ptrs += (BLOCK_K // 2 if QUANT_MODE == 3 else BLOCK_K // 8) * stride_bk
+            b_ptrs += (BLOCK_K // 8) * stride_bk
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0)
             if QUANT_MODE == 0:
