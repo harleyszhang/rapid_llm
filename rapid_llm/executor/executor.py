@@ -381,6 +381,34 @@ def launch_tensor_parallel(
     return tuple(followers)
 
 
+def reclaim_tensor_parallel_followers(followers: Sequence[mp.process.BaseProcess]) -> None:
+    """Reap launched followers and tear down the rank-0 half of their group.
+
+    The twin of :meth:`MultiprocExecutor.shutdown`'s teardown for the window
+    where the engine build itself failed: a follower then either died on its
+    own error (its ``run_follower`` finally cleaned its half of the group) or
+    is parked waiting for the first plan. Without this the process keeps the
+    parallel state ``launch_tensor_parallel`` installed — a half-dead group
+    that re-shards every engine, and poisons every test, built later in it.
+    """
+    from ..distributed.parallel_state import abandon_parallel, destroy_parallel
+
+    for process in followers:
+        # A follower that crashed exits immediately; one parked on the first
+        # broadcast cannot be asked to leave — the plan channel is a
+        # collective, and a peer still building its engine is not there yet —
+        # so it is terminated and joined.
+        process.join(timeout=5.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+    # The group half this process owns goes down with the same deadline the
+    # normal shutdown takes: a communicator whose peer died mid-collective can
+    # wedge its destroy, and the abandon after the deadline is what keeps
+    # this exit clean.
+    _destroy_with_deadline(destroy_parallel, abandon_parallel)
+
+
 def serve_plans(engine: LLMEngine, max_num_seqs: int, *, pipeline: bool | None = None) -> None:
     """Run broadcast plans until the driver sends ``None``. The whole of a follower.
 
