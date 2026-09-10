@@ -869,12 +869,14 @@ class ContinuousBatchingEngine:
 
         # O5 speculative decoding: before the normal decode pass, propose draft
         # tokens for decode requests and verify them in one EXTEND forward.
-        # Requests that had no drafts or zero acceptance fall through to the
-        # normal decode pass below.
-        spec_emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        # Requests the verify pass could not serve fall through to the normal
+        # decode pass below; that pass harvested its own tokens, so its
+        # requests join the return value directly instead of re-entering this
+        # one's harvest.
+        spec_advanced: list[Request] = []
         remaining_decode = list(scheduled.decode)
         if self._speculate and self._proposer and remaining_decode:
-            spec_emitted, remaining_decode = self._speculate_verify(remaining_decode)
+            spec_advanced, remaining_decode = self._speculate_verify(remaining_decode)
 
         if remaining_decode:
             work.append(_decode_work(remaining_decode))
@@ -888,7 +890,7 @@ class ContinuousBatchingEngine:
             tokens, logprobs = self._executor.execute(work_item.plan)
             pending.append((work_item, tokens, logprobs))
 
-        emitted: list[tuple[Request, int, PositionLogprobs | None]] = list(spec_emitted)
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
         for work_item, tokens, logprobs in pending:
             # ``prompt`` is uniformly None for a decode pass.
             if logprobs is not None and any(logprobs.prompt):
@@ -905,138 +907,131 @@ class ContinuousBatchingEngine:
                 )
             ]
         # Counter properties, not len(running): those copy the lists.
-        advanced = self._harvest(emitted)
+        advanced = self._harvest(emitted) + spec_advanced
         self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
         return advanced
 
     def _speculate_verify(
         self, decode_requests: list[Request]
-    ) -> tuple[list[tuple[Request, int, PositionLogprobs | None]], list[Request]]:
+    ) -> tuple[list[Request], list[Request]]:
         """O5 ngram speculative decoding: propose, verify, accept.
 
         For each decode request, proposes draft tokens from ngram lookup in
-        the prompt + generated text. Drafts are verified in one EXTEND forward:
-        the model processes all draft tokens and returns logits at each position.
-        Greedy verification: accept draft[i] if argmax(logits[i-1]) == draft[i].
+        the prompt + generated text, then verifies them in one EXTEND pass
+        whose stretch is anchored on the last generated token: the anchor
+        writes the KV row the decode pass it replaces would have written,
+        and draft ``j`` lands at row ``seq_len + j``. Row ``j`` of the
+        returned logits is the prediction after stretch row ``j``, so
+        ``logits[j]`` is exactly where draft ``j`` is checked; a mismatch at
+        ``j`` keeps drafts ``0..j-1`` and the argmax at ``j`` is the bonus
+        token. Accepted drafts and the bonus all flow through
+        :meth:`_harvest`, which owns detokenising, stop handling and the
+        length cap — an eos draft retires the request, and tokens past a
+        stop belong to nobody.
 
         Returns:
-            ``(emitted, remaining)``: accepted tokens (including the bonus token
-            at the acceptance boundary) and requests that need normal decode
-            (no drafts found or executor returned no logits).
+            ``(advanced, remaining)``: the requests the pass emitted tokens
+            for, and requests that need normal decode (no drafts found, no
+            block rows for the stretch, a logprob request the pass cannot
+            record for, or the executor returned no logits).
         """
         assert self._proposer is not None
-        # Phase 1: propose drafts for each decode request.
+        # Phase 1: propose drafts, keeping only what the pool has rows for.
+        # logprob requests keep the decode path: the verify pass returns raw
+        # logits, not the per-token records the sampler's path produces, so
+        # their records would skip every draft.
         drafts: list[tuple[Request, list[int]]] = []
-        no_draft: list[Request] = []
+        remaining: list[Request] = []
         for req in decode_requests:
+            if req.params.logprobs is not None:
+                remaining.append(req)
+                continue
             all_ids = list(req.prompt_token_ids) + list(req.output_token_ids)
             proposed = self._proposer.propose(all_ids)
-            if proposed:
-                drafts.append((req, proposed))
+            fit = self.scheduler.reserve_speculative(req, len(proposed)) if proposed else 0
+            if fit:
+                drafts.append((req, proposed[:fit]))
             else:
-                no_draft.append(req)
+                remaining.append(req)
 
         if not drafts:
-            return [], decode_requests
+            return [], remaining
 
-        # Phase 2: build a verify EXTEND ModelInput.
-        # Each speculative request contributes its draft tokens as one stretch.
-        slots, seq_starts, seq_lens, tokens_list = [], [], [], []
-        sampled_indices: list[int] = []
-        sampling_params_list: list[SamplingParams] = []
-        gen_counts_list: list[int] = []
-        block_writes_list: list[tuple[int, int, int, tuple[int, ...]]] = []
-        token_offset = 0
-        for i, (req, draft_ids) in enumerate(drafts):
-            n_draft = len(draft_ids)
-            # The stretch covers [seq_len - 1, seq_len - 1 + n_draft).
-            # seq_start = seq_len - 1 (the last cached position).
-            # seq_len after = seq_len - 1 + n_draft (the last draft position).
+        # Phase 2: build a verify EXTEND ModelInput. Each speculative request
+        # contributes one stretch: the anchor (its last generated token) plus
+        # its drafts, one contiguous span of cache rows the extend pass writes.
+        slots, seq_starts, seq_lens, tokens = [], [], [], []
+        block_writes: list[tuple[int, int, int, tuple[int, ...]]] = []
+        for req, draft_ids in drafts:
             cur_seq_len = req.seq_len
             slots.append(req.slot)
+            # The anchor's row, then one row per draft: rows seq_len-1 ..
+            # seq_len+n-1, all of them this pass's to write.
             seq_starts.append(cur_seq_len - 1)
-            seq_lens.append(cur_seq_len - 1 + n_draft)
-            tokens_list.extend(draft_ids)
-            # Sample at the last draft position (for the bonus token).
-            sampled_indices.append(i)
-            sampling_params_list.append(req.params)
-            gen_counts_list.append(len(req.output_token_ids) + n_draft)
-            # Block writes for the draft positions.
-            block_writes_list += [
+            seq_lens.append(cur_seq_len + len(draft_ids))
+            tokens.append(req.output_token_ids[-1])
+            tokens.extend(draft_ids)
+            block_writes += [
                 (req.slot, group_id, start_block, block_ids)
                 for group_id, start_block, block_ids in req.block_plan
             ]
-            token_offset += n_draft
 
         verify_plan = ModelInput(
             kind=PassKind.EXTEND,
             slots=tuple(slots),
             seq_starts=tuple(seq_starts),
             seq_lens=tuple(seq_lens),
-            tokens=tuple(tokens_list),
-            sampling=tuple(sampling_params_list),
-            sampled=tuple(sampled_indices),
-            gen_counts=tuple(gen_counts_list),
-            block_writes=tuple(block_writes_list),
+            tokens=tuple(tokens),
+            # No sampled rows: the bonus comes from the argmax below, and a
+            # sampled row here would drop a token nobody asked for into the
+            # generation grid the repetition penalty reads.
+            sampling=(),
+            sampled=(),
+            gen_counts=(),
+            block_writes=tuple(block_writes),
             return_logits=True,
         )
 
-        # Phase 3: execute verify pass.
-        verify_tokens, _records, all_logits = self._executor.execute_verify(verify_plan)
+        # Phase 3: execute the verify pass.
+        _tokens, _records, all_logits = self._executor.execute_verify(verify_plan)
 
         if all_logits is None:
-            # Executor didn't support logits; fall back to normal decode.
+            # Executor produced no logits; fall back to normal decode.
             return [], decode_requests
 
-        # Phase 4: verify each draft token against the model's argmax.
+        # Phase 4: check each draft against the model's argmax, then hand the
+        # accepted span plus the bonus to _harvest — the same stop, length and
+        # detokenise treatment a decode token gets.
         emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
-        failed: list[Request] = []
         logits_offset = 0
-        now = time.monotonic()
-        for i, (req, draft_ids) in enumerate(drafts):
+        for req, draft_ids in drafts:
             n_draft = len(draft_ids)
-            # Logits for this request's draft tokens.
-            req_logits = all_logits[logits_offset : logits_offset + n_draft]
-            logits_offset += n_draft
+            # The anchor's row is logits[0]; draft j's row is logits[j + 1],
+            # so the whole span needs n_draft + 1 rows of predictions.
+            req_logits = all_logits[logits_offset : logits_offset + n_draft + 1]
+            logits_offset += n_draft + 1
 
-            # Verify: argmax(logits[j]) vs draft[j+1] for j in [0, n_draft-2).
             accepted = 0
-            for j in range(n_draft - 1):
-                predicted = req_logits[j].argmax().item()
-                if predicted == draft_ids[j + 1]:
-                    accepted += 1
-                else:
+            for j in range(n_draft):
+                if req_logits[j].argmax().item() != draft_ids[j]:
                     break
-            else:
-                accepted = n_draft - 1
+                accepted += 1
+            bonus = req_logits[accepted].argmax().item()
+            emitted.extend((req, token, None) for token in (*draft_ids[:accepted], bonus))
 
-            # Update request state for accepted draft tokens directly.
-            detok = self._detokenizers[req.request_id]
-            if req.first_token_time is None:
-                req.first_token_time = now
-            delta_text = ""
-            for j in range(accepted):
-                req.output_token_ids.append(draft_ids[j])
-                req.num_computed_tokens += 1
-                delta_text += detok.append(0, draft_ids[j])
-            req.text += delta_text
-            req.delta = delta_text  # will be extended with bonus token by _harvest
-
-            # Bonus token: emitted through _harvest (handles stop/length/repeat).
-            bonus_pos = accepted
-            if bonus_pos < n_draft:
-                bonus = req_logits[bonus_pos].argmax().item()
-            else:
-                bonus = verify_tokens[i].item()
-            emitted.append((req, bonus, None))
-
-        # _harvest handles the bonus token: append to output_token_ids, detokenise,
-        # stop detection, length check. It extends req.delta with the bonus text.
-        self._harvest(emitted)
-
-        # Requests that had no drafts need normal decode.
-        remaining = no_draft + failed
-        return emitted, remaining
+        # One entry per request: the stream layer publishes a chunk per
+        # returned request, and this pass produces each request's whole step
+        # in one delta. Request is not hashable (a mutable dataclass), so
+        # dedup by identity — the same object appears once per token it
+        # emitted.
+        advanced = self._harvest(emitted)
+        seen: set[int] = set()
+        unique: list[Request] = []
+        for request in advanced:
+            if id(request) not in seen:
+                seen.add(id(request))
+                unique.append(request)
+        return unique, remaining
 
     def generate(
         self,
@@ -1151,16 +1146,29 @@ class ContinuousBatchingEngine:
         The only host-device synchronisation in the loop. It makes stop handling
         exact — a stop token retires the request on the next step, and the freed
         slot goes straight to a queued request.
+
+        A step may hand one request several tokens (speculative decoding), so
+        the loop accumulates: ``delta`` resets once per request and gathers
+        every token's text, and a stop or length finish mid-chain retires the
+        request right there — tokens after a stop belong to nobody, and are
+        skipped rather than emitted.
         """
         now = time.monotonic()
         check_repeat = self._step_count % POLL_INTERVAL == 0
         advanced: list[Request] = []
+        opened: set[str] = set()
 
         for request, token_id, record in emitted:
+            if request.is_finished:
+                # A token past this request's stop: the chain already retired
+                # it, and nothing after a stop is output.
+                continue
             if request.first_token_time is None:
                 request.first_token_time = now
-            request.delta = ""
-            request.delta_logprobs = None
+            if request.request_id not in opened:
+                opened.add(request.request_id)
+                request.delta = ""
+                request.delta_logprobs = None
 
             if token_id in self.stop_token_ids:
                 # The stop token is model punctuation, not output; the request
@@ -1177,8 +1185,9 @@ class ContinuousBatchingEngine:
                     request.output_logprobs = []
                 request.output_logprobs.append(record)
                 request.delta_logprobs = record
-            request.delta = self._detokenizers[request.request_id].append(0, token_id)
-            request.text += request.delta
+            piece = self._detokenizers[request.request_id].append(0, token_id)
+            request.delta += piece
+            request.text += piece
             advanced.append(request)
 
             if not request.has_room or request.seq_len >= self.config.max_seq_len:

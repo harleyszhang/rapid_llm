@@ -332,3 +332,216 @@ def test_metrics_can_be_disabled(monkeypatch):
     assert not engine.metrics.enabled
     assert engine.metrics.render_prometheus() == "\n"
     engine.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# O5 speculative decoding: the verify pass anchors on the last generated token
+# --------------------------------------------------------------------------- #
+class _FakeProposer:
+    """Returns scripted draft lists, one per propose() call (last repeats)."""
+
+    def __init__(self, drafts: list[list[int]]) -> None:
+        self._drafts = drafts
+        self._calls = 0
+
+    def propose(self, token_ids: list[int]) -> list[int]:
+        d = self._drafts[min(self._calls, len(self._drafts) - 1)]
+        self._calls += 1
+        return list(d)
+
+
+class _SpecVerifyExecutor(_ScriptedExecutor):
+    """Adds execute_verify: returns logits whose per-row argmax the test pins.
+
+    ``verify_logits`` is one entry per execute_verify call: a list of token
+    ids, one per stretch row (anchor + drafts, concatenated across requests).
+    The executor builds a ``[rows, vocab]`` tensor where row ``i`` is a
+    one-hot at the scripted id, so ``_speculate_verify``'s per-row argmax reads
+    exactly what the test wrote. Sampled tokens are empty: the verify path
+    derives its bonus from the argmax, never a sampled row.
+    """
+
+    def __init__(self, rows: list[list[int]], verify_logits: list[list[int]]) -> None:
+        super().__init__(rows)
+        self._verify_logits = verify_logits
+        self._verify_calls = 0
+        self.verify_called = False
+
+    def execute_verify(self, plan):
+        self.verify_called = True
+        scripted = self._verify_logits[min(self._verify_calls, len(self._verify_logits) - 1)]
+        self._verify_calls += 1
+        vocab = max(scripted) + 1 if scripted else 1
+        logits = torch.zeros(len(scripted), vocab)
+        for i, tid in enumerate(scripted):
+            logits[i, tid] = 1.0
+        return torch.empty(0, dtype=torch.long), None, logits
+
+
+def _build_spec_engine(rows, verify_logits, *, drafts, max_seq_len=64, **config):
+    fake = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            spec=SimpleNamespace(is_multimodal=False),
+            config=SimpleNamespace(kv_cache_torch_dtype=None),
+        ),
+        device="cpu",
+        tokenizer=_FakeTokenizer(),
+        stop_token_ids={_EOS},
+        max_seq_len=max_seq_len,
+    )
+    engine = ContinuousBatchingEngine(
+        fake,
+        SchedulerConfig(max_seq_len=max_seq_len, max_num_seqs=4, **config),
+        executor=_SpecVerifyExecutor(rows, verify_logits),
+    )
+    engine._speculate = True
+    engine._proposer = _FakeProposer(drafts)
+    return engine
+
+
+def test_spec_verify_accepts_all_drafts_and_emits_one_bonus():
+    """Anchored verify: logits[j] checks draft[j]; all match → bonus at the end.
+
+    The stretch is [anchor, d0, d1]; row 0's logits verify d0, row 1's verify
+    d1, and row 2 (the prediction after the last draft) is the bonus. Accepted
+    drafts and the bonus all flow through ``_harvest`` once, so
+    ``output_token_ids`` holds exactly [prefill, d0, d1, bonus] with no
+    duplication — the double-harvest bug would append the bonus twice.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD]],  # prefill: one ordinary token
+        verify_logits=[[200, 201, 300]],  # anchor→200, d0→201, d1→300(bonus)
+        drafts=[[200, 201]],
+    )
+    request = engine.add_request("hi")
+
+    engine.step()  # prefill → _WORD
+    advanced = engine.step()  # spec verify: accept 200, 201; bonus 300
+
+    assert request.output_token_ids == [_WORD, 200, 201, 300]
+    assert request.finish_reason is None
+    assert [r.request_id for r in advanced] == [request.request_id]  # one chunk, no dup
+    engine.shutdown()
+
+
+def test_spec_verify_rejects_at_first_mismatch_and_samples_bonus():
+    """A mismatch at draft j keeps 0..j-1; the bonus is the model's correction.
+
+    draft1 is 201 but the model's argmax at row 1 is 999 — the prediction after
+    draft0. So accepted=1 and the bonus is 999, the token the model wanted
+    instead of draft1.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD]],
+        verify_logits=[[200, 999, 300]],  # d0✓, d1✗(999≠201), bonus=row[1]=999
+        drafts=[[200, 201]],
+    )
+    request = engine.add_request("hi")
+
+    engine.step()  # prefill
+    engine.step()  # spec verify
+
+    assert request.output_token_ids == [_WORD, 200, 999]
+    engine.shutdown()
+
+
+def test_spec_verify_checks_the_first_draft_not_just_the_second():
+    """Regression: the old verifier compared logits[j] to draft[j+1], skipping
+    draft[0] entirely. The anchored stretch puts draft[0] at logits[0], so a
+    mismatch there rejects immediately and the bonus is logits[0]'s argmax.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD]],
+        verify_logits=[[999, 201, 300]],  # d0✗(999≠200), accepted=0, bonus=999
+        drafts=[[200, 201]],
+    )
+    request = engine.add_request("hi")
+
+    engine.step()  # prefill
+    engine.step()  # spec verify: reject draft0, bonus=999
+
+    assert request.output_token_ids == [_WORD, 999]
+    engine.shutdown()
+
+
+def test_spec_verify_stops_at_an_eos_draft_mid_chain():
+    """An eos draft retires the request; later drafts in the chain are skipped.
+
+    draft1 is the eos token: ``_harvest`` finishes the request there, and the
+    ``is_finished`` guard drops draft2 and the bonus — nothing after a stop is
+    output, and the eos itself is punctuation, not output.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD]],
+        verify_logits=[[200, _EOS, 201, 300]],  # d0✓, d1=eos✓, d2✓, bonus=300
+        drafts=[[200, _EOS, 201]],
+    )
+    request = engine.add_request("hi")
+
+    engine.step()  # prefill
+    engine.step()  # spec verify
+
+    assert request.output_token_ids == [_WORD, 200]  # eos not counted as output
+    assert request.finish_reason == "eos"
+    engine.shutdown()
+
+
+def test_spec_verify_caps_at_max_new_tokens_mid_chain():
+    """A length finish mid-chain retires the request; surplus drafts drop.
+
+    ``max_gen_len=2``: prefill's token is one, so one more fits. The first
+    accepted draft fills the cap and finishes the request; the remaining draft
+    and the bonus are skipped by the ``is_finished`` guard.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD]],
+        verify_logits=[[200, 201, 300]],  # all would match
+        drafts=[[200, 201]],
+    )
+    request = engine.add_request("hi", SamplingParams(max_gen_len=2))
+
+    engine.step()  # prefill → _WORD (1 output token)
+    engine.step()  # spec verify: 200 fills the cap, 201+300 dropped
+
+    assert request.output_token_ids == [_WORD, 200]
+    assert request.finish_reason == "length"
+    engine.shutdown()
+
+
+def test_spec_verify_routes_logprob_requests_to_decode():
+    """A request asking for output logprobs keeps the decode path.
+
+    The verify pass returns raw logits, not the per-token records the sampler's
+    path produces, so a logprob request's records would skip every draft. It
+    is routed to ``remaining`` and decodes normally instead.
+    """
+    engine = _build_spec_engine(
+        rows=[[_WORD], [_EOS]],  # prefill, then normal decode (the logprob req)
+        verify_logits=[[999]],  # would be called only if spec ran
+        drafts=[[200, 201]],
+    )
+    request = engine.add_request("hi", SamplingParams(logprobs=1))
+
+    engine.step()  # prefill
+    engine.step()  # decode (not spec): logprobs request kept out of verify
+
+    assert not engine._executor.verify_called  # execute_verify never ran
+    assert request.finish_reason == "eos"
+    engine.shutdown()
+
+
+def test_spec_verify_falls_back_when_no_drafts():
+    """No ngram match → no drafts → the request decodes normally."""
+    engine = _build_spec_engine(
+        rows=[[_WORD], [_EOS]],
+        verify_logits=[[999]],
+        drafts=[[]],  # proposer finds nothing
+    )
+    request = engine.add_request("hi")
+
+    engine.step()  # prefill
+    engine.step()  # no drafts → decode: _EOS
+
+    assert not engine._executor.verify_called
+    assert request.finish_reason == "eos"
+    engine.shutdown()

@@ -488,6 +488,29 @@ class Scheduler:
         if preempted:
             decode[:] = [r for r in decode if r.status is RequestStatus.RUNNING]
 
+    def reserve_speculative(self, request: Request, draft_rows: int) -> int:
+        """Grow a decode request's blocks over a speculative verify stretch.
+
+        The decode plan already reserved through the row its sampled token
+        will write (``seq_len``); a verify stretch puts ``draft_rows`` draft
+        tokens after that. Returns how many rows fit — the caller truncates
+        its draft to that — because rows past ``max_seq_len`` never fit and an
+        exhausted pool truncates rather than evicts: speculative decoding is
+        an optimisation whose fallback is the plain decode the pool already
+        serves.
+        """
+        limit = self.config.max_seq_len
+        fit = min(draft_rows, limit - request.seq_len)
+        while fit > 0:
+            if self._prefix_cache.allocate(request.request_id, request.seq_len + fit):
+                # Append, never replace: the mappings the decode plan staged
+                # have not reached the device yet, and take_table_writes will
+                # not repeat them — only the newly covered blocks emit.
+                request.block_plan += self._prefix_cache.take_table_writes(request.request_id)
+                return fit
+            fit -= 1
+        return 0
+
     def _admit(
         self, prefill: list[Request], chunk_lens: list[int], preempted: list[Request]
     ) -> None:
