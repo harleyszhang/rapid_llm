@@ -272,10 +272,14 @@ def fused_moe_w8a8_int8(hidden_states, w1, w2, topk_weights, topk_ids, **kwargs)
     )
 
 
-def mla_decode(
-    q, kv_cache, block_table, cache_seqlens, *, max_seq_len, sm_scale=1.0, qk_rope_head_dim=64
-):
-    latent_dim = kv_cache.shape[-1] - qk_rope_head_dim
+#: Rope segment width of an MLA latent row. Must stay in lockstep with
+#: ``ops.attention.mla.QK_ROPE_HEAD_DIM`` — not imported from there, because
+#: that module pulls in Triton and this backend must run without it.
+_QK_ROPE_HEAD_DIM = 64
+
+
+def mla_decode(q, kv_cache, block_table, cache_seqlens, *, max_seq_len, sm_scale=1.0):
+    latent_dim = kv_cache.shape[-1] - _QK_ROPE_HEAD_DIM
     page_size = kv_cache.shape[1]
     out = q.new_zeros((*q.shape[:2], latent_dim))
     for row, length in enumerate(cache_seqlens.tolist()):
