@@ -19,8 +19,8 @@ reproducible by hand.
 
 Usage:
     .venv/bin/python -m rapid_llm.benchmark.models \
-        --zoo /mnt/otto-temp/modelzoo_with_full_weights \
-        --vllm-python /mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python \
+        --zoo "$RAPID_LLM_MODEL_ZOO" \
+        --vllm-python "$RAPID_LLM_VLLM_PYTHON" \
         --log-dir docs/benchmark_logs --dry-run
 """
 
@@ -464,6 +464,11 @@ def run_one(
     extra: tuple = (),
 ) -> dict:
     python = args.vllm_python if engine == "vllm" else sys.executable
+    if engine == "vllm" and not python:
+        raise SystemExit(
+            "The vllm arm needs its own interpreter. "
+            "Pass --vllm-python <path> or set RAPID_LLM_VLLM_PYTHON."
+        )
     env = dict(os.environ)
     if engine == "vllm":
         env["PYTHONPATH"] = str(REPO_ROOT)  # never import rapid_llm in vLLM's venv
@@ -558,11 +563,16 @@ def sanitize(name: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--zoo", default="/mnt/otto-temp/modelzoo_with_full_weights")
+    parser.add_argument(
+        "--zoo",
+        default=os.getenv("RAPID_LLM_MODEL_ZOO"),
+        help="Modelzoo root (default: $RAPID_LLM_MODEL_ZOO)",
+    )
     parser.add_argument(
         "--vllm-python",
-        default="/mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python",
-        help="Interpreter owning the vllm arm (runs as its own subprocess)",
+        default=os.getenv("RAPID_LLM_VLLM_PYTHON"),
+        help="Interpreter owning the vllm arm, its own subprocess "
+        "(default: $RAPID_LLM_VLLM_PYTHON)",
     )
     parser.add_argument("--log-dir", default="docs/benchmark_logs")
     parser.add_argument("--batch", type=int, default=BATCH)
@@ -584,6 +594,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if not args.zoo:
+        raise SystemExit(
+            "Model zoo root not provided. Pass --zoo <path> or set RAPID_LLM_MODEL_ZOO."
+        )
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     unknown = [s for s in scenarios if s not in SCENARIOS]
     if unknown:
