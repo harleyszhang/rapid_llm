@@ -525,3 +525,38 @@ def test_shutdown_returns_the_process_to_a_world_of_one(model_dir: Path):
         engine.shutdown()
     assert ps.get_tensor_model_parallel_world_size() == 1
     assert ps.get_world_size() == 1
+
+
+@needs_gpus(2)
+def test_a_failed_build_returns_the_process_to_a_world_of_one(model_dir: Path, monkeypatch):
+    """An engine build that fails after the group rendezvoused must clean up too.
+
+    ``from_pretrained`` launches the followers and joins the group *before* it
+    loads the rank-0 shard, so a build that fails there — an OOM loading the
+    weights is the common case — used to leave this process holding rank 0 of
+    a group whose other half is gone. The stale state then poisoned everything
+    later in the process: the next engine read a TP size nobody asked for,
+    and a plain CPU model test all-reduced against a group that no longer
+    existed. The failure is simulated by patching the engine constructor, so
+    the follower side builds a one-layer stack and parks on its first plan.
+    """
+    from rapid_llm.distributed import parallel_state as ps
+    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("simulated shard-load failure")
+
+    monkeypatch.setattr("rapid_llm.engine.llm_engine.LLMEngine", _boom)
+    with pytest.raises(RuntimeError, match="simulated shard-load failure"):
+        ContinuousBatchingEngine.from_pretrained(
+            model=str(model_dir),
+            device="cuda:0",
+            max_seq_len=_MAX_SEQ_LEN,
+            max_gpu_num_blocks=_KV_TOKENS,
+            max_num_seqs=_MAX_NUM_SEQS,
+            use_cuda_graph=False,
+            tensor_parallel_size=2,
+            hf_overrides={"num_hidden_layers": 1},
+        )
+    assert ps.get_tensor_model_parallel_world_size() == 1
+    assert ps.get_world_size() == 1

@@ -11,7 +11,10 @@ Usage:
 from __future__ import annotations
 
 import contextlib
+import gc
+import sys
 import time
+import traceback
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -137,22 +140,45 @@ class DefaultModelLoader:
         logger.info("Building %s skeleton on the meta device", model_cls.__name__)
         with init_empty_parameters():
             model = model_cls(config)
-        materialise_parameters(model, device, dtype=config.dtype)
+        try:
+            materialise_parameters(model, device, dtype=config.dtype)
 
-        # An already-quantised checkpoint is copied in byte for byte; only an
-        # unquantised model wants the FP8 blocks widened on the way through.
-        model.load_weights(
-            hf_weights_iterator(
-                checkpoints_dir,
-                device,
-                dequantize_fp8=config.quant is None,
-                dequant_dtype=config.dtype,
+            # An already-quantised checkpoint is copied in byte for byte; only an
+            # unquantised model wants the FP8 blocks widened on the way through.
+            model.load_weights(
+                hf_weights_iterator(
+                    checkpoints_dir,
+                    device,
+                    dequantize_fp8=config.quant is None,
+                    dequant_dtype=config.dtype,
+                )
             )
-        )
-        if quantization and config.quant is None:
-            self._quantize(model, quantization)
-        # Buffers were computed on the CPU while the skeleton was on meta.
-        model.to(device).eval()
+            if quantization and config.quant is None:
+                self._quantize(model, quantization)
+            # Buffers were computed on the CPU while the skeleton was on meta.
+            model.to(device).eval()
+        except BaseException:
+            # A failed load leaves the half-filled weights pinned in this
+            # process in three ways: the module tree is a reference cycle the
+            # generational GC has not run on yet; the traceback keeps every
+            # frame it passed through — including the ``model.modules()``
+            # iterator that holds the model — alive for as long as the caller
+            # keeps the exception (pytest keeps it for the whole session); and
+            # the caching allocator pools the freed blocks instead of handing
+            # them back. Either way, the memory the next engine build in this
+            # process needed stays occupied. Break every hold, then re-raise:
+            # the re-raised traceback still shows the code path, only the
+            # dead frames' locals are gone.
+            del model
+            tb = sys.exc_info()[2]
+            if tb is not None:
+                traceback.clear_frames(tb)
+            # Order matters: the collect must run after the frames are
+            # cleared, or the cycles it would break are still rooted in them.
+            gc.collect()
+            if torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
+            raise
         logger.info("Loaded %s onto %s in %.2fs", model_cls.__name__, device, time.time() - start)
         return model
 

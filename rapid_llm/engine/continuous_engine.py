@@ -39,6 +39,7 @@ from ..executor.executor import (
     MultiprocExecutor,
     UniProcExecutor,
     launch_tensor_parallel,
+    reclaim_tensor_parallel_followers,
 )
 from ..executor.worker import ModelInput, PassKind, PassLogprobs, pipeline_enabled
 from ..models.config import read_model_type
@@ -531,35 +532,46 @@ class ContinuousBatchingEngine:
                 pipeline=resolved_pipeline,
             )
 
-        engine = LLMEngine(
-            device=device,
-            tensor_parallel_size=tensor_parallel_size,
-            enable_expert_parallel=enable_expert_parallel,
-            **engine_kwargs,
-        )
-        config = SchedulerConfig(
-            max_seq_len=engine.max_seq_len,
-            max_num_seqs=max_num_seqs,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
-            max_chunk_size=max_chunk_size,
-            enable_prefix_cache=enable_prefix_cache,
-            prefix_cache_blocks=prefix_cache_blocks,
-            enable_preemption=enable_preemption,
-            decode_window_steps=decode_window_steps,
-        )
-        executor: Executor | None = None
-        if get_tensor_model_parallel_world_size() > 1:
-            executor = MultiprocExecutor(
-                engine,
-                config.max_num_seqs,
-                config.max_seq_len,
-                followers,
-                pipeline=resolved_pipeline,
+        # From here on this process is rank 0 of a group it owns (when it
+        # launched followers). Any failure in the build — an OOM loading the
+        # weight shard is the common one — must hand that group back before
+        # the exception escapes: a leftover half-dead parallel state re-shards
+        # the next engine this process builds and turns every later test in
+        # it into an all_reduce against a process group that no longer exists.
+        try:
+            engine = LLMEngine(
+                device=device,
+                tensor_parallel_size=tensor_parallel_size,
+                enable_expert_parallel=enable_expert_parallel,
+                **engine_kwargs,
             )
-        return cls(
-            engine, config, executor, pipeline=resolved_pipeline, async_tokenize=async_tokenize
-        )
+            config = SchedulerConfig(
+                max_seq_len=engine.max_seq_len,
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
+                max_chunk_size=max_chunk_size,
+                enable_prefix_cache=enable_prefix_cache,
+                prefix_cache_blocks=prefix_cache_blocks,
+                enable_preemption=enable_preemption,
+                decode_window_steps=decode_window_steps,
+            )
+            executor: Executor | None = None
+            if get_tensor_model_parallel_world_size() > 1:
+                executor = MultiprocExecutor(
+                    engine,
+                    config.max_num_seqs,
+                    config.max_seq_len,
+                    followers,
+                    pipeline=resolved_pipeline,
+                )
+            return cls(
+                engine, config, executor, pipeline=resolved_pipeline, async_tokenize=async_tokenize
+            )
+        except BaseException:
+            if followers:
+                reclaim_tensor_parallel_followers(followers)
+            raise
 
     # ------------------------------------------------------------- public API #
     def add_request(
