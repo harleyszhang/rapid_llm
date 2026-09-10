@@ -110,8 +110,9 @@ def gen_prompt_decode_to_target_len(
             break
         if len(token_sequence) < target_token_len:
             token_sequence.extend(
-                np.random.randint(0, tokenizer.vocab_size,
-                                  size=target_token_len - len(token_sequence)).tolist()
+                np.random.randint(
+                    0, tokenizer.vocab_size, size=target_token_len - len(token_sequence)
+                ).tolist()
             )
         else:
             token_sequence = token_sequence[:target_token_len]

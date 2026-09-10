@@ -175,7 +175,9 @@ class CUDAGraphRunner:
         # replay overwrites input_ids with the live batch, so the values here do
         # not affect the recorded graph's correctness.
         self.input_ids.copy_(
-            torch.arange(self.batch_size, device=self.device, dtype=self.input_ids.dtype).unsqueeze(1)
+            torch.arange(self.batch_size, device=self.device, dtype=self.input_ids.dtype).unsqueeze(
+                1
+            )
         )
 
         # The capture stream must be idle, so warmup runs on its own stream, fenced
@@ -344,7 +346,9 @@ class CUDAGraphManager:
         # the diagnostics a rejected grid needs (which shape, how badly).
         self.parity_errors: dict[str, float] = {}
         # Read once: consulted on every decode step.
-        self._check_lockstep = os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
+        self._check_lockstep = (
+            os.environ.get(_LOCKSTEP_ENV) == "1" and get_tensor_model_parallel_world_size() > 1
+        )
 
     def _new_runner(self, key: _GraphKey) -> CUDAGraphRunner:
         """Build the runner for ``key``, asking the factory for its step shape."""
@@ -410,9 +414,10 @@ class CUDAGraphManager:
             runner.capture(warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index))
             self._runners[key] = runner
         except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
-            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
-                exc
-            ).lower():
+            if (
+                not isinstance(exc, torch.cuda.OutOfMemoryError)
+                and "out of memory" not in str(exc).lower()
+            ):
                 raise
             runner = None
             self._failed.add(key)
@@ -603,8 +608,22 @@ class CUDAGraphManager:
 #: cost is a small fraction of the GPU time) are not worth a pool anyway.
 PREFILL_WIDTH_BUCKETS: tuple[int, ...] = (
     *range(1, 33),
-    40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
-    320, 384, 448, 512,
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    112,
+    128,
+    160,
+    192,
+    224,
+    256,
+    320,
+    384,
+    448,
+    512,
 )
 
 #: Token ceiling for a capturable grid (``n_bucket * width``). The private
@@ -684,24 +703,17 @@ class PrefillGraphRunner:
         info.b_req_tokens_table = b_req_tokens_table
         info.b_req_idx = torch.zeros(n_seqs, dtype=torch.long, device=device)
         info.b_seq_len = torch.zeros(n_seqs, dtype=torch.long, device=device)
-        info.cur_select_index = torch.zeros(
-            n_seqs * width, dtype=torch.int32, device=device
-        )
-        info.b_start_loc = (
-            torch.arange(n_seqs, dtype=torch.int32, device=device) * width
-        )
+        info.cur_select_index = torch.zeros(n_seqs * width, dtype=torch.int32, device=device)
+        info.b_start_loc = torch.arange(n_seqs, dtype=torch.int32, device=device) * width
         info.is_prefill = True
         info.max_actual_seq_len = width
         info.b_prefix_len = torch.zeros(n_seqs, dtype=torch.long, device=device)
-        info.b_kv_base = torch.zeros(
-            n_seqs, dtype=b_req_tokens_table.dtype, device=device
-        )
+        info.b_kv_base = torch.zeros(n_seqs, dtype=b_req_tokens_table.dtype, device=device)
         info.max_chunk_len = width
         self.atten_info = info
         # Null-block rows a padding row may scribble on (tiled past its size).
         self._null_rows = (
-            torch.arange(width, dtype=torch.int32, device=device)
-            % PREFIX_CACHE_BLOCK_SIZE
+            torch.arange(width, dtype=torch.int32, device=device) % PREFIX_CACHE_BLOCK_SIZE
         )
 
         self._graph: torch.cuda.CUDAGraph | None = None
@@ -863,9 +875,7 @@ class PrefillGraphManager:
             return None
         runner = self._runners.get(key)
         if runner is None:
-            return self._capture_and_run(
-                key, input_ids, position_ids, logits_positions, atten_info
-            )
+            return self._capture_and_run(key, input_ids, position_ids, logits_positions, atten_info)
         self.replays += 1
         out = runner.replay(input_ids, position_ids, logits_positions, atten_info)
         # The grid may have been padded up to ``n_bucket``; the pad rows'
@@ -923,9 +933,10 @@ class PrefillGraphManager:
             runner._load(input_ids, position_ids, logits_positions, atten_info)
             runner.capture()
         except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
-            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
-                exc
-            ).lower():
+            if (
+                not isinstance(exc, torch.cuda.OutOfMemoryError)
+                and "out of memory" not in str(exc).lower()
+            ):
                 raise
             logger.warning(
                 "Lazy capture of prefill graph n=%d width=%d ran out of memory; "

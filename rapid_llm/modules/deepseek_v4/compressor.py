@@ -37,7 +37,9 @@ def _fresh_row() -> dict:
     }
 
 
-def _combine_buffer(row: dict, kv: torch.Tensor, gate: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
+def _combine_buffer(
+    row: dict, kv: torch.Tensor, gate: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Prepend the rolling buffer, peel off the window-aligned prefix.
 
     Mirrors ``store_compression_weights``: only whole windows leave the
@@ -53,7 +55,9 @@ def _combine_buffer(row: dict, kv: torch.Tensor, gate: torch.Tensor) -> tuple[to
     return kv[:usable], gate[:usable], row["entry_count"] * row["rate"]
 
 
-def _softmax_pool(chunk_kv: torch.Tensor, chunk_gate: torch.Tensor, rate: int, bias: torch.Tensor) -> torch.Tensor:
+def _softmax_pool(
+    chunk_kv: torch.Tensor, chunk_gate: torch.Tensor, rate: int, bias: torch.Tensor
+) -> torch.Tensor:
     """Softmax-gated window aggregation: ``sum_j softmax(g_j + B)_j * kv_j``."""
     n_windows = chunk_kv.shape[0] // rate
     ck = chunk_kv.view(n_windows, rate, -1)
@@ -79,8 +83,12 @@ class DeepseekV4HCACompressor(nn.Module):
         # The V4 checkpoints leave the compressors' projections in bf16 even on
         # quantised models; the quant argument exists for signature parity with
         # the CSA compressor and is unused here.
-        self.kv_proj = ReplicatedLinear(config.hidden_size, self.head_dim, params_dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, self.head_dim, params_dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(
+            config.hidden_size, self.head_dim, params_dtype=config.dtype
+        )
+        self.gate_proj = ReplicatedLinear(
+            config.hidden_size, self.head_dim, params_dtype=config.dtype
+        )
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, self.head_dim, dtype=config.dtype)
         )
@@ -131,16 +139,21 @@ class DeepseekV4HCACompressor(nn.Module):
             kv_b, gate_b = kv[b][valid[b]], gate[b][valid[b]]
             chunk_kv, chunk_gate, first_pos = _combine_buffer(row, kv_b, gate_b)
             if chunk_kv.shape[0]:
-                compressed = self.kv_norm(_softmax_pool(chunk_kv, chunk_gate, self.compress_rate, self.position_bias))
+                compressed = self.kv_norm(
+                    _softmax_pool(chunk_kv, chunk_gate, self.compress_rate, self.position_bias)
+                )
                 n_windows = compressed.shape[0]
                 positions = (
-                    torch.arange(n_windows, device=compressed.device) * self.compress_rate + first_pos
+                    torch.arange(n_windows, device=compressed.device) * self.compress_rate
+                    + first_pos
                 )
                 cos, sin = self.rotary_emb(compressed, positions.unsqueeze(0), self.rope_layer_type)
                 compressed = apply_rotary_pos_emb(compressed[None, None], cos, sin)[0, 0]
                 row["entry_count"] += n_windows
                 row["compressed"] = (
-                    compressed if row["compressed"] is None else torch.cat([row["compressed"], compressed])
+                    compressed
+                    if row["compressed"] is None
+                    else torch.cat([row["compressed"], compressed])
                 )
             row_entries.append(row["compressed"])
 
@@ -160,7 +173,9 @@ class DeepseekV4HCACompressor(nn.Module):
         )
         return compressed_kv, block_bias
 
-    def _pad_entries(self, row_entries: list[torch.Tensor | None]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _pad_entries(
+        self, row_entries: list[torch.Tensor | None]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         B = len(row_entries)
         t_max = max((e.shape[0] if e is not None else 0) for e in row_entries)
         entries = next(
@@ -198,16 +213,25 @@ class DeepseekV4Indexer(nn.Module):
         self.weights_scaling = self.num_heads**-0.5
         # Only the indexer's query projection is fp8 on quantised V4
         # checkpoints; the compressor-side projections stay bf16.
-        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(
+            config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype
+        )
+        self.gate_proj = ReplicatedLinear(
+            config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype
+        )
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, 2 * self.head_dim, dtype=config.dtype)
         )
         self.kv_norm = DeepseekV4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.q_b_proj = ReplicatedLinear(
-            config.q_lora_rank, self.num_heads * self.head_dim, params_dtype=config.dtype, quant=quant
+            config.q_lora_rank,
+            self.num_heads * self.head_dim,
+            params_dtype=config.dtype,
+            quant=quant,
         )
-        self.weights_proj = ReplicatedLinear(config.hidden_size, self.num_heads, params_dtype=config.dtype)
+        self.weights_proj = ReplicatedLinear(
+            config.hidden_size, self.num_heads, params_dtype=config.dtype
+        )
         self.rotary_emb = DeepseekV4RotaryEmbedding(config)
         self._rows: list[dict] = []
 
@@ -245,9 +269,7 @@ class DeepseekV4Indexer(nn.Module):
         compressed = self.kv_norm(
             (new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)).sum(dim=1)
         )
-        positions = (
-            torch.arange(n_windows, device=compressed.device) * rate + first_pos
-        )
+        positions = torch.arange(n_windows, device=compressed.device) * rate + first_pos
         cos, sin = self.rotary_emb(compressed, positions.unsqueeze(0), self.rope_layer_type)
         compressed = apply_rotary_pos_emb(compressed[None, None], cos, sin)[0, 0]
         row["entry_count"] += n_windows
@@ -343,8 +365,12 @@ class DeepseekV4CSACompressor(nn.Module):
         super().__init__()
         self.compress_rate = int(config.compress_rates["compressed_sparse_attention"])
         self.head_dim = config.head_dim
-        self.kv_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
-        self.gate_proj = ReplicatedLinear(config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype)
+        self.kv_proj = ReplicatedLinear(
+            config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype
+        )
+        self.gate_proj = ReplicatedLinear(
+            config.hidden_size, 2 * self.head_dim, params_dtype=config.dtype
+        )
         self.position_bias = nn.Parameter(
             torch.zeros(self.compress_rate, 2 * self.head_dim, dtype=config.dtype)
         )
@@ -389,9 +415,7 @@ class DeepseekV4CSACompressor(nn.Module):
         compressed = self.kv_norm(
             (new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)).sum(dim=1)
         )
-        positions = (
-            torch.arange(n_windows, device=compressed.device) * rate + first_pos
-        )
+        positions = torch.arange(n_windows, device=compressed.device) * rate + first_pos
         cos, sin = self.rotary_emb(compressed, positions.unsqueeze(0), self.rope_layer_type)
         compressed = apply_rotary_pos_emb(compressed[None, None], cos, sin)[0, 0]
         row["entry_count"] += n_windows

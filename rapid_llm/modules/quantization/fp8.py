@@ -10,9 +10,8 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any
-
 import os
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -162,6 +161,7 @@ class Fp8LinearMethod(LinearMethodBase):
             wf = wf * full[:n, :k]
         layer.weight = RawParameter(wf.to(layer.dtype))
         layer.weight_scale_inv = None
+
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """fp8 stacked experts (checkpoint), fp16 activations through grouped GEMM."""

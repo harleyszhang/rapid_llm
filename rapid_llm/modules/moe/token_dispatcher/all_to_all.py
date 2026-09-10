@@ -233,9 +233,7 @@ class AllToAllDispatcher(BaseDispatcher):
         if self.capacity_factor is None:
             cap = n
         else:
-            cap = min(
-                n, math.ceil(n / ep_size * self.capacity_factor) + self.capacity_slack
-            )
+            cap = min(n, math.ceil(n / ep_size * self.capacity_factor) + self.capacity_slack)
         buf = ep_size * cap
 
         flat_ids = topk_ids.reshape(-1)
@@ -305,9 +303,7 @@ class AllToAllDispatcher(BaseDispatcher):
 
         pool = CommStreamPool.for_device(x.device)
         recv_flat = torch.empty_like(send_flat)
-        event = pool.all_to_all_async(
-            recv_flat, send_flat, group=group, label="ep.dispatch"
-        )
+        event = pool.all_to_all_async(recv_flat, send_flat, group=group, label="ep.dispatch")
         recv_rows = recv_flat.view(buf, stride_bytes)
         # recv_x keeps a row stride of stride_bytes/esize elements; the MoE
         # GEMM only requires a contiguous last dim, so no copy is needed.
@@ -437,7 +433,9 @@ class AllToAllDispatcher(BaseDispatcher):
         local_x, local_ids, local_weights = self.dispatch_b(handle)
         return AllToAllDispatchOutput(handle, local_x, local_ids, local_weights)
 
-    def combine(self, handle: DispatchHandle, local_out: torch.Tensor | None = None) -> torch.Tensor:
+    def combine(
+        self, handle: DispatchHandle, local_out: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """:meth:`combine_a` + :meth:`combine_b` with the fence immediate.
 
         Accepts either the historical ``(handle, local_out)`` pair or a single

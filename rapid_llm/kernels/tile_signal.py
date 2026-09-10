@@ -102,12 +102,8 @@ def _tile_signal_gemm_kernel(
         for k in range(0, tl.cdiv(K, BLOCK_K)):
             k_rem = K - k * BLOCK_K
             a = tl.load(a_ptrs, mask=m_mask[:, None] & (offs_k[None, :] < k_rem), other=0.0)
-            gate_w = tl.load(
-                gw_ptrs, mask=(offs_k[:, None] < k_rem) & n_mask[None, :], other=0.0
-            )
-            up_w = tl.load(
-                uw_ptrs, mask=(offs_k[:, None] < k_rem) & n_mask[None, :], other=0.0
-            )
+            gate_w = tl.load(gw_ptrs, mask=(offs_k[:, None] < k_rem) & n_mask[None, :], other=0.0)
+            up_w = tl.load(uw_ptrs, mask=(offs_k[:, None] < k_rem) & n_mask[None, :], other=0.0)
             acc_gate = tl.dot(a, gate_w, acc_gate)
             acc_up = tl.dot(a, up_w, acc_up)
             a_ptrs += BLOCK_K * stride_ak
@@ -314,14 +310,14 @@ def _launch_common(
     m, k = a.shape
     n = gate_w.shape[1]
     if up_w.shape != gate_w.shape:
-        raise ValueError(f"gate/up weight shapes differ: {tuple(gate_w.shape)} vs {tuple(up_w.shape)}")
+        raise ValueError(
+            f"gate/up weight shapes differ: {tuple(gate_w.shape)} vs {tuple(up_w.shape)}"
+        )
     if gate_w.shape[0] != k:
         raise ValueError(f"weight K {gate_w.shape[0]} does not match activation K {k}")
     num_tiles = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)
     if num_tiles > buffer.num_tiles:
-        raise ValueError(
-            f"problem needs {num_tiles} tiles but the buffer holds {buffer.num_tiles}"
-        )
+        raise ValueError(f"problem needs {num_tiles} tiles but the buffer holds {buffer.num_tiles}")
     gate = torch.empty((m, n), dtype=a.dtype, device=a.device)
     up = torch.empty_like(gate)
     out = torch.empty_like(gate)
@@ -392,27 +388,57 @@ def pipelined_gemm_swiglu(
         if timeline is not None:
             with timeline.region("l4.gemm", "producer"):
                 _tile_signal_gemm_kernel[(producer,)](
-                    a, gate_w, up_w, gate, up,
-                    buffer.flags, buffer.producer_work, epoch,
-                    m, n, k,
-                    a.stride(0), a.stride(1),
-                    gate_w.stride(0), gate_w.stride(1),
-                    up_w.stride(0), up_w.stride(1),
-                    gate.stride(0), gate.stride(1),
-                    BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-                    num_warps=num_warps, num_stages=num_stages,
+                    a,
+                    gate_w,
+                    up_w,
+                    gate,
+                    up,
+                    buffer.flags,
+                    buffer.producer_work,
+                    epoch,
+                    m,
+                    n,
+                    k,
+                    a.stride(0),
+                    a.stride(1),
+                    gate_w.stride(0),
+                    gate_w.stride(1),
+                    up_w.stride(0),
+                    up_w.stride(1),
+                    gate.stride(0),
+                    gate.stride(1),
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    num_warps=num_warps,
+                    num_stages=num_stages,
                 )
         else:
             _tile_signal_gemm_kernel[(producer,)](
-                a, gate_w, up_w, gate, up,
-                buffer.flags, buffer.producer_work, epoch,
-                m, n, k,
-                a.stride(0), a.stride(1),
-                gate_w.stride(0), gate_w.stride(1),
-                up_w.stride(0), up_w.stride(1),
-                gate.stride(0), gate.stride(1),
-                BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-                num_warps=num_warps, num_stages=num_stages,
+                a,
+                gate_w,
+                up_w,
+                gate,
+                up,
+                buffer.flags,
+                buffer.producer_work,
+                epoch,
+                m,
+                n,
+                k,
+                a.stride(0),
+                a.stride(1),
+                gate_w.stride(0),
+                gate_w.stride(1),
+                up_w.stride(0),
+                up_w.stride(1),
+                gate.stride(0),
+                gate.stride(1),
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+                BLOCK_K=block_k,
+                num_warps=num_warps,
+                num_stages=num_stages,
             )
     # The producer stream wrote tensors allocated on the caller's stream.
     a.record_stream(producer_stream)
@@ -427,23 +453,45 @@ def pipelined_gemm_swiglu(
     if timeline is not None:
         with timeline.region("l4.epilogue", "consumer"):
             _tile_signal_consume_kernel[(consumer,)](
-                gate, up, out,
-                buffer.flags, buffer.consumer_work, buffer.fail_count, epoch,
-                m, n,
-                gate.stride(0), gate.stride(1),
-                out.stride(0), out.stride(1),
-                BLOCK_M=block_m, BLOCK_N=block_n, MAX_SPIN=max_spin,
-                num_warps=num_warps, num_stages=num_stages,
+                gate,
+                up,
+                out,
+                buffer.flags,
+                buffer.consumer_work,
+                buffer.fail_count,
+                epoch,
+                m,
+                n,
+                gate.stride(0),
+                gate.stride(1),
+                out.stride(0),
+                out.stride(1),
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+                MAX_SPIN=max_spin,
+                num_warps=num_warps,
+                num_stages=num_stages,
             )
     else:
         _tile_signal_consume_kernel[(consumer,)](
-            gate, up, out,
-            buffer.flags, buffer.consumer_work, buffer.fail_count, epoch,
-            m, n,
-            gate.stride(0), gate.stride(1),
-            out.stride(0), out.stride(1),
-            BLOCK_M=block_m, BLOCK_N=block_n, MAX_SPIN=max_spin,
-            num_warps=num_warps, num_stages=num_stages,
+            gate,
+            up,
+            out,
+            buffer.flags,
+            buffer.consumer_work,
+            buffer.fail_count,
+            epoch,
+            m,
+            n,
+            gate.stride(0),
+            gate.stride(1),
+            out.stride(0),
+            out.stride(1),
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            MAX_SPIN=max_spin,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     # The caller's stream rejoins the producer's for the epilogue's inputs.
@@ -480,25 +528,51 @@ def serial_gemm_swiglu(
     buffer.fail_count.zero_()
     buffer.producer_work.zero_()
     _tile_signal_gemm_kernel[(producer,)](
-        a, gate_w, up_w, gate, up,
-        buffer.flags, buffer.producer_work, epoch,
-        m, n, k,
-        a.stride(0), a.stride(1),
-        gate_w.stride(0), gate_w.stride(1),
-        up_w.stride(0), up_w.stride(1),
-        gate.stride(0), gate.stride(1),
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        num_warps=num_warps, num_stages=num_stages,
+        a,
+        gate_w,
+        up_w,
+        gate,
+        up,
+        buffer.flags,
+        buffer.producer_work,
+        epoch,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        gate_w.stride(0),
+        gate_w.stride(1),
+        up_w.stride(0),
+        up_w.stride(1),
+        gate.stride(0),
+        gate.stride(1),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
     buffer.consumer_work.zero_()
     _tile_signal_consume_kernel[(consumer,)](
-        gate, up, out,
-        buffer.flags, buffer.consumer_work, buffer.fail_count, epoch,
-        m, n,
-        gate.stride(0), gate.stride(1),
-        out.stride(0), out.stride(1),
-        BLOCK_M=block_m, BLOCK_N=block_n, MAX_SPIN=max_spin,
-        num_warps=num_warps, num_stages=num_stages,
+        gate,
+        up,
+        out,
+        buffer.flags,
+        buffer.consumer_work,
+        buffer.fail_count,
+        epoch,
+        m,
+        n,
+        gate.stride(0),
+        gate.stride(1),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        MAX_SPIN=max_spin,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out

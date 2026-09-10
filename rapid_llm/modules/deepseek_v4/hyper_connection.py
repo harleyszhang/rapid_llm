@@ -54,10 +54,9 @@ class DeepseekV4HyperConnection(nn.Module):
         # a leading column normalisation, then ``iters - 1`` row/column pairs.
         pre = torch.sigmoid(mix[..., :hc] * pre_scale + self.base[:hc]) + self.hc_eps
         post = 2 * torch.sigmoid(mix[..., hc : 2 * hc] * post_scale + self.base[hc : 2 * hc])
-        comb_logits = (
-            mix[..., 2 * hc :].view(*mix.shape[:-1], hc, hc) * comb_scale
-            + self.base[2 * hc :].view(hc, hc)
-        )
+        comb_logits = mix[..., 2 * hc :].view(*mix.shape[:-1], hc, hc) * comb_scale + self.base[
+            2 * hc :
+        ].view(hc, hc)
         comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
         for _ in range(self.hc_sinkhorn_iters - 1):

@@ -49,8 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BATCH = 8
 ITERS = 2
 KV_MARGIN_TOKENS = 768  # per-request slack over input + output
-ACTIVATION_GB = 4.0     # coarse per-GPU activation/workspace reserve
-UTILIZATION = 0.92      # fraction of one GPU's HBM the suite may claim
+ACTIVATION_GB = 4.0  # coarse per-GPU activation/workspace reserve
+UTILIZATION = 0.92  # fraction of one GPU's HBM the suite may claim
 #: DP2 keeps a full replica per GPU; past this weight a two-replica card has
 #: no KV/activation headroom left, so no DP2 point is offered.
 DP2_WEIGHT_GB = 40.0
@@ -162,7 +162,7 @@ class ModelPlan:
     evidence: dict = field(default_factory=dict)
     kv_bpt: int = 0
     arms: list[str] = field(default_factory=list)
-    tp: dict = field(default_factory=dict)      # scenario -> tp
+    tp: dict = field(default_factory=dict)  # scenario -> tp
     lengths: dict = field(default_factory=dict)  # scenario -> (input, output, msl)
 
     @property
@@ -225,9 +225,7 @@ def plan_model(path: Path, zoo_root: Path, gpu_count: int, budget_gb: float) -> 
         plan.evidence = {"quantization_config": cfg.get("quantization_config")}
         return plan
     if weight_gb > gpu_count * budget_gb:
-        plan.reason = (
-            f"weights {weight_gb:.0f}GB exceed the {gpu_count} x {budget_gb:.0f}GB budget"
-        )
+        plan.reason = f"weights {weight_gb:.0f}GB exceed the {gpu_count} x {budget_gb:.0f}GB budget"
         return plan
 
     plan.status = "run"
@@ -360,17 +358,27 @@ def bench_cmd(
         python,
         "-m",
         "rapid_llm.benchmark.offline_throughput",
-        "--model", str(plan.path),
-        "--engine", engine,
-        "--dataset-name", "random-ids",
-        "--random-input-len", str(inp),
-        "--random-output-len", str(out),
-        "--max-seq-len", str(msl),
-        "--num-prompts", str(num_prompts),
-        "--iters", str(iters),
+        "--model",
+        str(plan.path),
+        "--engine",
+        engine,
+        "--dataset-name",
+        "random-ids",
+        "--random-input-len",
+        str(inp),
+        "--random-output-len",
+        str(out),
+        "--max-seq-len",
+        str(msl),
+        "--num-prompts",
+        str(num_prompts),
+        "--iters",
+        str(iters),
         "--greedy",
-        "--gpu-mem-util", str(UTILIZATION),
-        "--json-out", str(json_out),
+        "--gpu-mem-util",
+        str(UTILIZATION),
+        "--json-out",
+        str(json_out),
     ]
     if tp > 1:
         cmd += ["--tensor-parallel-size", str(tp)]
@@ -389,7 +397,9 @@ def gpu_used_mibs() -> list[int]:
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         ).stdout
         return [int(x) for x in out.split() if x.isdigit()]
     except Exception:
@@ -463,9 +473,16 @@ def run_one(
         # absorb the fragmentation so the KV+logits peak actually fits.
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     cmd = bench_cmd(
-        python, json_out, plan, lengths,
-        engine=engine, tp=tp, num_prompts=num_prompts, iters=args.iters,
-        data_parallel=data_parallel, extra=extra,
+        python,
+        json_out,
+        plan,
+        lengths,
+        engine=engine,
+        tp=tp,
+        num_prompts=num_prompts,
+        iters=args.iters,
+        data_parallel=data_parallel,
+        extra=extra,
     )
     print(f"  [{engine}] {' '.join(cmd)}", flush=True)
     rc, out_tail, err_tail, wall = run_arm(cmd, env, args.timeout_s)
@@ -496,8 +513,14 @@ def run_dp2_point(plan: ModelPlan, args, tmp_dir: Path) -> dict:
     for label, tp, dp in (("tp1", 1, 1), ("tp2", 2, 1), ("dp2", 1, 2)):
         out = tmp_dir / f"{plan.label.replace('/', '_')}_scaling_{label}.json"
         point[label] = run_one(
-            plan, "rapid_llm", tp, lengths, out, args,
-            num_prompts=64, data_parallel=dp,
+            plan,
+            "rapid_llm",
+            tp,
+            lengths,
+            out,
+            args,
+            num_prompts=64,
+            data_parallel=dp,
         )
     base = point["tp1"].get("tps") or 0
     for label in ("tp2", "dp2"):
@@ -512,7 +535,13 @@ def run_ep2_point(plan: ModelPlan, args, tmp_dir: Path) -> dict:
     point: dict = {"scenario": "long"}
     out = tmp_dir / f"{plan.label.replace('/', '_')}_ep2.json"
     point["tp2_ep2"] = run_one(
-        plan, "rapid_llm", 2, lengths, out, args, num_prompts=args.batch,
+        plan,
+        "rapid_llm",
+        2,
+        lengths,
+        out,
+        args,
+        num_prompts=args.batch,
         extra=("--engine-arg", "enable_expert_parallel=true"),
     )
     return point
@@ -538,14 +567,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir", default="docs/benchmark_logs")
     parser.add_argument("--batch", type=int, default=BATCH)
     parser.add_argument("--iters", type=int, default=ITERS)
-    parser.add_argument("--scenarios", default="short,medium,long",
-                        help="Comma-separated subset of the ladder to run")
-    parser.add_argument("--models", default="",
-                        help="Substring filter on model directory name")
-    parser.add_argument("--timeout-s", type=int, default=3600,
-                        help="Wall-clock cap per arm subprocess")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print verdicts, plan and commands; run nothing")
+    parser.add_argument(
+        "--scenarios",
+        default="short,medium,long",
+        help="Comma-separated subset of the ladder to run",
+    )
+    parser.add_argument("--models", default="", help="Substring filter on model directory name")
+    parser.add_argument(
+        "--timeout-s", type=int, default=3600, help="Wall-clock cap per arm subprocess"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print verdicts, plan and commands; run nothing"
+    )
     return parser
 
 
@@ -578,17 +611,22 @@ def main(argv=None) -> int:
         return 0
 
     selected = [
-        p for p in plans
-        if p.status == "run" and (not args.models or args.models in p.name)
+        p for p in plans if p.status == "run" and (not args.models or args.models in p.name)
     ]
     if args.models:
-        print(f"model filter {args.models!r}: running {len(selected)} of "
-              f"{sum(p.status == 'run' for p in plans)} planned models")
+        print(
+            f"model filter {args.models!r}: running {len(selected)} of "
+            f"{sum(p.status == 'run' for p in plans)} planned models"
+        )
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     suite: dict = {
-        "gpu": {"count": gpu_count, "name": gpu_name, "gb": round(gpu_gb, 1),
-                "budget_gb_per_gpu": round(budget_gb, 1)},
+        "gpu": {
+            "count": gpu_count,
+            "name": gpu_name,
+            "gb": round(gpu_gb, 1),
+            "budget_gb_per_gpu": round(budget_gb, 1),
+        },
         "batch": args.batch,
         "iters": args.iters,
         "scenarios": scenarios,
@@ -635,8 +673,14 @@ def main(argv=None) -> int:
         suite["models"][plan.name] = model_out
 
     skipped = [
-        {"model": p.name, "type": p.model_type, "quant": p.quant,
-         "weight_gb": round(p.weight_gb, 1), "reason": p.reason, "evidence": p.evidence}
+        {
+            "model": p.name,
+            "type": p.model_type,
+            "quant": p.quant,
+            "weight_gb": round(p.weight_gb, 1),
+            "reason": p.reason,
+            "evidence": p.evidence,
+        }
         for p in plans
         if p.status == "skip"
     ]

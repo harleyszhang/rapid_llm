@@ -72,7 +72,9 @@ class DeepseekV4Attention(nn.Module):
         self.scale = self.head_dim**-0.5
         dtype = config.dtype
 
-        self.num_heads = divide(config.num_heads, get_tensor_model_parallel_world_size(), "attention heads")
+        self.num_heads = divide(
+            config.num_heads, get_tensor_model_parallel_world_size(), "attention heads"
+        )
         self.o_groups = int(config.o_groups)
         self.o_lora_rank = int(config.o_lora_rank)
         world = get_tensor_model_parallel_world_size()
@@ -118,9 +120,7 @@ class DeepseekV4Attention(nn.Module):
         # layers stay on the plain ``main`` table (theta 10 000); CSA/HCA
         # layers rotate their shared KV — and invert it on the output — with
         # the yarn-scaled ``compress`` table their compressors share.
-        self.rope_layer_type = (
-            "main" if self.layer_type == "sliding_attention" else "compress"
-        )
+        self.rope_layer_type = "main" if self.layer_type == "sliding_attention" else "compress"
         self._cache = V4LayerCache(self.sliding_window)
 
     def reset(self) -> None:
@@ -205,9 +205,7 @@ class DeepseekV4Attention(nn.Module):
             if extra_mask is not None:
                 mask = torch.cat([mask, extra_mask.to(q.dtype)], dim=-1)
             else:
-                mask = torch.cat(
-                    [mask, mask.new_zeros(B, 1, S, extra_kv.shape[2])], dim=-1
-                )
+                mask = torch.cat([mask, mask.new_zeros(B, 1, S, extra_kv.shape[2])], dim=-1)
 
         # Eager attention with the per-head sink column, max-subtracted.
         attn_weights = torch.matmul(q, kv_all.transpose(-1, -2)) * self.scale

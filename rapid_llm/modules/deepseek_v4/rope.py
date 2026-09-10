@@ -27,9 +27,7 @@ class DeepseekV4RotaryEmbedding(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         tc = config.text_config
-        self.rope_dim = int(
-            config.head_dim * float(getattr(tc, "partial_rotary_factor", 1.0))
-        )
+        self.rope_dim = int(config.head_dim * float(getattr(tc, "partial_rotary_factor", 1.0)))
         nested = getattr(tc, "rope_parameters", None) or {}
         defaults = {
             "main": float(getattr(tc, "rope_theta", 10000.0)),
@@ -47,10 +45,7 @@ class DeepseekV4RotaryEmbedding(nn.Module):
             )
             dim = int(config.head_dim * factor)
             inv_freq = 1.0 / (
-                theta
-                ** (
-                    torch.arange(0, dim, 2, dtype=torch.int64).to(torch.float32) / dim
-                )
+                theta ** (torch.arange(0, dim, 2, dtype=torch.int64).to(torch.float32) / dim)
             )
             self.register_buffer(f"{name}_inv_freq", inv_freq, persistent=False)
 

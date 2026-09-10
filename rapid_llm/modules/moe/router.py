@@ -184,11 +184,7 @@ class TopKRouter:
                 e_score_correction_bias=correction_bias,
             )
             return TopKOutput(weights.to(x.dtype), ids, router_logits)
-        if (
-            self._fused_topk
-            and router_logits.is_cuda
-            and router_logits.dtype == torch.float32
-        ):
+        if self._fused_topk and router_logits.is_cuda and router_logits.dtype == torch.float32:
             weights, ids = fused_topk_softmax(
                 router_logits,
                 self.top_k,

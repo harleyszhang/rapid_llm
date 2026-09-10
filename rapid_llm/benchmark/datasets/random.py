@@ -54,9 +54,7 @@ class RandomDataset(BaseDataset):
             random_sample=(args.dataset_name == "random"),
         )
 
-    def load(
-        self, tokenizer: PreTrainedTokenizerBase, model_id=None
-    ) -> list[DatasetRow]:
+    def load(self, tokenizer: PreTrainedTokenizerBase, model_id=None) -> list[DatasetRow]:
         return sample_random_requests(
             input_len=self.input_len,
             output_len=self.output_len,
@@ -176,10 +174,7 @@ def sample_random_requests(
         offsets = np.random.randint(0, len(allowed), size=num_prompts)
         input_requests = []
         for i in range(num_prompts):
-            ids = [
-                allowed[(int(offsets[i]) + i + j) % len(allowed)]
-                for j in range(input_lens[i])
-            ]
+            ids = [allowed[(int(offsets[i]) + i + j) % len(allowed)] for j in range(input_lens[i])]
             if return_text:
                 prompt, ids, mismatch = gen_prompt_decode_to_target_len(
                     tokenizer, ids, input_lens[i]

@@ -281,6 +281,7 @@ class ModelWorker:
                 # all_logits is [n_tokens, vocab] (2D); index with a list
                 # (not a tuple, which would be multi-dim indexing).
                 import itertools as _it
+
                 ends = list(_it.accumulate(model_input.chunk_lens))
                 row_list = [ends[index] - 1 for index in model_input.sampled]
                 sample_logits = all_logits[row_list] if row_list else all_logits[:0]
@@ -289,10 +290,14 @@ class ModelWorker:
                 tokens, sampled_records = self._sample(model_input, logits)
         if not any(prompt) and sampled_records is None:
             return tokens, None, all_logits
-        return tokens, PassLogprobs(
-            sampled=tuple(sampled_records) if sampled_records is not None else (),
-            prompt=prompt,
-        ), all_logits
+        return (
+            tokens,
+            PassLogprobs(
+                sampled=tuple(sampled_records) if sampled_records is not None else (),
+                prompt=prompt,
+            ),
+            all_logits,
+        )
 
     # -------------------------------------------------------------- preparing #
     def prepare(self, plan: ModelInput) -> _PreparedPass:
@@ -532,7 +537,8 @@ class ModelWorker:
         # whatever the queue still holds, serialising the host against the GPU
         # mid-pass. They are tiny, but tiny and blocking still blocks.
         slots, slots_event = self._pool.upload_async(
-            [plan.slots[index] for index in plan.sampled], dtype=torch.long,
+            [plan.slots[index] for index in plan.sampled],
+            dtype=torch.long,
             label="upload.sample.slots",
         )
         # Where each row's new token goes, which is also how much history its

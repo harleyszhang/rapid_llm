@@ -33,10 +33,10 @@ from ..utils.logger import get_logger
 from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     _PREFILL_GRAPH_ENV,
-    PREFILL_GRAPH_RESERVED_BYTES,
-    PREFILL_GRAPH_RESERVED_BYTES_EP,
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
+    PREFILL_GRAPH_RESERVED_BYTES,
+    PREFILL_GRAPH_RESERVED_BYTES_EP,
     TP_GRAPH_PARITY_ATOL,
     CUDAGraphManager,
     PrefillGraphManager,
@@ -457,9 +457,7 @@ class ModelRunner:
         manager = self._prefill_graphs
         if manager is None:
             return None
-        return manager.try_replay(
-            input_ids, position_ids, logits_positions, self.atten_info
-        )
+        return manager.try_replay(input_ids, position_ids, logits_positions, self.atten_info)
 
     def _tp_graphs_are_safe(self, manager: CUDAGraphManager, captured: bool) -> bool:
         """Whether this rank's captured graphs may serve traffic. Same answer everywhere.

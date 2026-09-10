@@ -41,9 +41,7 @@ class CustomDataset(BaseDataset):
             apply_chat_template=args.apply_chat_template,
         )
 
-    def load(
-        self, tokenizer: PreTrainedTokenizerBase, model_id=None
-    ) -> list[DatasetRow]:
+    def load(self, tokenizer: PreTrainedTokenizerBase, model_id=None) -> list[DatasetRow]:
         return sample_custom_requests(
             dataset_path=self.dataset_path,
             num_requests=self.num_requests,
@@ -112,11 +110,7 @@ def sample_custom_requests(
         prompt = dataset[i][0]
 
         if prompt_suffix:
-            prompt = (
-                _remove_suffix(prompt, ASSISTANT_SUFFIX)
-                + prompt_suffix
-                + ASSISTANT_SUFFIX
-            )
+            prompt = _remove_suffix(prompt, ASSISTANT_SUFFIX) + prompt_suffix + ASSISTANT_SUFFIX
 
         if apply_chat_template:
             prompt = tokenizer.apply_chat_template(
@@ -132,9 +126,7 @@ def sample_custom_requests(
         completion = dataset[i][1]
         completion_token_ids = tokenizer.encode(completion)
         prompt_len = len(prompt_token_ids)
-        output_len = (
-            len(completion_token_ids) if fixed_output_len is None else fixed_output_len
-        )
+        output_len = len(completion_token_ids) if fixed_output_len is None else fixed_output_len
 
         if prompt_len < 2 or output_len < 2:
             # Prune too short sequences.

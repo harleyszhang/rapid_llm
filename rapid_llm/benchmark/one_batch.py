@@ -67,18 +67,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--batch-sizes", type=parse_batch_sizes, default=[1, 2, 4, 8])
-    parser.add_argument("--input-len", type=int, default=1024,
-                        help="Prompt tokens per row (sets the dataset's input length)")
-    parser.add_argument("--output-len", type=int, default=128,
-                        help="Generated tokens per row (sets the dataset's output length)")
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=1024,
+        help="Prompt tokens per row (sets the dataset's input length)",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=128,
+        help="Generated tokens per row (sets the dataset's output length)",
+    )
     parser.add_argument("--iters", type=int, default=2)
     parser.add_argument(
-        "--verify", action="store_true",
+        "--verify",
+        action="store_true",
         help="Require graph-engine outputs to match eager, token for token",
     )
     parser.add_argument("--max-seq-len", type=int, default=0)
     parser.add_argument(
-        "--engine-arg", action="append", default=[],
+        "--engine-arg",
+        action="append",
+        default=[],
         help="rapid_llm engine kwarg, key=value (repeatable)",
     )
     parser.add_argument("--log-dir", default=None)
