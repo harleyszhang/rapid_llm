@@ -31,6 +31,8 @@ agreement subcommands consume.
     rapid_llm venv, GPUs (TP-2) / CPU:
         python -m tests.layer.deepseek v4 lite
         python -m tests.layer.deepseek v4 hf
+    the same two arms as the pytest gate (weights/slow tier):
+        pytest tests/golden/test_deepseek_v4_flash_parity.py
     analyses (either venv):
         python -m tests.layer.deepseek v3 three-way PARITY.json VLLM.json
         python -m tests.layer.deepseek v4 compare LITE.json HF.json
@@ -41,6 +43,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -49,11 +52,27 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-GREEDY_STEPS = 32
-LOG_DIR = Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "accuracy"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
-V3_CKPT = "/data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16"
-V4_CKPT = "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers"
+GREEDY_STEPS = 32
+LOG_DIR = _REPO_ROOT / "docs" / "benchmark_logs" / "accuracy"
+
+#: Checkpoints resolve through the repository's ``my_weight/`` tree (symlinks
+#: into the shared lab store, the same convention the golden gates use), so no
+#: machine-specific absolute path lives in this file; a machine that keeps the
+#: weights elsewhere points the environment variables below at them.
+_V3_DEFAULT = "my_weight/DeepSeek-V3-4layers-MTP-BF16"
+_V4_DEFAULT = "my_weight/DeepSeek-V4-Flash-6layers"
+
+
+def _resolve_ckpt(default: str, env: str) -> str:
+    """An absolute override wins; the relative default is repository-rooted."""
+    chosen = Path(os.environ.get(env, default)).expanduser()
+    return str(chosen if chosen.is_absolute() else _REPO_ROOT / chosen)
+
+
+V3_CKPT = _resolve_ckpt(_V3_DEFAULT, "RAPID_LLM_TEST_DSV3_DIR")
+V4_CKPT = _resolve_ckpt(_V4_DEFAULT, "RAPID_LLM_TEST_DSV4_DIR")
 
 # --------------------------------------------------------------------- #
 # shared helpers
@@ -398,8 +417,14 @@ def _v4_prompt_ids(length: int) -> torch.Tensor:
     return torch.randint(10, 120000, (1, length), generator=g)
 
 
-def _v4_lite_payload(rank: int) -> dict:
-    """Module-level so tp_harness's spawned workers can pickle it."""
+def v4_lite_payload(rank: int) -> dict:
+    """Module-level so tp_harness's spawned workers can pickle it.
+
+    The lite arm of the V4-Flash comparison: the CLI's ``v4 lite`` subcommand
+    and the golden gate (``tests/golden/test_deepseek_v4_flash_parity.py``)
+    both run it, so the records the gate asserts on are exactly the ones the
+    benchmark arm leaves in its JSON.
+    """
     from rapid_llm.distributed.parallel_state import tensor_model_parallel_all_gather
     from rapid_llm.executor.attention_metadata import AttentionMetadata
     from rapid_llm.executor.loader import materialise_parameters
@@ -453,27 +478,32 @@ def cmd_v4_lite(args) -> int:
 
     @needs_gpus(2)
     def run() -> None:
-        results = run_on_tp_ranks(_v4_lite_payload, tp_size=2)
+        results = run_on_tp_ranks(v4_lite_payload, tp_size=2)
         write_arm("v4_lite", {"checkpoint": V4_CKPT}, {"prompts": results[0]["prompts"]})
 
     run()
     return 0
 
 
-def cmd_v4_hf(args) -> int:
-    """Reference side: transformers eager V4 on CPU, DSpark weights converted."""
-    import time
+def v4_oracle_records(checkpoint: str | Path = V4_CKPT) -> list[dict]:
+    """The fp32 CPU oracle: transformers eager V4 fed from the DSpark files.
 
+    Converts the checkpoint into a ``DeepseekV4ForCausalLM`` in host memory
+    (:func:`tests.layer.dspark_to_hf.load_dspark_hf`), then replays the same
+    seeded prompts and greedy steps as :func:`v4_lite_payload`. Returns the
+    prompt records both the CLI's ``v4 hf`` arm writes to JSON and the golden
+    gate asserts against.
+    """
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
     from rapid_llm.models.config import ModelConfig
     from tests.layer.dspark_to_hf import load_dspark_hf
 
-    config = ModelConfig.from_pretrained(V4_CKPT, max_seq_len=2048).hf_config
+    config = ModelConfig.from_pretrained(checkpoint, max_seq_len=2048).hf_config
     with torch.device("meta"):
         model = DeepseekV4ForCausalLM(config)
     t0 = time.time()
-    load_dspark_hf(model, V4_CKPT, dtype=torch.float32)
+    load_dspark_hf(model, checkpoint, dtype=torch.float32)
     model.eval()
     print(f"dspark->hf conversion took {time.time() - t0:.0f}s")
 
@@ -486,7 +516,12 @@ def cmd_v4_hf(args) -> int:
         out.append(
             {"seq_len": length, "greedy_tokens": tokens, "steps": [{"top5": t} for t in top5s]}
         )
-    write_arm("v4_hf", {"checkpoint": V4_CKPT}, {"prompts": out})
+    return out
+
+
+def cmd_v4_hf(args) -> int:
+    """Reference side: transformers eager V4 on CPU, DSpark weights converted."""
+    write_arm("v4_hf", {"checkpoint": V4_CKPT}, {"prompts": v4_oracle_records()})
     return 0
 
 
