@@ -354,9 +354,7 @@ class SequenceParallelPass:
         """
         self.matched.clear()
         self.refusal = None
-        # Cleared before the early returns: a disabled re-run must not leave a
-        # previous run's marks behind, or ``matched`` and the module tree
-        # disagree about which boundaries are live.
+
         for module in model.modules():
             for attr in _SP_ATTRS:
                 if hasattr(module, attr):
@@ -366,10 +364,6 @@ class SequenceParallelPass:
         from .parallel_state import get_tensor_model_parallel_world_size
 
         if get_tensor_model_parallel_world_size() <= 1:
-            # No peers to shard tokens across. Logged because the usual cause is
-            # order, not intent: the pass runs from ``CausalLM.__init__``, and a
-            # caller that builds the model before ``init_parallel`` sees the grid
-            # it has not joined yet.
             self.refusal = "tensor-parallel world size is 1"
             _log.info(
                 "SequenceParallelPass requested but %s; nothing marked "

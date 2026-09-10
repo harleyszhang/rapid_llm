@@ -84,7 +84,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 ### MoE 量化专家吃 bf16 激活（commit ab3d55d）
 
-`fused_moe` 允许量化专家权重与 bf16 激活混用，30B-A3B-FP8 在 2×A10 上的 TP=2 数据随本版入库（`docs/benchmark_logs/quant_Qwen3-30B-A3B-Instruct-2507-FP8_tp2.json`）。
+`fused_moe` 允许量化专家权重与 bf16 激活混用，30B-A3B-FP8 在 2×A10 上的 TP=2 数据随本版入库（`docs/benchmark_logs/quantization/quant_Qwen3-30B-A3B-Instruct-2507-FP8_tp2.json`）。
 
 ## Refactor
 
@@ -109,7 +109,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 判据是基线跑两遍取自差：**噪声下限 0.5%**，小于它的差值只报"低于噪声"，不报成提速或变慢。metrics 与 trace 落在噪声里符合预期——它们是每请求几次浮点加法与一次落桶，不是每 token 的工作。logprobs 的 10.4% 则是真的 GPU 代价：每步多一次 `log_softmax` + `topk` 与一次 D2H 搬运，随 batch 与 vocab 走；prompt_logprobs 只压在 prefill 上，所以 TTFT 涨 9 ms 而吞吐几乎不动。
 
-日志：[`docs/benchmark_logs/observability_v0.10.json`](benchmark_logs/observability_v0.10.json)。
+日志：[`docs/benchmark_logs/kernels/observability_v0.10.json`](benchmark_logs/kernels/observability_v0.10.json)。
 
 ### dispatch 开销（`benchmarks/kernels/bench_dispatch.py`）
 
@@ -121,7 +121,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 15 µs 里真正的字典查找只有 **0.48 µs**，其余是每次重取的平台快照（9.95 µs，`torch.cuda.get_device_name()`）与环境变量读取（1.72 µs）。这三档都只影响冷启动：调用点在构造期决策一次并存成属性，每步 forward 连命中缓存那次查找都不做。是否缓存 `detect()` 本版没动，记在这里。
 
-日志：[`docs/benchmark_logs/dispatch_cost_v0.10.json`](benchmark_logs/dispatch_cost_v0.10.json)。
+日志：[`docs/benchmark_logs/kernels/dispatch_cost_v0.10.json`](benchmark_logs/kernels/dispatch_cost_v0.10.json)。
 
 ### v0.9.0 ↔ v0.10.0 端到端对照
 
@@ -136,7 +136,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 
 全部在噪声内：本版新增的都是默认关闭或按请求 opt-in 的路径，冻结实测排序在这张 GPU 上选出的赢家与 v0.9 静态 priority 的首选一致。**精度无损、性能无回归**是本版对性能的全部主张。
 
-日志：[`docs/benchmark_logs/version_compare_v0.9.0_v0.10.json`](benchmark_logs/version_compare_v0.9.0_v0.10.json)。
+日志：[`docs/benchmark_logs/engine/version_compare_v0.9.0_v0.10.json`](benchmark_logs/engine/version_compare_v0.9.0_v0.10.json)。
 
 ## 测试结果
 
@@ -161,7 +161,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 | 修改 | `benchmarks/common.py` + 全部 bench 脚本接工厂；删除 `bench_all_kernels.py` / `flashattention*.py` / `bench_hf_baseline.py` |
 | 新建 | `tests/golden/test_logprob_parity.py`、`tests/observe/test_metrics.py`、`tests/ops/test_frozen_rank.py`、`tests/tools/test_harness.py` |
 | 新建 | `scripts/gen_logprobs_gif.py`、`docs/images/logprobs.gif` |
-| 新建 | `docs/benchmark_logs/{observability,dispatch_cost}_v0.10.json`、`version_compare_v0.9.0_v0.10.json` |
+| 新建 | `docs/benchmark_logs/kernels/{observability,dispatch_cost}_v0.10.json`、`engine/version_compare_v0.9.0_v0.10.json` |
 
 ## Upgrade
 
@@ -186,8 +186,8 @@ python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B --layer 3 \
     --weights mirror --tolerance 2e-2
 
 # 复现本版全部 benchmark
-python benchmarks/bench_observability.py --json docs/benchmark_logs/observability_v0.10.json
-python benchmarks/kernels/bench_dispatch.py --json docs/benchmark_logs/dispatch_cost_v0.10.json
+python benchmarks/bench_observability.py --json docs/benchmark_logs/kernels/observability_v0.10.json
+python benchmarks/kernels/bench_dispatch.py --json docs/benchmark_logs/kernels/dispatch_cost_v0.10.json
 
 # 重新生成上面的 GIF
 python scripts/gen_logprobs_gif.py

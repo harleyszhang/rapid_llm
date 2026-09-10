@@ -71,16 +71,6 @@ class BenchResult:
             f"{self.gen_tokens} tok in {self.total_s:.2f}s"
         )
 
-    def row_percentiles(self, label: str) -> str:
-        """The distribution view: per-request TTFT/TPOT with p50/p99."""
-        return (
-            f"{label:18s} TTFT {self.ttft_ms:7.1f} ms (p50 {self.ttft_p50_ms:7.1f} | "
-            f"p99 {self.ttft_p99_ms:7.1f}) | "
-            f"TPOT {self.tpot_ms:6.2f} ms (p50 {self.tpot_p50_ms:6.2f} | "
-            f"p99 {self.tpot_p99_ms:6.2f}) | "
-            f"TPS {self.tps:7.1f} tok/s"
-        )
-
 
 def steps_to_result(
     step_ends: list[float],

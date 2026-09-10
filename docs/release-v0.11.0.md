@@ -90,7 +90,7 @@ curl localhost:8000/v1/chat/completions -d '{
 
 KV 几何（每 token 每层 elements，从 config.json 解析）：V2-Lite MLA latent **576**（512 lora + 64 rope），同一架构不压缩需 **5120**（16 头 × (128 nope + 64 rope + 128 v)），Qwen3-1.7B GQA **2048**（2 × 8 heads × 128）。latent 口径下 TP=2 的池容量即全模型容量（latent 复制，不切分）。
 
-日志：[`docs/benchmark_logs/mla_v0.11.json`](benchmark_logs/mla_v0.11.json)。
+日志：[`docs/benchmark_logs/kernels/mla_v0.11.json`](benchmark_logs/kernels/mla_v0.11.json)。
 
 ### F8 parser 开销（`benchmarks/bench_parser.py`）
 
@@ -102,7 +102,7 @@ KV 几何（每 token 每层 elements，从 config.json 解析）：V2-Lite MLA 
 
 语料是 think 块 + 正文 + tool 调用段的混合流，按 detokenizer 尺度（~4 字符）切增量，标签跨块边界是常态而非特例。增量 1.17 µs 相对本版实测 decode TPOT（21.7–63.0 ms，见上表）占比 **0.002%–0.005%**——远低于噪声下限，符合「纯 Python 字符处理不该被感知」的预期；如实报数，不四舍五入成「零开销」。
 
-日志：[`docs/benchmark_logs/parser_v0.11.json`](benchmark_logs/parser_v0.11.json)。
+日志：[`docs/benchmark_logs/kernels/parser_v0.11.json`](benchmark_logs/kernels/parser_v0.11.json)。
 
 ## 测试结果
 
@@ -132,7 +132,7 @@ golden 的 UNVERIFIED 语义与上一版一致：checkpoint 缺失时 xfail 并�
 | 新建 | `tests/golden/test_deepseek_v2_tp2.py`、`tests/engine/test_{reasoning,tool_parser}.py`、`tests/tools/test_divergence.py` |
 | 新建 | `scripts/dsv2_tp2_parity_probe.py`、`scripts/dsv2_layer_diff.py`（校准与排查探针）、`scripts/gen_reasoning_gif.py`（README gif，真实运行渲染） |
 | 修改 | `rapid_llm/executor/executor.py`（shutdown 对称销毁 rank-0 group）、`tests/distributed/test_tp_engine.py`（对应回归测试） |
-| 新建 | `docs/benchmark_logs/{mla,parser}_v0.11.json`、`docs/images/reasoning.gif` |
+| 新建 | `docs/benchmark_logs/kernels/{mla,parser}_v0.11.json`、`docs/images/reasoning.gif` |
 
 ## Upgrade
 
@@ -149,8 +149,8 @@ curl localhost:8000/v1/chat/completions -d '{
 }'
 
 # 复现本版 benchmark
-python benchmarks/bench_mla.py --json docs/benchmark_logs/mla_v0.11.json
-python benchmarks/bench_parser.py --json docs/benchmark_logs/parser_v0.11.json
+python benchmarks/bench_mla.py --json docs/benchmark_logs/kernels/mla_v0.11.json
+python benchmarks/bench_parser.py --json docs/benchmark_logs/kernels/parser_v0.11.json
 
 # golden 门禁
 pytest tests/golden/test_deepseek_v2_tp2.py -q

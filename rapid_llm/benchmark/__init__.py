@@ -7,9 +7,9 @@ twice, and there is no ``dp`` module: DP is one backend (:class:`DPBackend`).
 
 Layering, bottom-up: ``datasets/`` (workload rows via ``get_dataset``),
 ``workloads`` (prompt/sampling presets), ``metrics`` (TTFT/TPOT/TPS),
-``stream_metrics`` (steady-state windows), ``backends`` (one ABC, one
-implementation per engine, ``measure_rows`` the only drive loop), ``utils``
-(GPU hygiene, footprints, JSON logs, tables, tokenizer, endpoint).
+``backends`` (one ABC, one implementation per engine, ``measure_rows`` the only
+drive loop), ``utils`` (GPU hygiene, footprints, JSON logs, tables, tokenizer,
+endpoint).
 
 Runnable on top, each a thin orchestration of the above:
 
@@ -47,7 +47,6 @@ from .metrics import (
     run_requests,
     steps_to_result,
 )
-from .stream_metrics import BatchStreamRecorder, SteadyStateWindow
 from .utils import (
     count_gen_tokens,
     describe_footprint,
@@ -79,7 +78,6 @@ __all__ = [
     "PROMPTS",
     "SAMPLE_KW",
     "Backend",
-    "BatchStreamRecorder",
     "BenchResult",
     "DPBackend",
     "DatasetRow",
@@ -87,7 +85,6 @@ __all__ = [
     "HFBackend",
     "LiteBackend",
     "RequestRun",
-    "SteadyStateWindow",
     "VLLMBackend",
     "VisionBackend",
     "add_dataset_args",

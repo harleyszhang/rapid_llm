@@ -262,7 +262,7 @@ $$b_{\text{kv}} = 2 \cdot n_{\text{layer}} \cdot n_{\text{kv\_head}} \cdot d_{\t
 - $s_{\text{dtype}}$：fp16 为 2 字节；`--kv-cache-dtype fp8` 时 e4m3 字节存放在 uint8 容器中，为 1 字节；
 - 因子 2：K 与 V 各存一份。
 
-代入 Qwen2.5-0.5B（24 层 × 2 KV 头 × head_dim 64，fp16）：$b_{\text{kv}} = 2 \times 24 \times 2 \times 64 \times 2 = 12{,}288$ B ≈ 12 KiB/token。换 fp8 KV 后 $b_{\text{kv}}$ 减半到 6 KiB，同样显存能装的 token 数翻倍：A10 实测 282K 对 148K tokens（1.91×），吞吐代价 9%（[bench_kv_cache_fp8_v06.json](benchmark_logs/bench_kv_cache_fp8_v06.json)）。TP 下对这个结论做 `tensor_model_parallel_all_reduce_min`，各 rank 容量一致，「所有 rank 结论一致」由机制保证。
+代入 Qwen2.5-0.5B（24 层 × 2 KV 头 × head_dim 64，fp16）：$b_{\text{kv}} = 2 \times 24 \times 2 \times 64 \times 2 = 12{,}288$ B ≈ 12 KiB/token。换 fp8 KV 后 $b_{\text{kv}}$ 减半到 6 KiB，同样显存能装的 token 数翻倍：A10 实测 282K 对 148K tokens（1.91×），吞吐代价 9%（[kv_cache_fp8_v06.json](benchmark_logs/quantization/kv_cache_fp8_v06.json)）。TP 下对这个结论做 `tensor_model_parallel_all_reduce_min`，各 rank 容量一致，「所有 rank 结论一致」由机制保证。
 
 ### 4.3 decode 内核的 roofline 检查
 

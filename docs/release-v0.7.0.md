@@ -33,7 +33,7 @@ v0.7.0 升级调度器（参考 vLLM Scheduler v1），引入三项能力：
 **关键结论：** decode 在两种模式下都在跑（prefill 与 decode 本就并存），真正的收益是**单 step 最坏 prefill 工作量下降 3.9x**（2000 → 512 token）。decode 请求的尾延迟因此从「等一个完整 prompt」变成「等一个 chunk」。
 
 > 复现：`python scripts/gen_chunked_prefill_gif.py`
-> 逐 step 原始输出与 benchmark 日志：[`docs/benchmark_logs/bench_chunked_prefill_v07.json`](benchmark_logs/bench_chunked_prefill_v07.json)
+> 逐 step 原始输出与 benchmark 日志：[`docs/benchmark_logs/engine/chunked_prefill_v07.json`](benchmark_logs/engine/chunked_prefill_v07.json)
 
 **使用方式：**
 
@@ -74,7 +74,7 @@ sched = Scheduler(config, num_slots=64)
 **关键结论：** 第一个请求 cold，prefill 全部 800 token 并填充缓存；之后每个共享前缀的请求跳过 768 token，实际 prefill 工作量从 800 → 32 token，**降低 25x**。命中率随共享请求增多持续爬升到 72%。
 
 > 复现：`python scripts/gen_prefix_cache_gif.py`
-> benchmark 日志：[`docs/benchmark_logs/bench_prefix_cache_v07.json`](benchmark_logs/bench_prefix_cache_v07.json)
+> benchmark 日志：[`docs/benchmark_logs/engine/prefix_cache_v07.json`](benchmark_logs/engine/prefix_cache_v07.json)
 
 **使用方式：**
 

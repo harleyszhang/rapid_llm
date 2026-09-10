@@ -33,7 +33,7 @@
 **A10 collect round 结果：** 12 个 key 全部改进，最佳 +37.8%（int4 M64），最差 +0.3%（bf16 M16）。fp8/int8 在大 shape（4096 tokens）分别提速 27.9%/16.1%。
 
 **证据：**
-- Benchmark: `docs/benchmark_logs/moe_o4_*.json`
+- Benchmark: `docs/benchmark_logs/kernels/moe_o4_*.json`
 - GIF: `docs/images/moe_o4.gif`
 
 **已知问题：**
@@ -52,7 +52,7 @@
 **结果：** geomean 1.07x，最佳 b1_s512 固定 128 blocks/27.65µs → 自适应 32 part/512 blocks/15.36µs = 1.8x。
 
 **证据：**
-- Benchmark: `docs/benchmark_logs/splitkv_o8_*.json`
+- Benchmark: `docs/benchmark_logs/kernels/splitkv_o8_*.json`
 - GIF: `docs/images/splitkv_o8.gif`
 
 
@@ -68,7 +68,7 @@
 
 **证据：**
 - Tests: `tests/kernels/test_fp8_kv_accuracy.py` (8 passed)
-- Benchmark: `docs/benchmark_logs/fp8_kv_o14_*.json`
+- Benchmark: `docs/benchmark_logs/quantization/fp8_kv_o14_*.json`
 
 
 ## O5 ngram 投机解码
@@ -90,7 +90,7 @@
 
 **证据：**
 - Tests: `tests/engine/test_ngram_proposer.py` (9 passed)
-- Benchmark: `docs/benchmark_logs/speculative_o5_*.json`
+- Benchmark: `docs/benchmark_logs/kernels/speculative_o5_*.json`
 - Code: `rapid_llm/engine/ngram_proposer.py`, `continuous_engine.py::_speculate_verify`
 
 
@@ -136,7 +136,7 @@
 **结论：** fused kernel 与 baseline 持平。all-reduce 通信延迟（~4.4ms）完全主导，norm kernel 的 HBM 节省可以忽略。当前实现优先保证与已有通信 overlap 策略组合时的正确性和性能。
 
 **证据：**
-- Benchmark: `docs/benchmark_logs/fused_allreduce_rmsnorm_*.json`
+- Benchmark: `docs/benchmark_logs/kernels/fused_allreduce_rmsnorm_*.json`
 - Code: `rapid_llm/kernels/ops/layernorm/skip_rmsnorm.py::fused_add_rmsnorm`
 - Integration: `rapid_llm/models/base.py::DecoderLayer._post_attention_norm`
 

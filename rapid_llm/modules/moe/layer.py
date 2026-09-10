@@ -475,7 +475,6 @@ class SparseMoeBlock(nn.Module):
         local_x: torch.Tensor,
         local_ids: torch.Tensor,
         local_weights: torch.Tensor,
-        down_overlap_args=None,
     ) -> torch.Tensor:
         """Stages 3-4: run the local experts over the received batch.
 
@@ -483,28 +482,12 @@ class SparseMoeBlock(nn.Module):
         resolves the Triton core (and its identity permutes) for the block's
         ``(a2a_backend, runner_backend)``. A block built by ``object.__new__``
         (the custom-method test that only sets ``quant_method``) has no runner,
-        so this falls back to the same call the runner core would make -- the
-        pre-refactor ``quant_method.apply``, including the ``down_overlap_args``
-        fast path that splits the down projection into row chunks for the
-        unquantized kernel.
+        so this falls back to the same call the runner core would make.
         """
         runner = getattr(self, "runner", None)
         if runner is not None:
-            return runner.run(self, local_x, local_ids, local_weights, down_overlap_args)
-
-        if down_overlap_args is None or type(self.quant_method) is not UnquantizedFusedMoEMethod:
-            return self.quant_method.apply(self, local_x, local_weights, local_ids)
-
-        from ...kernels import fused_moe
-
-        return fused_moe(
-            local_x,
-            self.experts["gate_up_proj"],
-            self.experts["down_proj"],
-            local_weights,
-            local_ids,
-            down_overlap_args=down_overlap_args,
-        )
+            return runner.run(self, local_x, local_ids, local_weights)
+        return self.quant_method.apply(self, local_x, local_weights, local_ids)
 
     @torch.no_grad()
     def quantize_(self, quant: QuantizationConfig) -> None:

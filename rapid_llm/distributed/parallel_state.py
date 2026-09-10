@@ -1,8 +1,10 @@
 """The DP x TP rank grid: one global rank space both parallel axes agree on.
 
 ``init_parallel`` splits the world into contiguous TP groups — one per DP
-replica — and builds the TP process group; the ``get_*`` accessors then
-answer rank queries from module state anywhere in the codebase. The collective
+replica — and builds the TP process group; asking for DP-attention additionally
+builds one group per TP lane (the DP axis) and can widen the EP group to the
+whole grid. The ``get_*`` accessors then answer rank queries from module state
+anywhere in the codebase. The collective
 names follow vLLM's ``vllm.distributed.parallel_state`` spelling
 (``tensor_model_parallel_all_reduce`` and friends) so both codebases read the
 same at the call site.
@@ -733,33 +735,45 @@ def p2p_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def warmup_collectives() -> None:
-    """Force this rank's communicator into existence. No-op when TP is off.
+    """Force this rank's communicators into existence. No-op when there are none.
 
     NCCL builds a communicator's device resources on its first collective, and a
     CUDA graph capture cannot allocate — so the first all-reduce inside a capture
     region is the one that fails, or worse, hangs while one rank allocates and the
-    others wait. Issuing one throwaway all-reduce beforehand moves that
-    initialisation outside every capture.
+    others wait. Issuing one throwaway all-reduce per group beforehand moves that
+    initialisation outside every capture. The groups are the module's own — TP,
+    the DP-attention group, the grid-wide EP group — deduplicated, since plain EP
+    shares the TP group's object.
 
     The value is checked rather than discarded: a reduction over ones must come
-    back as the rank count. That makes this a cheap assertion that the group about
-    to be baked into a graph is the group this rank thinks it is — a mismatch
-    found here raises, whereas the same mismatch found during capture surfaces as
-    a hang with no message.
+    back as the group's rank count. That makes this a cheap assertion that each
+    group about to be baked into a graph is the group this rank thinks it is — a
+    mismatch found here raises, whereas the same mismatch found during capture
+    surfaces as a hang with no message.
 
     Not reported to :class:`CollectiveStats`: every other collective here is
     traffic a *step* pays, and folding a one-off initialisation into that total
     would overstate the per-step cost by a constant.
     """
-    if _TP_WORLD_SIZE <= 1:
-        return
-    on_gpu = dist.get_backend(_TP_GROUP) == "nccl"
-    device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
-    probe = torch.ones(1, dtype=torch.float32, device=device)
-    dist.all_reduce(probe, op=dist.ReduceOp.SUM, group=_TP_GROUP)
-    total = int(probe.item())
-    if total != _TP_WORLD_SIZE:
-        raise RuntimeError(
-            f"collective warmup summed {total} over a group of {_TP_WORLD_SIZE} ranks; "
-            "the process group does not span the ranks this process believes it does"
-        )
+    groups: list[tuple[dist.ProcessGroup, int]] = []
+    if _TP_GROUP is not None and _TP_WORLD_SIZE > 1:
+        groups.append((_TP_GROUP, _TP_WORLD_SIZE))
+    if _DP_GROUP is not None:
+        groups.append((_DP_GROUP, _DP_WORLD_SIZE))
+    if (
+        _EP_GROUP is not None
+        and _EP_GROUP is not _TP_GROUP
+        and _EP_GROUP is not _DP_GROUP
+    ):
+        groups.append((_EP_GROUP, _EP_WORLD_SIZE))
+    for group, expected in groups:
+        on_gpu = dist.get_backend(group) == "nccl"
+        device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None
+        probe = torch.ones(1, dtype=torch.float32, device=device)
+        dist.all_reduce(probe, op=dist.ReduceOp.SUM, group=group)
+        total = int(probe.item())
+        if total != expected:
+            raise RuntimeError(
+                f"collective warmup summed {total} over a group of {expected} ranks; "
+                "the process group does not span the ranks this process believes it does"
+            )

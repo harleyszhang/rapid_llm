@@ -115,7 +115,7 @@ if get_tp_world_size() > 1:
 | 修复后 (broadcast ON) | `a concept that is often discussed in philosophical circles, and it has been use` | `a concept that is often discussed in philosophical circles, and it has been use` | **AGREE** |
 
 > 验证脚本: `scripts/verify_tp_sampling.py`  
-> 对比日志: [`docs/benchmark_logs/tp2_sampling_fix_comparison.json`](benchmark_logs/tp2_sampling_fix_comparison.json)
+> 对比日志: [`docs/benchmark_logs/engine/tp2_sampling_fix_comparison.json`](benchmark_logs/engine/tp2_sampling_fix_comparison.json)
 
 ## 5. Chore: CI 与工程治理
 
@@ -139,7 +139,7 @@ if get_tp_world_size() > 1:
 | lite fp8 (W8A8) | 0.99 GB | 139,153 tok | 8.35 | 448.1 | **3.2×** |
 | lite smoothquant (W8A8) | 0.99 GB | 135,642 tok | 3.70 | 983.8 | **6.9×** |
 
-> Benchmark 日志: [`docs/benchmark_logs/bench_quant_Qwen3-0.6B_all_20260823.json`](benchmark_logs/bench_quant_Qwen3-0.6B_all_20260823.json)
+> Benchmark 日志: [`docs/benchmark_logs/quantization/quant_Qwen3-0.6B_all_20260823.json`](benchmark_logs/quantization/quant_Qwen3-0.6B_all_20260823.json)
 
 ### Qwen3-VL-4B-Instruct (A10, batch=4, seq_len=25, gen_len=64, greedy)
 
@@ -151,7 +151,7 @@ if get_tp_world_size() > 1:
 | lite fp8 (W8A8) | 5.61 GB | 93,345 tok | 59.25 | 67.4 |
 | lite smoothquant (W8A8) | 5.61 GB | 93,559 tok | 34.00 | 117.5 |
 
-> Benchmark 日志: [`docs/benchmark_logs/bench_quant_Qwen3-VL-4B_all_20260823.json`](benchmark_logs/bench_quant_Qwen3-VL-4B_all_20260823.json)
+> Benchmark 日志: [`docs/benchmark_logs/quantization/quant_Qwen3-VL-4B_all_20260823.json`](benchmark_logs/quantization/quant_Qwen3-VL-4B_all_20260823.json)
 
 ### 可视化
 

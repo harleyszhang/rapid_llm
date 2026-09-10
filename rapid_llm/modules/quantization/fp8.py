@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -88,7 +90,16 @@ class Fp8Config(QuantizationConfig):
 
 
 class Fp8LinearMethod(LinearMethodBase):
-    """fp8-e4m3 weight + fp16 activation; per-channel or block-wise scale grid."""
+    """fp8-e4m3 weight + fp16 activation; per-channel or block-wise scale grid.
+
+    Post-load the weight is dequantised back to the activation dtype and the
+    layer becomes a plain cuBLAS GEMM: at decode/prefill shapes the w8a16
+    Triton kernel that widens fp8 tiles in-register runs ~3x off the bf16
+    bandwidth floor (H100: 19.1us vs 6.0us at M=16, 69.2us vs 19.4us at
+    M=1024), while the dense projections are ~3% of an MoE checkpoint, so the
+    widened copy costs little memory. ``RAPID_FP8_LINEAR_DEQUANT=0`` keeps the
+    fp8 storage + w8a16 kernel (e.g. when a dense fp8 model must fit).
+    """
 
     def create_weights(self, layer: nn.Module, input_size: int, output_size: int, **kw) -> None:
         allocate_linear_weights(layer, input_size, output_size)
@@ -96,6 +107,9 @@ class Fp8LinearMethod(LinearMethodBase):
     def apply(
         self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if getattr(layer, "weight_scale_inv", None) is None:
+            # Widened at load: plain GEMM in the activation dtype.
+            return torch.nn.functional.linear(x, layer.weight, bias)
         config: Fp8Config = layer.quant  # type: ignore[assignment]
         return run_quant_linear(
             "fp8",
@@ -111,7 +125,43 @@ class Fp8LinearMethod(LinearMethodBase):
         qweight, scale = quantize_fp8_per_channel(layer.weight.data)
         layer.weight = RawParameter(qweight)
         layer.weight_scale_inv = RawParameter(scale)
+        # The ``--quantization fp8`` path exists to *save* memory; undoing it
+        # in the post-load hook would defeat the request.
+        layer._fp8_keep_quantized = True
 
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Swap the fp8 checkpoint weight for its widened form, once.
+
+        e4m3 widens to the 16-bit activation dtype exactly (3 mantissa bits
+        fit in bf16's 8 / fp16's 10), so the only rounding is the fp32 scale
+        multiply -- the same rounding the w8a16 kernel applies per tile. Runs
+        while parameters sit on the load device.
+        """
+        if os.environ.get("RAPID_FP8_LINEAR_DEQUANT", "1") == "0":
+            return
+        if getattr(layer, "_fp8_keep_quantized", False):
+            return
+        w = layer.weight
+        if w.dtype not in (torch.uint8, torch.float8_e4m3fn):
+            return
+        config: Fp8Config = layer.quant  # type: ignore[assignment]
+        scale = layer.weight_scale_inv
+        if w.dtype == torch.uint8:
+            wf = w.view(torch.float8_e4m3fn).float()
+        else:
+            wf = w.float()
+        n, k = wf.shape
+        if scale.numel() == n:
+            wf = wf * scale.reshape(n, 1)
+        else:
+            full = (
+                scale.reshape(-1, scale.shape[-1])
+                .repeat_interleave(config.group_n, 0)
+                .repeat_interleave(config.group_k, 1)
+            )
+            wf = wf * full[:n, :k]
+        layer.weight = RawParameter(wf.to(layer.dtype))
+        layer.weight_scale_inv = None
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """fp8 stacked experts (checkpoint), fp16 activations through grouped GEMM."""

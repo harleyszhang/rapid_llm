@@ -801,11 +801,6 @@ class Scheduler:
         return self._prefix_cache.num_free_blocks
 
     @property
-    def kv_cache_utilization(self) -> float:
-        """Fraction of the block pool live requests hold (0.0 empty, 1.0 full)."""
-        return self._prefix_cache.utilization
-
-    @property
     def running(self) -> list[Request]:
         """Requests in the decode batch, in admission order."""
         return list(self._running)

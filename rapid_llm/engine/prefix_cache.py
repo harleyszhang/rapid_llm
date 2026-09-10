@@ -318,10 +318,6 @@ class PrefixCache:
         self.coordinator.cache_blocks(request_id, state.block_hashes, num_computed_tokens)
         state.num_cached_tokens = num_computed_tokens
 
-    def trim_window(self, request_id: str, num_computed_tokens: int) -> None:
-        """Release blocks that have fallen out of a windowed group's window."""
-        self.coordinator.remove_skipped_blocks(request_id, num_computed_tokens)
-
     def free(self, request_id: str) -> None:
         """Release every block a request holds and stop tracking it."""
         self.coordinator.free(request_id)

@@ -27,10 +27,13 @@ import torch
 import torch.nn as nn
 
 from ..distributed.parallel_state import (
+    expert_parallel_enabled,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce_min,
     tensor_model_parallel_ranks_agree,
     warmup_collectives,
 )
+from ..engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 from .attention_metadata import AttentionMetadata
 
 logger = logging.getLogger(__name__)
@@ -577,3 +580,397 @@ class CUDAGraphManager:
                 f"(this rank chose {choice}); the group would deadlock in the graph's "
                 "all-reduce. Run with RAPID_LLM_TP_CUDA_GRAPH=0 to fall back to eager."
             )
+
+
+# --------------------------------------------------------------------------- #
+# Prefill graphs: the same capture discipline applied to [n_seqs, width] grids.
+# --------------------------------------------------------------------------- #
+#: Grid widths a prefill pass may be captured at. The width must match exactly
+#: (no column padding); the request count pads up to a batch bucket with rows
+#: whose K/V writes land in the reserved null block. Dense where live traffic
+#: is — short prompts and one-token resume chunks — coarse past it. The 512
+#: ceiling mirrors the scheduler's ``DEFAULT_MAX_CHUNK_SIZE``: chunking is on
+#: by default, so no grid is ever wider, and wide grids (where the host launch
+#: cost is a small fraction of the GPU time) are not worth a pool anyway.
+PREFILL_WIDTH_BUCKETS: tuple[int, ...] = (
+    *range(1, 33),
+    40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
+    320, 384, 448, 512,
+)
+
+#: Token ceiling for a capturable grid (``n_bucket * width``). The private
+#: pool a capture pins grows with the token count; past this the graph saves
+#: less wall time than the pool is worth.
+PREFILL_GRAPH_MAX_TOKENS = 8192
+
+#: Same ceiling under EP, far lower: the dispatch workspace pinned per capture
+#: is ``ep_size * tokens * top_k`` rows of the exchange layout, ~10 MiB per
+#: token per layer, so a 1k-token grid already pins ~7 GiB across 48 layers.
+#: Past this the pool costs more than the launch savings buy.
+PREFILL_GRAPH_MAX_TOKENS_EP = 1024
+
+#: Budget withheld from the KV pool for prefill-graph pools when the feature
+#: is on. Lazy capture cannot know its shapes at profiling time, so this is a
+#: flat allowance; shapes that would exceed what remains stay eager (the
+#: free-memory gate in ``_capture_and_run`` decides). The EP figure matches
+#: one ~1k-token grid's dispatch workspace plus a second small grid.
+PREFILL_GRAPH_RESERVED_BYTES = 2 << 30  # 2 GiB
+PREFILL_GRAPH_RESERVED_BYTES_EP = 9 << 30  # 9 GiB
+
+#: Opt-out for the prefill grid graphs (``=0`` falls back to eager prefill).
+_PREFILL_GRAPH_ENV = "RAPID_LLM_PREFILL_GRAPH"
+
+#: Free VRAM a prefill capture must leave untouched. Capture pins its workspace
+#: in a private graph pool for the process's lifetime, and the KV profiler's
+#: 10% margin is already mostly spoken for by the decode grid (EP's a2a buffers
+#: make it larger still); a capture that succeeds but leaves the card full
+#: turns the *next* routine allocation (sampler logits, uploads) into an OOM
+#: far from the cause. Shapes are refused while free memory sits below this.
+_PREFILL_GRAPH_MIN_FREE = 4 << 30  # 4 GiB
+
+
+class PrefillGraphRunner:
+    """One captured prefill grid step for a fixed ``(n_seqs, width)`` pair.
+
+    The eager prefill pays its ~50 ms of host-side launch work on every first
+    token; this runner pays it once at capture. Everything the recorded op
+    stream reads lives in persistent buffers; :meth:`replay` copies the live
+    step's values in and replays.
+
+    The chunked attention metadata is always armed: at ``prefix_len == 0`` the
+    chunked kernel is the no-pad kernel with one extra indirection (it reads
+    the cache rows this same pass just wrote), so one recorded stream serves
+    first chunks and prefix-cache resumes alike. Grid width fixes every host
+    side tiling decision (``max_actual_seq_len``/``max_chunk_len``), and the
+    kernels mask by the device-side lengths, so any per-row length ``<= width``
+    replays correctly.
+
+    Rows past the live request count are padding: they attend the reserved
+    null block (slot-table entries are zero-initialised, and the allocator
+    never hands block 0 out), so their K/V writes land where no live sequence
+    reads, and the caller discards their logits.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        n_seqs: int,
+        width: int,
+        kv_buffer: list[torch.Tensor],
+        b_req_tokens_table: torch.Tensor,
+        device: str = "cuda",
+    ) -> None:
+        self.model = model
+        self.n_seqs = n_seqs
+        self.width = width
+        self.device = device
+
+        self.input_ids = torch.zeros(n_seqs, width, dtype=torch.long, device=device)
+        self.position_ids = torch.zeros(n_seqs, width, dtype=torch.long, device=device)
+        self.logits_positions = torch.zeros(n_seqs, dtype=torch.long, device=device)
+
+        info = AttentionMetadata()
+        info.kv_buffer = kv_buffer
+        info.b_req_tokens_table = b_req_tokens_table
+        info.b_req_idx = torch.zeros(n_seqs, dtype=torch.long, device=device)
+        info.b_seq_len = torch.zeros(n_seqs, dtype=torch.long, device=device)
+        info.cur_select_index = torch.zeros(
+            n_seqs * width, dtype=torch.int32, device=device
+        )
+        info.b_start_loc = (
+            torch.arange(n_seqs, dtype=torch.int32, device=device) * width
+        )
+        info.is_prefill = True
+        info.max_actual_seq_len = width
+        info.b_prefix_len = torch.zeros(n_seqs, dtype=torch.long, device=device)
+        info.b_kv_base = torch.zeros(
+            n_seqs, dtype=b_req_tokens_table.dtype, device=device
+        )
+        info.max_chunk_len = width
+        self.atten_info = info
+        # Null-block rows a padding row may scribble on (tiled past its size).
+        self._null_rows = (
+            torch.arange(width, dtype=torch.int32, device=device)
+            % PREFIX_CACHE_BLOCK_SIZE
+        )
+
+        self._graph: torch.cuda.CUDAGraph | None = None
+        self._output: torch.Tensor | None = None
+
+    def _load(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor,
+        src: AttentionMetadata,
+    ) -> None:
+        """Copy a live step's inputs into the persistent buffers, padding rows."""
+        n_real = input_ids.shape[0]
+        n, width = self.n_seqs, self.width
+        info = self.atten_info
+        if n_real == n:
+            self.input_ids.copy_(input_ids)
+            self.position_ids.copy_(position_ids)
+            self.logits_positions.copy_(logits_positions)
+            info.b_req_idx.copy_(src.b_req_idx)
+            info.b_seq_len.copy_(src.b_seq_len)
+            info.cur_select_index.copy_(src.cur_select_index)
+            if src.b_prefix_len is not None:
+                info.b_prefix_len.copy_(src.b_prefix_len)
+            else:
+                info.b_prefix_len.zero_()
+        else:
+            self.input_ids.zero_()
+            self.input_ids[:n_real].copy_(input_ids)
+            self.position_ids.zero_()
+            self.position_ids[:n_real].copy_(position_ids)
+            self.logits_positions.zero_()
+            self.logits_positions[:n_real].copy_(logits_positions)
+            info.b_req_idx.zero_()
+            info.b_req_idx[:n_real].copy_(src.b_req_idx)
+            # Padding rows attend a single null-block row and are discarded.
+            info.b_seq_len.fill_(1)
+            info.b_seq_len[:n_real].copy_(src.b_seq_len)
+            info.b_prefix_len.zero_()
+            if src.b_prefix_len is not None:
+                info.b_prefix_len[:n_real].copy_(src.b_prefix_len)
+            cur2d = info.cur_select_index.view(n, width)
+            cur2d[:n_real].copy_(src.cur_select_index.view(n_real, width))
+            cur2d[n_real:].copy_(self._null_rows.expand(n - n_real, width))
+        # ``b_kv_base`` only feeds the chunked kernel; padding rows may read the
+        # null block. Slot 0's row 0 belongs to a live request, so it is never
+        # a safe base — but nothing written by these rows is ever read back.
+        info.b_kv_base.copy_(info.b_req_tokens_table[info.b_req_idx, 0])
+
+    def _step(self) -> torch.Tensor:
+        return self.model(
+            self.input_ids,
+            self.position_ids,
+            self.atten_info,
+            logits_positions=self.logits_positions,
+        )
+
+    def capture(self) -> None:
+        """Warm up on a side stream, then record. Inputs are already loaded."""
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(3):
+                self._step()
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        warmup_collectives()
+
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            self._output = self._step()
+
+    def replay(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor,
+        src: AttentionMetadata,
+    ) -> torch.Tensor:
+        """Load the live step's values and replay; returns ``[n_seqs, vocab]``."""
+        if self._graph is None or self._output is None:
+            raise RuntimeError("capture() must be called before replay()")
+        self._load(input_ids, position_ids, logits_positions, src)
+        self._graph.replay()
+        return self._output
+
+
+class PrefillGraphManager:
+    """Holds one :class:`PrefillGraphRunner` per ``(n_bucket, width)`` grid.
+
+    Lazily captured: a grid whose width has no bucket (or whose capture
+    failed) runs eager, so the feature cannot regress a shape it does not
+    recognise. Every capture is gated on a graph-vs-eager logit comparison
+    against the live step that triggered it (both run; the eager result is
+    served when they disagree), and under TP the capture/keep decision is
+    reconciled across ranks before the graph may serve — a rank replaying
+    while its peer runs eager wedges the group at the first collective.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        kv_buffer: list[torch.Tensor],
+        b_req_tokens_table: torch.Tensor,
+        n_buckets: tuple[int, ...] = DEFAULT_BATCH_SIZES,
+        width_buckets: tuple[int, ...] = PREFILL_WIDTH_BUCKETS,
+        device: str = "cuda",
+    ) -> None:
+        self.model = model
+        self.kv_buffer = kv_buffer
+        self.b_req_tokens_table = b_req_tokens_table
+        self.n_buckets = tuple(sorted(set(n_buckets)))
+        self.width_buckets = frozenset(width_buckets)
+        self.device = device
+        self._runners: dict[tuple[int, int], PrefillGraphRunner] = {}
+        self._failed: set[tuple[int, int]] = set()
+        self.replays: int = 0
+
+    def __len__(self) -> int:
+        return len(self._runners)
+
+    def discard(self) -> None:
+        self._runners.clear()
+        torch.cuda.empty_cache()
+
+    def _pad_n(self, n: int) -> int | None:
+        for bucket in self.n_buckets:
+            if bucket >= n:
+                return bucket
+        return None
+
+    def try_replay(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor,
+        atten_info: AttentionMetadata,
+    ) -> torch.Tensor | None:
+        """Replay the matching prefill graph, or ``None`` to stay eager.
+
+        On a first-seen shape this captures and validates the graph inline
+        (one-off cost), serving the step from the eager reference pass that
+        validated it. The decision reads only the broadcast plan's shapes, so
+        every TP rank takes the same branch structurally.
+        """
+        n_real, width = input_ids.shape
+        n_bucket = self._pad_n(n_real)
+        if n_bucket is None or width not in self.width_buckets:
+            return None
+        max_tokens = (
+            PREFILL_GRAPH_MAX_TOKENS_EP if expert_parallel_enabled() else PREFILL_GRAPH_MAX_TOKENS
+        )
+        if n_bucket * width > max_tokens:
+            return None
+        key = (n_bucket, width)
+        if key in self._failed:
+            return None
+        runner = self._runners.get(key)
+        if runner is None:
+            return self._capture_and_run(
+                key, input_ids, position_ids, logits_positions, atten_info
+            )
+        self.replays += 1
+        out = runner.replay(input_ids, position_ids, logits_positions, atten_info)
+        # The grid may have been padded up to ``n_bucket``; the pad rows'
+        # logits are garbage (their K/V went to the null block), so drop them
+        # before the caller's row-indexed sampling sees them.
+        return out[:n_real] if runner.n_seqs != n_real else out
+
+    def _capture_and_run(
+        self,
+        key: tuple[int, int],
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor,
+        atten_info: AttentionMetadata,
+    ) -> torch.Tensor | None:
+        """Capture ``key`` against the live step, gate on parity, serve the step.
+
+        The warmup, the capture and the parity replay all write the very
+        cache rows this pass is about to write, with identical values, and the
+        eager reference pass — the same padded grid, run unrecorded — writes
+        them a final time, which is what makes the comparison mean anything.
+        The step is served from that reference either way; parity decides only
+        whether the graph may serve later steps (a failure blacklists the
+        shape). ``None`` means capture itself failed (the caller runs its own
+        eager pass on the live metadata).
+        """
+        n_bucket, width = key
+        free, _ = torch.cuda.mem_get_info()
+        if free < _PREFILL_GRAPH_MIN_FREE:
+            # Never capture into a full card: the graph pool would crowd out
+            # the headroom routine step allocations need. Blacklist the shape
+            # (memory pressure only grows from here) and stay eager.
+            logger.info(
+                "Prefill graph n=%d width=%d refused: only %.2f GiB free (need %.2f)",
+                n_bucket,
+                width,
+                free / 2**30,
+                _PREFILL_GRAPH_MIN_FREE / 2**30,
+            )
+            self._failed.add(key)
+            return None
+        runner: PrefillGraphRunner | None = None
+        try:
+            # Capture must be the only work in flight: the pending uploads and
+            # the previous step's tail have to land first.
+            torch.cuda.synchronize()
+            runner = PrefillGraphRunner(
+                self.model,
+                n_seqs=n_bucket,
+                width=width,
+                kv_buffer=self.kv_buffer,
+                b_req_tokens_table=self.b_req_tokens_table,
+                device=self.device,
+            )
+            runner._load(input_ids, position_ids, logits_positions, atten_info)
+            runner.capture()
+        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
+            if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(
+                exc
+            ).lower():
+                raise
+            logger.warning(
+                "Lazy capture of prefill graph n=%d width=%d ran out of memory; "
+                "that shape stays eager",
+                n_bucket,
+                width,
+            )
+            runner = None
+
+        if get_tensor_model_parallel_world_size() > 1 and not tensor_model_parallel_ranks_agree(
+            int(runner is not None)
+        ):
+            # A peer failed to capture: retire this rank's graph too, or the
+            # first replayed collective waits on a peer that never issues it.
+            runner = None
+            torch.cuda.empty_cache()
+
+        if runner is None:
+            self._failed.add(key)
+            return None
+
+        replayed = runner.replay(input_ids, position_ids, logits_positions, atten_info)
+        # Parity reference: the very grid the graph recorded, run eagerly. A
+        # live n_real-row pass is the wrong yardstick — its narrower GEMMs take
+        # different reduction orders and differ at bf16 rounding level, which
+        # says nothing about whether the graph replays its own stream faithfully.
+        reference = runner._step()
+        n_real = input_ids.shape[0]
+        error = (replayed.float() - reference.float()).abs().max().item()
+        keep = error <= TP_GRAPH_PARITY_ATOL
+        if get_tensor_model_parallel_world_size() > 1:
+            keep = tensor_model_parallel_all_reduce_min(int(keep)) == 1
+        # The eager reference pass ran last and wrote the same cache rows the
+        # replay did, and its storage aliases nothing the graph holds — serve it
+        # either way; ``keep`` only decides whether the graph may serve later.
+        served = reference if runner.n_seqs == n_real else reference[:n_real]
+        if not keep:
+            logger.warning(
+                "Prefill graph n=%d width=%d disagrees with its eager grid by %.3e "
+                "(tolerance %.1e); that shape stays eager",
+                n_bucket,
+                width,
+                error,
+                TP_GRAPH_PARITY_ATOL,
+            )
+            self._failed.add(key)
+            return served
+        self._runners[key] = runner
+        self.replays += 1
+        logger.info(
+            "Lazy-captured prefill graph n=%d width=%d (parity %.2e; %d shapes held)",
+            n_bucket,
+            width,
+            error,
+            len(self._runners),
+        )
+        return served

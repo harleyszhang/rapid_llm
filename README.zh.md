@@ -96,7 +96,7 @@ CPU 的 TP/DP 进程共享主机资源。增加进程可能增加内存占用、
 
 - [优化原理、可视化与实测结果](docs/optimization_features.md)
 - [模型性能](docs/benchmark_models.md)与[精度评测](docs/eval_models.md)
-- [量化设计](docs/quantization.md)与[量化实测矩阵](docs/benchmark_logs/quant_matrix_20260901.md)
+- [量化设计](docs/quantization.md)与[量化实测矩阵](docs/benchmark_logs/quantization/quant_matrix_20260901.md)
 - [重叠实验记录](docs/release-v0.11.5.md)与[后续算子变更](docs/release-v0.12.0.md)
 
 发布说明和 benchmark 日志描述的是当时的版本及测试环境，不作为当前 API 说明，也不能直接推断其他设备上的加速比。

@@ -397,3 +397,53 @@ def test_adaptive_partition_size_is_always_a_legal_block_multiple():
         for seq in (17, 128, 512, 2048, 8192, 16384):
             p = _part(batch, 32, seq)
             assert p % 16 == 0 and p >= 16, (batch, seq, p)
+
+
+# --------------------------------------------------------------------------- #
+# GQA-packed stage 1 (RAPID_LLM_PACKED_DECODE, default on)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param([2000], id="long-history"),
+        pytest.param([130, 1000], id="ragged"),
+    ],
+)
+def test_packed_matches_reference_at_serving_shape(seq_lens):
+    """The shape the packed path exists for: GQA-8x at head_dim 128, long history.
+
+    The contiguous-table helper lays sequence ``i`` at ``i * width``, so the
+    ragged arm keeps its total under the 2048-row pool.
+    """
+    out, ref = _run(seq_lens, 16, 2, 128)
+    torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
+
+
+def test_packed_fp8_cache_matches_widened_reference():
+    """fp8 bytes through the packed kernel must equal their fp16 widening.
+
+    group=8 (MQA) forces the packed path; the fp16 widening runs it too, so
+    any disagreement is the in-kernel dequant, not a kernel-selection diff.
+    """
+    seq_lens = [64, 33]
+    q = torch.randn(len(seq_lens), 8, 64, device="cuda", dtype=torch.float16) * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(seq_lens, 1, 64)
+    scale = 1.0 / math.sqrt(64)
+    b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+
+    k8, v8 = _quantize_kv(k_cache, v_cache, k_scale=0.5, v_scale=2.0)
+    out = flash_decoding(
+        q, k8, v8, scale, table, b_req_idx, b_seq_len, max(seq_lens),
+        k_scale=0.5, v_scale=2.0,
+    )
+    ref = flash_decoding(
+        q,
+        k8.view(torch.float8_e4m3fn).to(torch.float16) * 0.5,
+        v8.view(torch.float8_e4m3fn).to(torch.float16) * 2.0,
+        scale,
+        table,
+        b_req_idx,
+        b_seq_len,
+        max(seq_lens),
+    )
+    torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)

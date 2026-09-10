@@ -551,18 +551,25 @@ def _chunked_row_parallel(layer: LinearBase, x: torch.Tensor, rows: int) -> torc
         return tensor_model_parallel_all_reduce(layer.apply_linear(x))
     pool = CommStreamPool.for_device(x.device)
     flat = x.reshape(rows, x.shape[-1])
-    partials: list[torch.Tensor] = []
     events: list[torch.cuda.Event] = []
+    out: torch.Tensor | None = None
     for index, (start, stop) in enumerate(_chunk_bounds(rows, count)):
         with pool.timeline.region(f"l3.gemm.{index}", "compute"):
             partial = layer.apply_linear(flat[start:stop])
-        event = pool.all_reduce_async(partial, label=f"l3.all_reduce.{index}")
-        partials.append(partial)
+        if out is None:
+            # The output width is the GEMM's, not the input's: a row-parallel
+            # layer maps its input shard to the full output width.
+            out = partial.new_empty((rows, *partial.shape[1:]))
+        chunk = out[start:stop]
+        chunk.copy_(partial)
+        # The reduce lands in the output itself: no final cat, and each
+        # chunk's GEMM buffer is free again the moment its copy is enqueued.
+        event = pool.all_reduce_async(chunk, label=f"l3.all_reduce.{index}")
         if event is not None:
             events.append(event)
+    assert out is not None, "_chunk_bounds never yields an empty split"
     if events:
         compute = torch.cuda.current_stream(x.device)
         for event in events:
             compute.wait_event(event)
-    out = torch.cat(partials, dim=0)
     return out.view(*x.shape[:-1], out.shape[-1])

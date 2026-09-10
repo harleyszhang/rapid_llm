@@ -11,6 +11,7 @@ selection re-exported from :mod:`rapid_llm.kernels.ops.moe.grouped_topk`). The
 from __future__ import annotations
 
 import functools
+import os
 from collections.abc import Callable
 from enum import Enum
 from typing import NamedTuple
@@ -19,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from ...kernels import grouped_topk
+from ...kernels.ops.moe.topk_softmax import fused_topk_softmax
 
 # --------------------------------------------------------------------------- #
 # Router GEMM: a vllm-style tiered dispatch (mirrors GateLinear's 5 tiers).
@@ -152,6 +154,9 @@ class TopKRouter:
         self.routing_method = RoutingMethodType.from_topk_method(topk_method)
         self.n_group = n_group
         self.topk_group = topk_group
+        # One-launch softmax+topk+renorm for the GREEDY family (six aten
+        # kernels collapse into one); ``=0`` restores the reference chain.
+        self._fused_topk = os.environ.get("RAPID_LLM_FUSED_ROUTER", "1") != "0"
 
     def forward(
         self,
@@ -179,6 +184,19 @@ class TopKRouter:
                 e_score_correction_bias=correction_bias,
             )
             return TopKOutput(weights.to(x.dtype), ids, router_logits)
+        if (
+            self._fused_topk
+            and router_logits.is_cuda
+            and router_logits.dtype == torch.float32
+        ):
+            weights, ids = fused_topk_softmax(
+                router_logits,
+                self.top_k,
+                renormalize=self.norm_topk_prob,
+                routed_scaling_factor=self.routed_scaling_factor,
+                out_dtype=x.dtype,
+            )
+            return TopKOutput(weights, ids, router_logits)
         # fp32 softmax over the full expert set — topk must come after softmax.
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)

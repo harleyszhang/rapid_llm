@@ -78,7 +78,7 @@ multimodal decode 路径接入 CUDA graph replay，并补 TP 与多模态的 e2e
 
 诚实结论：重叠**机制确实启动**——timeline 里 `upload.decode.tokens [106.742, 106.785]` 落在 `forward.prefill [88.389, 114.426]` 内部，copy 与 compute 泳道出现真实相交。但墙钟差是 ~1% 噪声级：A10 + eager prefill 下 host（Python 启动路径 ~22ms）与 GPU 计算（~22ms）几乎等长，host 是瓶颈，藏起来的 H2D 拷贝（每次 <0.1ms）不在关键路径上。真正的收益依赖 P5（prefill graph 化压缩 host 路径）与 P9（异步调度流水线）。本版的交付物是机制与可观测性，不是数字。
 
-日志：[`docs/benchmark_logs/bench_overlap_l1_v09.json`](benchmark_logs/bench_overlap_l1_v09.json)（含完整 timeline region 表）。
+日志：[`docs/benchmark_logs/overlap/overlap_l1_v09.json`](benchmark_logs/overlap/overlap_l1_v09.json)（含完整 timeline region 表）。
 
 ### e2e 回归（A10, Qwen2.5-1.5B, batch=8, gen=128, greedy, CUDA graph）
 
@@ -90,7 +90,7 @@ multimodal decode 路径接入 CUDA graph replay，并补 TP 与多模态的 e2e
 
 无回归且略有提升，主要受益于 deferred harvest 消除了每 pass 一次的 host 同步。
 
-日志：[`bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`](benchmark_logs/bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json) vs 基线 [`bench_Qwen2.5-1.5B_b8_g128_20260831_195724.json`](benchmark_logs/bench_Qwen2.5-1.5B_b8_g128_20260831_195724.json)。
+日志：[`e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`](benchmark_logs/engine/e2e_Qwen2.5-1.5B_b8_g128_v09_release.json) vs 基线 [`Qwen2.5-1.5B_b8_g128_20260831_195724.json`](benchmark_logs/models/Qwen2.5-1.5B_b8_g128_20260831_195724.json)。
 
 ### native vs flashinfer 逐算子对照
 
@@ -115,7 +115,7 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 | 修改 | `benchmarks/overlap/levels.py (L1)`（长短不齐的长 prompt 负载 + token 预算参数） |
 | 修改 | `tests/utils/test_prompt_templates.py`、`tests/models/test_checkpoint_index.py`（测试债修复） |
 | 新建 | `scripts/gen_overlap_l1_gif.py`、`docs/images/overlap_l1.gif` |
-| 新建 | `docs/benchmark_logs/bench_overlap_l1_v09.json`、`bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json` |
+| 新建 | `docs/benchmark_logs/overlap/overlap_l1_v09.json`、`engine/e2e_Qwen2.5-1.5B_b8_g128_v09_release.json` |
 
 地基 2 三层、A9 Platform、prefix affinity 路由、多模态 graph replay 等已随 main 上的 v0.9 提交入库（dd525f6、509e83d、65f52a0、e4c2060、1bc7e13、b555a53、07ee09e 等）。
 

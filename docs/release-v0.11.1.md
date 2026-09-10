@@ -28,7 +28,7 @@ router_logits = F.linear(x.float(), self._gate_weight_fp32)
 
 fp32 语义本身不动：DeepSeek 的路由（显式 `.float()`）与 qwen3 的参考实现都要求 fp32 logits，bf16 GEMM 会在 near-tie 上翻转 topk 选择，选错一个专家的代价远大于加宽。权重本体仍按模型 dtype 存储——parity 测试把 `gate_weight.dtype` 读作模型 dtype 的代理，只有 GEMM 的操作数加宽。lazy 初始化（而非构造时）是刻意的：测试和 loader 可以在构造之后再填 `gate_weight`；CUDA graph capture 前的三次 eager warmup 保证缓存在录制前已经存在。
 
-**后续演进（tier-4，e80fd63）**：fp32 缓存路径随后被 vllm 的 tier-4 router 路径取代——`torch.mm(x, gate_weight.T, out_dtype=fp32)`，单个 bf16 tensor-core GEMM 带 fp32 accumulate/output epilogue，把 fp32 权重副本和每步 `x.float()` 加宽一起拿掉。算子级（H100，hidden 2048 × 128 experts，topk parity 验证后计时）：decode 2.2×、batch 8 约 2.56×、2048 tokens 5.28×，geomean 3.23×（[`router_gemm_tier4_h100_20260903.json`](benchmark_logs/router_gemm_tier4_h100_20260903.json)）；e2e A/B（同一棵树 monkey-patch `_route`，隔离 router GEMM）：graph TPOT -2.6% / TPS +2.7%，eager 在噪声内（[`router_ab_h100_20260903.json`](benchmark_logs/router_ab_h100_20260903.json)）。上图三代框即这条演进线。
+**后续演进（tier-4，e80fd63）**：fp32 缓存路径随后被 vllm 的 tier-4 router 路径取代——`torch.mm(x, gate_weight.T, out_dtype=fp32)`，单个 bf16 tensor-core GEMM 带 fp32 accumulate/output epilogue，把 fp32 权重副本和每步 `x.float()` 加宽一起拿掉。算子级（H100，hidden 2048 × 128 experts，topk parity 验证后计时）：decode 2.2×、batch 8 约 2.56×、2048 tokens 5.28×，geomean 3.23×（[`router_gemm_tier4_h100_20260903.json`](benchmark_logs/kernels/router_gemm_tier4_h100_20260903.json)）；e2e A/B（同一棵树 monkey-patch `_route`，隔离 router GEMM）：graph TPOT -2.6% / TPS +2.7%，eager 在噪声内（[`router_ab_h100_20260903.json`](benchmark_logs/engine/router_ab_h100_20260903.json)）。上图三代框即这条演进线。
 
 ### 优化 B：K/V 半区 view 的身份感知缓存（`modules/attention.py`）
 
@@ -73,7 +73,7 @@ return views
 
 ![e2e A/B TPOT](images/v0111_e2e_tpot_ab.png)
 
-H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每个配置两次进程级重复 + 每次两轮 in-process warmup），基线 = 反演两处优化后的同一棵树（A/B 对照，不是跨版本对比）。日志：[`docs/benchmark_logs/optim_ab_h100_20260903.json`](benchmark_logs/optim_ab_h100_20260903.json)。
+H100 单卡，`bench_e2e.py` 口径（greedy，gen=256，每个配置两次进程级重复 + 每次两轮 in-process warmup），基线 = 反演两处优化后的同一棵树（A/B 对照，不是跨版本对比）。日志：[`docs/benchmark_logs/engine/optim_ab_h100_20260903.json`](benchmark_logs/engine/optim_ab_h100_20260903.json)。
 
 | 模型 | 模式 | batch | TPOT（基线） | TPOT（优化后） | 差值 |
 |------|------|-------|------------|---------------|------|
@@ -113,14 +113,14 @@ rapid_llm/engine/continuous_engine.py           kv_fp8 封装泄漏修复
 rapid_llm/kernels/ops/quantization/__init__.py  per_token_group_quant 导出
 pyproject.toml                                   pytest --import-mode=importlib 补回
 tests/golden/test_deepseek_trimmed_parity.py     硬编码路径改相对
-docs/benchmark_logs/optim_ab_h100_20260903.json  A/B benchmark 日志
-docs/benchmark_logs/router_gemm_tier4_h100_20260903.json  router 算子级 tier-4 vs fp32 SGEMM
-docs/benchmark_logs/router_ab_h100_20260903.json          router e2e A/B（tier-4 vs fp32 cache）
+docs/benchmark_logs/engine/optim_ab_h100_20260903.json  A/B benchmark 日志
+docs/benchmark_logs/kernels/router_gemm_tier4_h100_20260903.json  router 算子级 tier-4 vs fp32 SGEMM
+docs/benchmark_logs/engine/router_ab_h100_20260903.json          router e2e A/B（tier-4 vs fp32 cache）
 scripts/gen_v0111_release_figs.py                本版三张图的生成脚本（数据读自上述 JSON）
 docs/images/v0111_{router_evolution,e2e_tpot_ab,teardown_timeline}.png
 ```
 
 ## 相关文档
 
-- [docs/benchmark_logs/optim_ab_h100_20260903.json](benchmark_logs/optim_ab_h100_20260903.json) — 本版全部 A/B 数字
+- [docs/benchmark_logs/engine/optim_ab_h100_20260903.json](benchmark_logs/engine/optim_ab_h100_20260903.json) — 本版全部 A/B 数字
 - [docs/release-v0.11.0.md](release-v0.11.0.md) — 上一版（MLA + 流式 reasoning/tool 解析）

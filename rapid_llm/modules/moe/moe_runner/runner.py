@@ -50,17 +50,16 @@ class MoeRunner:
         local_x: torch.Tensor,
         local_ids: torch.Tensor,
         local_weights: torch.Tensor,
-        down_overlap_args=None,
     ) -> torch.Tensor:
         """Grouped GEMM over ``local_x``; a fused func or permutes fire if registered."""
         key = (self.a2a_backend, self.runner_backend)
         fused = FusedOpPool.get(key)
         if fused is not None:
-            return fused(block, local_x, local_ids, local_weights, down_overlap_args)
+            return fused(block, local_x, local_ids, local_weights)
         pre = PermuteMethodPool["pre"].get(key)
         if pre is not None:
             local_x, local_ids, local_weights = pre(local_x, local_ids, local_weights)
-        out = self.core.run(block, local_x, local_ids, local_weights, down_overlap_args)
+        out = self.core.run(block, local_x, local_ids, local_weights)
         post = PermuteMethodPool["post"].get(key)
         if post is not None:
             out = post(out)

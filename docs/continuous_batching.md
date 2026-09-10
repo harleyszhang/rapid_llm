@@ -100,7 +100,7 @@ k_loc = tl.load(b_req_tokens_table + stride_req_to_tokens_b * batch_pid + offs_n
 
 以下保留早期版本的测量记录，反映当时的实现与测试环境，不代表当前版本或 CPU 性能。
 
-Qwen2.5-1.5B-Instruct，单卡 A10（23 GB），greedy，`max_gen_len=256`，16 个请求， `max_num_seqs=16`。原始日志：`docs/benchmark_logs/continuous_Qwen2.5-1.5B-Instruct_b16.json`。
+Qwen2.5-1.5B-Instruct，单卡 A10（23 GB），greedy，`max_gen_len=256`，16 个请求， `max_num_seqs=16`。原始日志：`docs/benchmark_logs/engine/continuous_Qwen2.5-1.5B-Instruct_b16.json`。
 
 | 场景 | 策略 | 墙钟 | 有效吞吐 | 平均延迟 |
 | --- | --- | ---: | ---: | ---: |

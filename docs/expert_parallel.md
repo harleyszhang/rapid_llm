@@ -38,7 +38,7 @@ MoE 模块镜像 sglang `srt/layers/moe/` 的分层：单文件 `moe.py` 已拆�
 
 每个目的 rank 的缓冲区默认按最坏路由（`top_k × ep_size` 份）预留：固定形状避免先交换计数，也能进入 CUDA Graph，极端不均衡也不溢出。**填充行携带 `-1` 专家 id**，`_moe_align_count_kernel` 有范围守卫直接跳过 `[0, num_experts)` 之外的 id——它们跨线但绝不进入 grouped GEMM，combine 时读回零；这修掉了填充行白算专家 GEMM 的浪费（microbench：rows=2048 时 padded 973µs vs exact 374µs，2.60x）。
 
-参考 sglang `srt/layers/moe` 的 DeepEP 容量策略，dispatch 还提供一个**可选**的容量上限：设 `RAPID_EP_CAPACITY_FACTOR` 后，每 rank 容量收成 `min(n, ceil(n/ep_size × factor) + slack)`（均值+松弛），溢出行落进一个多分配的 trash slot（交换前切掉，静态形状保持 graph 可捕获），eager 下由设备端检测报错或 `RAPID_EP_CAPACITY_WARN=1` 警告。默认**不启用**（`cap == n`，无丢弃无崩溃，只保留上面的 `-1` GEMM 收益）：ep=2 真实路由偏斜大（实测热层达 1.58x 均值，factor=1.25 会丢 16% token），削减不安全；收益随 ep_size 增大（均值为 `n/ep_size`），高 EP 度才值得开。
+参考 sglang `srt/layers/moe` 的 DeepEP 容量策略，dispatch 还提供一个**可选**的容量上限：设 `RAPID_EP_CAPACITY_FACTOR` 后，每 rank 容量收成 `min(n, ceil(n/ep_size × factor) + slack)`（均值+松弛，即 DeepEP-LL `num_max_dispatch_tokens_per_rank` 的定容式），溢出槽落进一个多分配的 trash slot（交换前切掉，静态形状保持 graph 可捕获）——这是所有定容 EP 栈（DeepEP LL、vLLM EPMoE `capacity_ratio`）的标准丢弃语义；`RAPID_EP_CAPACITY_WARN=1` 逐层打印丢弃量，`RAPID_EP_CAPACITY_STRICT=1` 逐层报错。默认**不启用**（`cap == n`），两个实测依据：**(a) 路由偏斜**——ep=2 热层达 1.58x 均值，factor=1.25 会丢 16% token；**(b) 本机不缺带宽**——ep2 decode 的 a2a 消息仅 0.85 vs 1.0 MB，NVLink 下带宽差 ~0.1µs/层，远小于集合通信的延迟地板，而 NCCL 在 graph 捕获时为更小消息选的算法反而更慢（bs16-2k TPOT 17.1 vs 16.5ms，A/B 交替复现）；丢弃率实测 0.42%（factor=1.5）且 parity 门全过。收益随 ep_size 增大（均值为 `n/ep_size`），高 EP 度/带宽受限互联才值得开。
 
 共享专家不参与 EP 切分。启用 SBO 时，共享专家计算可以和 routed expert 的 dispatch 重叠；TBO 则在两个 micro-batch 间交错计算和通信。两种路径都必须让所有 rank 以相同顺序提交 collective，否则会错配或挂起。
 
@@ -108,23 +108,43 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 
 | 场景 | batch | out tok | vLLM tp2 | vLLM ep2 | ep2/tp2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| bs16-short | 16 | 256 | 3294.9 | 1904.0 | 0.58x |
-| bs64-short | 64 | 256 | 10734.7 | 6664.8 | 0.62x |
-| bs16-2k | 16 | 2048 | 3052.3 | 1802.0 | 0.59x |
+| bs16-short | 16 | 256 | 3444.9 | 1903.4 | 0.55x |
+| bs64-short | 64 | 256 | 11529.1 | 6578.2 | 0.57x |
+| bs16-2k | 16 | 2048 | 3260.7 | 1866.9 | 0.57x |
 
-（tok/s；绝对值与 rapid_llm 不可比——harness 与 out_len 不同——**可比的是 ep/tp 比值**。）vLLM 的 0.58-0.62x 与 rapid_llm 同开 graph 的 0.55-0.72x 落在同一区间：**ep=2 时 EP 慢于 TP 是这台机器/这个模型的固有性质**（两卡同 NVLink 域、通信延迟主导、EP 的三个理论收益一个都不触发），不是某一框架实现的缺陷。复现脚本 `.qoder/vllm_ep_ab.py`，原始 JSON 在 `.qoder/vllm_ab/`。
+（tok/s；绝对值与 rapid_llm 不可比——harness 与 out_len 不同——**可比的是 ep/tp 比值**。）vLLM 的 0.55-0.57x 与 rapid_llm 同开 graph 的 0.55-0.72x 落在同一区间：**ep=2 时 EP 慢于 TP 是这台机器/这个模型的固有性质**（两卡同 NVLink 域、通信延迟主导、EP 的三个理论收益一个都不触发），不是某一框架实现的缺陷。复现脚本 `.qoder/vllm_ep_ab.py`，原始 JSON 在 `.qoder/vllm_ab/`。
 
-### 头对头（同 workload，ep2+graph）：绝对 tok/s 也对得上
+### 头对头（同 workload，ep2+graph）：TTFT / TPOT / 吞吐三指标
 
-上表刻意只比 ep/tp 比值，因为两侧 harness/out_len 不同。这次把 rapid_llm 侧的口径**对齐到 vLLM**——同 prompt、同 batch、同 out_len（256/256/2048）、CUDA graph 开、每条请求都跑满 cap（rapid_llm 无 `ignore_eos`，改为清空 stop-token 集 + `stop_on_repeat=False` 等效），`decode_tps = gen_tokens / wall`（含 prefill，与 vLLM 完全同义）——于是绝对值可以直接对照。复现脚本 `.qoder/rapid_ep_ab.py`（`--arm ep2/tp2`），原始 JSON 在 `.qoder/rapid_ab/`。
+上表刻意只比 ep/tp 比值，因为两侧 harness/out_len 不同。这次把 rapid_llm 侧的口径**对齐到 vLLM**——同 prompt、同 batch、同 out_len（256/256/2048）、CUDA graph 开、每条请求都跑满 cap（rapid_llm 无 `ignore_eos`，改为清空 stop-token 集 + `stop_on_repeat=False` 等效）——于是三个指标都能直接对照。复现脚本 `.qoder/rapid_ep_ab.py` 与 `.qoder/vllm_ep_ab.py`（均 `--arm ep2/tp2`），原始 JSON 在 `.qoder/rapid_ab/`、`.qoder/vllm_ab/`。
 
-| 场景 | batch | out tok | vLLM ep2+graph | rapid_llm ep2+graph | rapid/vLLM | 归因 |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| bs16-short | 16 | 256 | 1904.0 | 933.6 | 0.49x | 传输栈 |
-| bs64-short | 64 | 256 | 6664.8 | 1722.5 | 0.26x | 传输栈 + 排列不摊薄 |
-| bs16-2k | 16 | 2048 | 1802.0 | 983.7 | 0.55x | 传输栈 |
+三个指标两侧**完全同义**：
 
-绝对值上 rapid_llm ep2 是 vLLM 的 0.26-0.55x。但**这不是 EP 特有的差**：同口径下 rapid_llm tp2 相对 vLLM tp2 也是 0.29-0.49x（1597/3295、3107/10735、1388/3052），tp 与 ep 的框架差几乎一致——说明绝对差距是**整栈成熟度**（融合 grouped GEMM / CUTLASS/DeepGEMM kernel、调度器、传输）的差，不是 EP 结构本身。把 EP 结构单独隔离出来的正是 ep/tp 比值：rapid_llm 本轮 0.58/0.55/0.71x（ep2 933.6/1722.5/983.7 ÷ tp2 1597.2/3106.6/1388.0）与 vLLM 的 0.58/0.62/0.59x 仍落在同一区间，也与**重构前**本页记录的 0.55-0.72x 一致——**架构分层没有动 EP 的数值与性能**。bs64 的 0.26x 是全表最差点：rapid_llm 的独立 sort/searchsorted/scatter + `all_to_all_single` 不像 vLLM 的融合路径那样随 batch 摊薄固定开销，这与上一节列的"传输栈"归因同源。TPOT 佐证同一结论（rapid_llm ep2 16.2-18.2ms vs tp2 9.6-11.5ms，差值即两次 a2a + 排列）。
+- **TTFT**（首 token 延迟，ms，越低越好）：整批 prefill + 第一个 token 的墙钟。rapid_llm 取第一次 `step()`；vLLM 取 `max_tokens=1` 的一次 `generate()` 墙钟（v1 引擎 core 异步，step 计时不可信，故改用阻塞式 generate）。
+- **TPOT**（每 token 解码延迟，ms，越低越好）：`(总墙钟 − TTFT) / (out_len − 1)`，即稳态每步 decode 延迟。
+- **decode tok/s**（吞吐，越高越好）：`gen_tokens / 总墙钟`（含 prefill）= batch × out_len ÷ wall，与上一节 vLLM 那列同义。
+
+**ep2 + graph：**
+
+| 场景 | batch × out | TTFT ms vLLM / rapid | TPOT ms vLLM / rapid | tok/s vLLM / rapid | tok/s rapid/vLLM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bs16-short | 16 × 256 | 28.1 / 179.4 | 8.33 / 15.62 | 1903.4 / 983.9 | 0.52x |
+| bs64-short | 64 × 256 | 70.9 / 118.3 | 9.49 / 17.68 | 6578.2 / 1790.4 | 0.27x |
+| bs16-2k | 16 × 2048 | 28.3 / 195.0 | 8.56 / 15.80 | 1866.9 / 1007.3 | 0.54x |
+
+**tp2 + graph（同口径参照，隔离出"框架成熟度"这一项）：**
+
+| 场景 | batch × out | TTFT ms vLLM / rapid | TPOT ms vLLM / rapid | tok/s vLLM / rapid | tok/s rapid/vLLM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bs16-short | 16 × 256 | 23.1 / 124.7 | 4.57 / 9.93 | 3444.9 / 1541.4 | 0.45x |
+| bs64-short | 64 × 256 | 63.0 / 139.2 | 5.33 / 9.98 | 11529.1 / 3128.1 | 0.27x |
+| bs16-2k | 16 × 2048 | 22.1 / 110.7 | 4.90 / 11.01 | 3260.7 / 1447.0 | 0.44x |
+
+怎么读这两张表：
+
+- **吞吐**：rapid_llm ep2 是 vLLM 的 0.27-0.54x。但**这不是 EP 特有的差**——同口径下 rapid_llm tp2 相对 vLLM tp2 也只有 0.27-0.45x，tp 与 ep 的框架差几乎一致，说明绝对差距是**整栈成熟度**（融合 grouped GEMM / CUTLASS·DeepGEMM kernel、调度器、传输）的差，不是 EP 结构本身。把 EP 结构单独隔离出来的正是 ep/tp 比值：rapid_llm 本轮 0.64/0.57/0.70x 与 vLLM 的 0.55/0.57/0.57x 仍落在同一区间，也与**重构前**本页记录的 0.55-0.72x 一致——**架构分层没有动 EP 的数值与性能**（本轮另测了 DeepEP-LL 式均值容量压缩：本机延迟主导、无净收益，见上文容量段）。
+- **TPOT**：rapid_llm ep2 每步 15.6-17.7ms，比自己的 tp2（9.9-11.0ms）高出的 ~5-7ms 就是每层两次 a2a + sort/searchsorted/scatter 排列的净开销——这正是 EP 相对 TP 变慢的直接来源，也是吞吐 ep/tp≈0.6 的成因。vLLM 侧同样 ep TPOT（8.3-9.5ms）> tp TPOT（4.6-5.3ms），趋势一致。
+- **TTFT**：rapid_llm 明显更高（ep2 118-195ms vs vLLM 28-71ms），这是短 prompt 下 prefill 路径的固定开销未被摊薄，与 decode 的 EP 结论无关；vLLM 的融合 prefill 更快。bs64 的吞吐 0.27x 是全表最差点，与 rapid_llm 的独立排列 kernel 不随 batch 摊薄固定开销同源，归因与上一节的"传输栈"一致。
 
 ### 为什么 DeepSeek-V3 这类大 MoE 生产上仍推荐 EP
 
@@ -132,7 +152,7 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 
 1. **TP 出不了 NVLink 域**。V3/R1 671B 的 FP8 权重约 685 GB，8×H100（640 GB）放不下，最小部署 8×H200 或 2×8×H100 起步，必然跨节点；TP 每层两次 all-reduce 不能跨 IB，专家只能按 EP 分出去。本测试两张卡在同一 NVLink 域内，这条从未被触发。
 2. **生产拓扑是 DP-attention + EP，不是纯 EP**。MLA 的压缩 KV（576/层）按 token 共享、无法按注意力头切分，TP 下每个 rank 都要存全批 token 的 KV；DP-attention 把请求分给各 rank（MLA 注意力权重 ~4 GB FP8，复制得起），KV 容量 ×N，还顺手消掉 attention 的 all-reduce。本实现是纯 EP（attention 仍走 TP）——ep2 剩下的 6272 次 all-reduce 就是那一半。
-3. **交换按需，不按最坏**。DeepEP 的 dispatch 把每个 token 去重后发给实际命中的 ~E[distinct] 个目的（top-8、ep=8 时约 5.25 份），LL 模式还允许溢出丢弃换紧凑容量；本实现默认容量预留线上恒为 `top_k×ep_size` 份——ep=2 时 16 份 vs 需要 ~2 份，ep=8 时 64 份 vs ~5.25，ep=32 时 256 份 vs ~8。本次重构已落下可选的均值+松弛容量（`RAPID_EP_CAPACITY_FACTOR`）+ 溢出检测，但 ep=2 真实偏斜大（热层 1.58x），factor=1.25 会丢 16% token，故默认关；真正的解法是 DeepEP 那样的**去重发送**（而非单纯缩容量）。**wire 随 rank 数线性变差**：不改这条，规模化也兑现不了 EP 的字节优势。
+3. **交换按需，不按最坏**。DeepEP 的 dispatch 把每个 token 去重后发给实际命中的 ~E[distinct] 个目的（top-8、ep=8 时约 5.25 份），LL 模式还允许溢出丢弃换紧凑容量；本实现默认容量预留线上恒为 `top_k×ep_size` 份——ep=2 时 16 份 vs 需要 ~2 份，ep=8 时 64 份 vs ~5.25，ep=32 时 256 份 vs ~8。本次重构已落下可选的均值+松弛容量（`RAPID_EP_CAPACITY_FACTOR`，DeepEP-LL 定容式 + 标准丢弃语义）+ WARN/STRICT 可见性开关，但默认关，两层原因：ep=2 真实偏斜大（热层 1.58x，factor=1.25 会丢 16% token）；且本机 NVLink 上 a2a 消息太小（decode 0.85-1.0 MB），带宽节省 ~0.1µs/层被集合通信延迟地板淹没，graph 捕获下 NCCL 对更小消息的算法选择反而让 bs16-2k 慢 4%（A/B 交替复现，丢弃率实测仅 0.42% 且 parity 全过）——**容量压缩的收益边界在高 ep_size/大 batch/带宽受限互联**，不在本机这种低延迟双卡拓扑。真正的解法仍是 DeepEP 那样的**去重发送**（而非单纯缩容量）。**wire 随 rank 数线性变差**：不改这条，规模化也兑现不了 EP 的字节优势。
 4. **传输栈**。DeepEP 用 NVSHMEM/RDMA、把排列折进拷贝、单次交换几十 μs；本实现是 NCCL `all_to_all_single` + 独立的 sort/searchsorted/scatter kernel。bs16 下每层 EP 通信路径与 TP 的差值实测 96 μs，而同规模消息在 NVLink 上的线时间 ≈1 μs——差值几乎全是延迟与发射，不是带宽。
 
 结论：rapid_llm 的 EP **正确但 baseline 级**——数值（tie-gap 门禁）、graph 捕获、无损路由都过关；差距是三件事：拓扑配对（DP-attention）、按需交换（去重/动态容量）、融合传输。它们是把 EP 从"扩展维度的正确性路径"变成"性能路径"的先决条件。
@@ -161,7 +181,7 @@ vs tp2（greedy，6 prompt × 24 tok，tie-gap 0.5 nat）：tp1、ep2、ep2_grap
     --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
-指标口径：per-request（TTFT 取每条请求自身首 token 时刻，TPOT 取 (完成−首 token)/(token 数−1)）——32k prompt 按 512-token chunk 预填充，按 step 间隔算会把首个 chunk 的结束误报成 TTFT。原始数据（环境、五场景全部指标、流量、parity 明细）在 `docs/benchmark_logs/expert_parallel_Qwen3-30B-A3B-Instruct-2507-FP8_20260908_090311.json`；早期单点版本（含 TBO 臂）保留在 `..._20260908_061411.json`。
+指标口径：per-request（TTFT 取每条请求自身首 token 时刻，TPOT 取 (完成−首 token)/(token 数−1)）——32k prompt 按 512-token chunk 预填充，按 step 间隔算会把首个 chunk 的结束误报成 TTFT。原始数据（环境、五场景全部指标、流量、parity 明细）在 `docs/benchmark_logs/parallel/expert_parallel_Qwen3-30B-A3B-Instruct-2507-FP8_20260908_090311.json`；早期单点版本（含 TBO 臂）保留在 `parallel/..._20260908_061411.json`。
 
 ## 可视化
 
