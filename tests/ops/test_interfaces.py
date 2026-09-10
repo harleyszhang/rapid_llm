@@ -248,7 +248,16 @@ SIGNATURES = {
     ),
     MoeOp: (
         ["hidden_states", "w1", "w2", "topk_weights", "topk_ids"],
-        ["w1_scale", "w2_scale", "w1_zeros", "w2_zeros", "group_n", "group_k", "swiglu_limit", "mxfp4"],
+        [
+            "w1_scale",
+            "w2_scale",
+            "w1_zeros",
+            "w2_zeros",
+            "group_n",
+            "group_k",
+            "swiglu_limit",
+            "mxfp4",
+        ],
     ),
     DispatchOp: (["x", "topk_idx"], ["num_experts"]),
     CombineOp: (["x", "unsorted_src_idx", "unsorted_weights"], []),

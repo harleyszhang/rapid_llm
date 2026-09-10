@@ -129,9 +129,7 @@ def test_strided_input_slice_matches_the_eager_chain():
     fix (``contiguous().view(-1)``) at the kernel's own tier.
     """
     weight = _weight()
-    ids = torch.randint(
-        0, SHARD_START + 3 * LOCAL_VOCAB, (4, 17), device="cuda", dtype=torch.int64
-    )
+    ids = torch.randint(0, SHARD_START + 3 * LOCAL_VOCAB, (4, 17), device="cuda", dtype=torch.int64)
 
     for col in (0, 1, 8, 16):  # 0 and 16 keep one stride step, the rest two
         sl = ids[:, col : col + 1]

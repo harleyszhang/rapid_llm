@@ -142,9 +142,7 @@ def test_sequences_do_not_leak_into_each_other():
 
 
 @pytest.mark.skipif(
-    not __import__(
-        "rapid_llm.kernels.backend.flashinfer", fromlist=["available"]
-    ).available(),
+    not __import__("rapid_llm.kernels.backend.flashinfer", fromlist=["available"]).available(),
     reason="flashinfer not installed",
 )
 @pytest.mark.parametrize(

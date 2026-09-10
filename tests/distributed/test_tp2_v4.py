@@ -94,9 +94,7 @@ def _v4_payload(rank: int) -> dict:
             if hasattr(gate, "e_score_correction_bias"):
                 gate.e_score_correction_bias.normal_(0.0, 0.25)
             if hasattr(gate, "tid2eid"):
-                gate.tid2eid.copy_(
-                    torch.randint(0, _BODY["n_routed_experts"], gate.tid2eid.shape)
-                )
+                gate.tid2eid.copy_(torch.randint(0, _BODY["n_routed_experts"], gate.tid2eid.shape))
     state = {key: value.detach().clone() for key, value in hf_model.state_dict().items()}
     save_file(state, str(tmp / "model.safetensors"), metadata={"format": "pt"})
 
@@ -116,12 +114,7 @@ def _v4_payload(rank: int) -> dict:
         return m
 
     with torch.no_grad():
-        pos = (
-            torch.arange(seq_len, device="cuda")
-            .unsqueeze(0)
-            .expand(batch, -1)
-            .contiguous()
-        )
+        pos = torch.arange(seq_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
         prefill = model(ids, pos, meta(True, seq_len))[:, -1, :].float().cpu()
         # One decode step over the cache the prefill just built — the second
         # half of what the sliding/compressor state machine has to carry.

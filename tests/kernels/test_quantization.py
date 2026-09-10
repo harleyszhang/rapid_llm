@@ -158,8 +158,7 @@ _GROUP_CASES = [
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(("shape", "group_size"), _GROUP_CASES)
 def test_per_token_group_quant_int8_matches_reference(shape, group_size, dtype):
-    """Scales are exact; int8 bytes may differ only on round-boundary ties.
-    """
+    """Scales are exact; int8 bytes may differ only on round-boundary ties."""
     torch.manual_seed(0)
     x = torch.randn(*shape, device="cuda", dtype=dtype) * 3.0
 
@@ -521,8 +520,7 @@ def test_w4a16_int4_groupwise_matches_reference(M, N, K, group_size):
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_nvfp4_matches_reference(M, N, K, dtype):
-    """The kernel's in-register decode must match an independent torch decode.
-    """
+    """The kernel's in-register decode must match an independent torch decode."""
     torch.manual_seed(0)
     w = torch.randn(N, K, device="cuda")
     packed, block_scale, global_scale = quantize_nvfp4_blockwise(w)
@@ -885,9 +883,7 @@ def test_per_token_group_quant_matches_per_token_at_full_row():
     qi, si = int8_quantize_per_token(x)
 
     # Scales should be exactly equal (same amax/127 arithmetic).
-    torch.testing.assert_close(
-        sg.squeeze(-1), si.squeeze(-1), rtol=0, atol=0
-    )
+    torch.testing.assert_close(sg.squeeze(-1), si.squeeze(-1), rtol=0, atol=0)
     # Bytes may differ on ties, but by at most 1.
     differing = qg != qi
     assert differing.float().mean().item() <= _FP8_TIE_FRACTION
@@ -922,10 +918,10 @@ def test_quantization_edge_cases():
 # --------------------------------------------------------------------------- #
 _QWEN3_4B_SHAPES = [
     # (M, N, K) — gate_up, down, qkv, o_proj at the model's hidden=2560 geometry
-    (1, 13824, 2560),    # gate_up (2 * 5632 + 2560 for shared, but typical: 2*2560=5120)
-    (1, 2560, 6912),     # down_proj (6912 -> 2560)
-    (8, 2560, 2560),     # o_proj / prefill
-    (64, 2560, 2560),    # prefill batch
+    (1, 13824, 2560),  # gate_up (2 * 5632 + 2560 for shared, but typical: 2*2560=5120)
+    (1, 2560, 6912),  # down_proj (6912 -> 2560)
+    (8, 2560, 2560),  # o_proj / prefill
+    (64, 2560, 2560),  # prefill batch
 ]
 
 
