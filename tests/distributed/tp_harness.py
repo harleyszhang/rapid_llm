@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import queue as queue_module
 import socket
@@ -24,6 +25,8 @@ import torch.multiprocessing as mp
 
 from rapid_llm.distributed import parallel_state as ps
 
+_log = logging.getLogger(__name__)
+
 
 def _free_port() -> int:
     """Return a local rendezvous port without importing the model executor."""
@@ -33,11 +36,24 @@ def _free_port() -> int:
 
 
 def needs_gpus(count: int):
-    """Mark a test as needing ``count`` real devices, one per rank."""
-    return pytest.mark.skipif(
+    """Mark a test as needing ``count`` real devices, one per rank.
+
+    Two marks in one: the skip for machines that lack the devices, and the
+    ``gpu`` marker for the tier system. The tier must exclude the test even
+    where the devices *exist* -- a CPU-tier run on a GPU box must not
+    rendezvous NCCL just because it could, which is how a busy GPU once
+    failed 23 unrelated tests through the state a failed rendezvous left
+    behind.
+    """
+    skip = pytest.mark.skipif(
         torch.cuda.device_count() < count,
         reason=f"needs {count} CUDA devices, found {torch.cuda.device_count()}",
     )
+
+    def decorate(func):
+        return pytest.mark.gpu(skip(func))
+
+    return decorate
 
 
 def _worker(
@@ -67,7 +83,11 @@ def _worker(
         if backend == "nccl":
             torch.cuda.set_device(rank)
         ps.init_parallel(
-            global_rank=rank, tp_size=tp_size, dp_size=dp_size, master_port=port, backend=backend,
+            global_rank=rank,
+            tp_size=tp_size,
+            dp_size=dp_size,
+            master_port=port,
+            backend=backend,
             enable_expert_parallel=enable_expert_parallel,
             enable_dp_attention=enable_dp_attention,
         )
@@ -81,6 +101,88 @@ def _worker(
     # before that rendezvous, leaving the parent with ConnectionResetError.
     # Park until the parent signals every result has been drained.
     acks.get()
+
+
+def _attempt(
+    payload: Callable[[int], Any],
+    tp_size: int,
+    dp_size: int,
+    timeout: float,
+    backend: str,
+    enable_expert_parallel: bool,
+    enable_dp_attention: bool,
+) -> list[Any]:
+    """One grid on one freshly picked rendezvous port.
+
+    The whole of :func:`run_on_tp_ranks` except the retry, so a lost port can
+    be answered with a fresh one cleanly: the ``finally`` reaps every worker
+    before this returns, and every other failure propagates untouched.
+    """
+    world_size = tp_size * dp_size
+    if backend == "nccl" and torch.cuda.device_count() < world_size:
+        raise RuntimeError(f"{world_size} ranks need {world_size} devices, one each")
+
+    context = mp.get_context("spawn")
+    results: mp.Queue = context.Queue()
+    acks: mp.Queue = context.Queue()  # workers park on it until results are drained
+    port = _free_port()
+    workers = [
+        context.Process(
+            target=_worker,
+            args=(
+                payload,
+                rank,
+                tp_size,
+                dp_size,
+                port,
+                backend,
+                results,
+                acks,
+                enable_expert_parallel,
+                enable_dp_attention,
+            ),
+            daemon=True,
+        )
+        for rank in range(world_size)
+    ]
+    collected: dict[int, Any] = {}
+    for worker in workers:
+        worker.start()
+    try:
+        deadline = time.monotonic() + timeout
+        while len(collected) < world_size:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                missing = sorted(set(range(world_size)) - set(collected))
+                raise TimeoutError(f"ranks {missing} did not report within {timeout}s")
+            try:
+                rank, value, error = results.get(timeout=left)
+            except queue_module.Empty:
+                continue
+            if error is not None:
+                raise AssertionError(f"rank {rank} failed:\n{error}")
+            collected[rank] = value
+    finally:
+        # Release the workers parked on the ack queue *before* joining them;
+        # the fds behind tensor results stay valid only while their sender
+        # lives, so every get() must have finished unwrapping first.
+        for _ in range(world_size):
+            acks.put(True)
+        for worker in workers:
+            worker.join(timeout=10)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=10)
+    return [collected[rank] for rank in range(world_size)]
+
+
+#: Fresh ports one grid may cost. The port is picked by binding, released, then
+#: re-bound by the workers after their spawns — a window as long as a handful of
+#: interpreter startups, and a machine busy enough hands the port to someone else
+#: inside it. The loser is rank 0's ``TCPStore``: ``EADDRINUSE`` before a single
+#: collective ran, so the grid is retried on a fresh port instead of failing the
+#: claim it guards.
+_RENDEZVOUS_ATTEMPTS = 3
 
 
 def run_on_tp_ranks(
@@ -118,55 +220,33 @@ def run_on_tp_ranks(
     Returns:
         One result per global rank, in rank order.
 
+    A grid whose rendezvous port another process won — rank 0's ``TCPStore``
+    failing with ``EADDRINUSE`` before any collective — is retried on a fresh
+    port (up to ``_RENDEZVOUS_ATTEMPTS`` times). Every other failure
+    propagates on its first occurrence.
+
     Raises:
         AssertionError: If any rank raised; the message carries that rank's traceback.
         TimeoutError: If some rank never reported.
     """
-    world_size = tp_size * dp_size
-    if backend == "nccl" and torch.cuda.device_count() < world_size:
-        raise RuntimeError(f"{world_size} ranks need {world_size} devices, one each")
-
-    context = mp.get_context("spawn")
-    results: mp.Queue = context.Queue()
-    acks: mp.Queue = context.Queue()  # workers park on it until results are drained
-    port = _free_port()
-    workers = [
-        context.Process(
-            target=_worker,
-            args=(
-                payload, rank, tp_size, dp_size, port, backend, results, acks,
-                enable_expert_parallel, enable_dp_attention,
-            ),
-            daemon=True,
-        )
-        for rank in range(world_size)
-    ]
-    collected: dict[int, Any] = {}
-    for worker in workers:
-        worker.start()
-    try:
-        deadline = time.monotonic() + timeout
-        while len(collected) < world_size:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                missing = sorted(set(range(world_size)) - set(collected))
-                raise TimeoutError(f"ranks {missing} did not report within {timeout}s")
-            try:
-                rank, value, error = results.get(timeout=left)
-            except queue_module.Empty:
-                continue
-            if error is not None:
-                raise AssertionError(f"rank {rank} failed:\n{error}")
-            collected[rank] = value
-    finally:
-        # Release the workers parked on the ack queue *before* joining them;
-        # the fds behind tensor results stay valid only while their sender
-        # lives, so every get() must have finished unwrapping first.
-        for _ in range(world_size):
-            acks.put(True)
-        for worker in workers:
-            worker.join(timeout=10)
-            if worker.is_alive():
-                worker.terminate()
-                worker.join(timeout=10)
-    return [collected[rank] for rank in range(world_size)]
+    attempt = 0
+    while True:
+        try:
+            return _attempt(
+                payload,
+                tp_size,
+                dp_size,
+                timeout,
+                backend,
+                enable_expert_parallel,
+                enable_dp_attention,
+            )
+        except AssertionError as error:
+            attempt += 1
+            if "EADDRINUSE" not in str(error) or attempt >= _RENDEZVOUS_ATTEMPTS:
+                raise
+            _log.warning(
+                "rendezvous port lost to another process (attempt %d/%d); retrying on a fresh one",
+                attempt,
+                _RENDEZVOUS_ATTEMPTS,
+            )

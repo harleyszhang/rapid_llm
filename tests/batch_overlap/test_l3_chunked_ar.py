@@ -7,7 +7,7 @@ device clock, which a blocking all-reduce can never show (it never records a
 comm region at all).
 
 Usage:
-    pytest tests/executor/test_l3_chunked_ar.py
+    pytest tests/batch_overlap/test_l3_chunked_ar.py
 """
 
 from __future__ import annotations

@@ -7,7 +7,10 @@ path and the deferred (TBO) path agree with it, that :class:`CollectiveStats`
 still sees the traffic, and that the timeline records the reduce region.
 
 Usage:
-    pytest tests/executor/test_comm_overlap.py
+    pytest tests/batch_overlap/test_comm_overlap.py
+
+The NCCL payloads need two CUDA devices; the policy, arithmetic and
+world-of-one tests run anywhere.
 """
 
 from __future__ import annotations
