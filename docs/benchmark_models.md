@@ -487,7 +487,7 @@ DeepSeek-V4-Flash 官方剪裁的真实权重 checkpoint（22 GB，DSpark 推理
 - `vllm/platforms/cuda.py::support_deep_gemm` 白名单只有 SM90 / SM100 家族 / SM120 家族，DeepGEMM 的 cmake 架构集合（9.0a / 10.0x / 12.0x）与 SM86 交集为空——这是 kernel 支持矩阵限制，不是层数或配置问题（剪到 4 层、改 `num_hidden_layers` 都绕不开 indexer）；
 - 源码仓 vendored 的 `deep_gemm._C` 扩展还是旧 torch ABI 编译（引用 torch 2.13 已删除的 `materialize_cow_storage` 符号），pypi `deep_gemm` 1.0.0 sdist 本机构建亦失败（缺 cutlass 子模块）。
 
-V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能对比因此是 rapid_llm + transformers 两方：transformers 臂先把 DSpark checkpoint 离线反量化成 bf16、按 transformers 模块树重命名后落盘（`benchmarks/accuracy/convert_v4_hf.py`，自包含键映射 + fp8/MXFP4 dequant + 逐专家 w1/w3 fuse 成 `gate_up_proj`，探针断言 / meta 扫描 / 重开核对三重自验证；产物 `/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2`，12 分片 75.6 GiB），GPU 上即以 bf16 原生跑；内存里逐 key 转换 + fp32 CPU 的组合只保留给精度 oracle（下节），性能数字不再依赖它。转换有一个 transformers 5.15 的默认行为要显式绕开：`save_pretrained` 默认 `save_original_format=True`，会把 state_dict 反向转换回 checkpoint 原始键（DSpark 形态），必须传 `save_original_format=False` 才能落出 transformers 原生键的产物。精度对比的参考实现同用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
+V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能对比因此是 rapid_llm + transformers 两方：transformers 臂先把 DSpark checkpoint 离线反量化成 bf16、按 transformers 模块树重命名后落盘（`tests/layer/convert_v4_hf.py`，自包含键映射 + fp8/MXFP4 dequant + 逐专家 w1/w3 fuse 成 `gate_up_proj`，探针断言 / meta 扫描 / 重开核对三重自验证；产物 `/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2`，12 分片 75.6 GiB），GPU 上即以 bf16 原生跑；内存里逐 key 转换 + fp32 CPU 的组合只保留给精度 oracle（下节），性能数字不再依赖它。转换有一个 transformers 5.15 的默认行为要显式绕开：`save_pretrained` 默认 `save_original_format=True`，会把 state_dict 反向转换回 checkpoint 原始键（DSpark 形态），必须传 `save_original_format=False` 才能落出 transformers 原生键的产物。精度对比的参考实现同用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
 
 环境与负载（两臂同口径，均在 rapid_llm venv：torch 2.13.0+cu129 / transformers 5.15.1 / Python 3.13 / CUDA 12.9；2×A10 22 GiB，sm86，PCIe host bridge 互联；64 核 CPU / 369 GB 内存）：batch=8、gen_len=128、iters=2、bf16 激活、贪心解码、`torch.cuda.synchronize` 计时、取中位数；两臂 decode 都走 eager（lite 臂 `--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效；transformers 臂本身就是 eager）。**两臂执行模型不同，数字不构成纯 kernel 对照**：
 
@@ -509,7 +509,7 @@ V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、h
 cd /home/honggao/projects/rapid_llm
 
 # 0) 一次性：DSpark checkpoint -> transformers bf16 落盘（CPU-only，约 2.5 min，产物 75.6 GiB）：
-.venv/bin/python -m benchmarks.accuracy.convert_v4_hf
+.venv/bin/python -m tests.layer.convert_v4_hf
 
 # 1) rapid_llm TP2（--no-cuda-graph：V4 的滑窗缓存每步重绑 Python 侧张量，
 #    graph 回放不了属性重绑定，decode 走 eager）：
@@ -530,7 +530,7 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 
 两套精度口径都回答同一问题：rapid_llm 的模型结构与参考实现（transformers / vLLM）是否逐 token 等价。指标：贪心序列逐步 token 一致率（agreement，@n 表示首分歧步）、prefill 逐位置 top-1 一致率、逐步 top-5 id 一致率。
 
-**V3-4layers 三方**（真实文本 prompt 三种长度、贪心 32 步；rapid_llm 与 transformers 单卡 bf16，vLLM TP1 bf16 源码仓 venv，同 golden 门 override；日志：`benchmarks/logs/accuracy_v3_parity_20260904_034741.json`、`accuracy_v3_vllm_20260904_043841.json`）：
+**V3-4layers 三方**（真实文本 prompt 三种长度、贪心 32 步；rapid_llm 与 transformers 单卡 bf16，vLLM TP1 bf16 源码仓 venv，同 golden 门 override；日志：`docs/benchmark_logs/accuracy/accuracy_v3_parity_20260904_034741.json`、`accuracy_v3_vllm_20260904_043841.json`）：
 
 | prompt 长度 | prefill 逐位置 top1（lite~HF） | lite~HF | lite~vLLM | vLLM~HF |
 | ---: | ---: | ---: | ---: | ---: |
@@ -538,13 +538,13 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 | 130 | 0.992 | 32/32 全对 | 32/32 全对 | 32/32 全对 |
 | 514 | 0.971 | 0.219 @7 | 0.219 @7 | 32/32 全对 |
 
-分叉步的逐 top5 解剖（`benchmarks/accuracy/deepseek.py v3 three-way`）说明残部分歧是 bf16 数值噪声而非结构差异：
+分叉步的逐 top5 解剖（`tests/layer/deepseek.py v3 three-way`）说明残部分歧是 bf16 数值噪声而非结构差异：
 
 - seq 130 三方 32 步完全一致（含 MoE 层完整路由）——路由与 MLA 路径结构等价的直接证据；
 - seq 16 的两处分叉步上，vLLM 自己的 top1 与 top2 logprob 完全相等（step 8：17117 与 48301 均 -3.1553；step 13：260 与 10466 均 -1.1548），三方各自的选择就是平局 tie-break 差异；
 - seq 514 是 rapid_llm 在第 7 步分叉（vLLM 与 HF 一致选 7294，双方 margin 0.25；rapid_llm 选 6791）。该 prompt 是 130-token 文本重复 4 次，prefill logits 的 max_abs_diff（14.06，vs 短 prompt 的 0.25/0.5）集中在长序列后段：4 层浅模型输出分布温和、MLA 吸收路径的 bf16 噪声随 prefill 长度累积，MoE top-2 专家的边界 token 翻转后被贪心序列放大。
 
-**V4-Flash-6layers**（rapid_llm bf16 TP2 vs transformers fp32 CPU 参考；输入为同种子随机 token id、三种 prefill 长度、贪心 32 步，两边共享同一确定性序列，排除分词差异噪声；日志：`benchmarks/logs/accuracy_v4_lite_20260904_042455.json`、`accuracy_v4_hf_20260904_043200.json`）。参考实现将 DSpark 权重在内存中转换为 HF 命名并 dequant（fp8 块、MXFP4 nibble 解包）后以 fp32 计算，是最强 oracle：
+**V4-Flash-6layers**（rapid_llm bf16 TP2 vs transformers fp32 CPU 参考；输入为同种子随机 token id、三种 prefill 长度、贪心 32 步，两边共享同一确定性序列，排除分词差异噪声；日志：`docs/benchmark_logs/accuracy/accuracy_v4_lite_20260904_042455.json`、`accuracy_v4_hf_20260904_043200.json`）。参考实现将 DSpark 权重在内存中转换为 HF 命名并 dequant（fp8 块、MXFP4 nibble 解包）后以 fp32 计算，是最强 oracle：
 
 | prompt 长度 | greedy 一致 | top-5 id 一致率 | shared logprob max-drift |
 | ---: | ---: | ---: | ---: |
@@ -562,15 +562,15 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 
 ```bash
 # V3 三方（前两臂 rapid_llm venv 单卡；vLLM 臂在 vllm 源码仓 venv）：
-python -m benchmarks.accuracy.deepseek v3 parity
-/home/honggao/projects/open_source/vllm/.venv/bin/python -m benchmarks.accuracy.deepseek v3 vllm
-python -m benchmarks.accuracy.deepseek v3 three-way \
-    benchmarks/logs/accuracy_v3_parity_<ts>.json benchmarks/logs/accuracy_v3_vllm_<ts>.json
+python -m tests.layer.deepseek v3 parity
+/home/honggao/projects/open_source/vllm/.venv/bin/python -m tests.layer.deepseek v3 vllm
+python -m tests.layer.deepseek v3 three-way \
+    docs/benchmark_logs/accuracy/accuracy_v3_parity_<ts>.json docs/benchmark_logs/accuracy/accuracy_v3_vllm_<ts>.json
 # V4 精度对比（rapid_llm TP2 双卡；transformers 跑在 CPU，需 ~200 GB 内存做 fp32 转换）：
-python -m benchmarks.accuracy.deepseek v4 lite
-python -m benchmarks.accuracy.deepseek v4 hf
-python -m benchmarks.accuracy.deepseek v4 compare \
-    benchmarks/logs/accuracy_v4_lite_<ts>.json benchmarks/logs/accuracy_v4_hf_<ts>.json
+python -m tests.layer.deepseek v4 lite
+python -m tests.layer.deepseek v4 hf
+python -m tests.layer.deepseek v4 compare \
+    docs/benchmark_logs/accuracy/accuracy_v4_lite_<ts>.json docs/benchmark_logs/accuracy/accuracy_v4_hf_<ts>.json
 ```
 
 ## 三 性能优化历史记录

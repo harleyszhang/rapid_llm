@@ -1,0 +1,11 @@
+{
+  "engine": "hf",
+  "model_dir": "/home/honggao/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots/060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "num_questions": 200,
+  "num_shots": 20,
+  "batch_size": 16,
+  "accuracy": 0.44,
+  "accuracy_len": 0.48,
+  "latency_s": 18.201342947781086,
+  "questions_per_second": 10.988200187963706
+}

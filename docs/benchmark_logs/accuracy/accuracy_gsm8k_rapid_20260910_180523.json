@@ -1,0 +1,21 @@
+{
+  "model_dir": "/data/shared/llm_weights/Qwen2.5-1.5B-Instruct",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_gen_len": 256,
+  "batch_size": 16,
+  "accuracy": 0.645,
+  "invalid_rate": 0.0,
+  "latency_s": 35.858118671923876,
+  "generated_tokens": 29251,
+  "extra": {
+    "benchmark": "gsm8k",
+    "chat_template": "True",
+    "quantization": "none",
+    "kv_cache_dtype": "auto"
+  },
+  "questions_per_second": 5.57753745615761,
+  "tokens_per_second": 815.7427406503313,
+  "engine": "rapid_llm",
+  "cuda_graph": "on (default)"
+}

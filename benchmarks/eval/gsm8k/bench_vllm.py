@@ -1,24 +1,23 @@
-"""GSM8K accuracy on vllm — the comparison side of tests/evals/gsm8k.py.
+"""GSM8K accuracy on vllm — the third comparison arm.
 
-Same prompts (build_prompts), same stop markers, same scoring (score) as the
-rapid_llm path; only the generation engine differs, so the two accuracies are
-directly comparable. Greedy decoding, chat template for instruction-tuned
-checkpoints (the counterpart of runner.as_user_turn).
+Same prompts (``build_prompts``), stop markers and scoring (``score``) as the
+rapid_llm arm; only the generation engine differs. Requires a vllm install,
+which the rapid_llm development environment does not carry — run it from a
+venv that has one.
 
 Usage:
-    python -m benchmarks.accuracy.gsm8k_vllm --model-dir <checkpoint> \
-        [--num-questions 200] [--chat-template] [--json out.json]
+    python -m benchmarks.eval.gsm8k.bench_vllm \
+        --model-dir <checkpoint> --num-questions 200 [--chat-template]
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tests.evals.dataset import load_gsm8k
 from tests.evals.gsm8k import STOP, build_prompts, score
@@ -89,7 +88,6 @@ def main() -> int:
     ap.add_argument("--num-shots", type=int, default=5)
     ap.add_argument("--max-gen-len", type=int, default=256)
     ap.add_argument("--chat-template", action="store_true")
-    ap.add_argument("--json", type=str, default=None)
     args = ap.parse_args()
 
     result = evaluate_gsm8k_vllm(
@@ -104,10 +102,11 @@ def main() -> int:
         f"invalid={result['invalid_rate']:.4f} "
         f"({result['num_questions']} questions, {result['latency_s']:.1f}s)"
     )
-    if args.json:
-        with open(args.json, "w") as f:
-            json.dump(result, f, indent=2)
-        print(f"-> {args.json}")
+
+    from benchmarks.eval._common import append_result_log
+
+    log = append_result_log("gsm8k", "vllm", result)
+    print(f"-> {log}")
     return 0
 
 

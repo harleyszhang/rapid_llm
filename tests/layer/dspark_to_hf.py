@@ -1,8 +1,8 @@
 """DSpark V4 checkpoint -> transformers DeepseekV4ForCausalLM, host memory.
 
 The reference sides that consume the DSpark-format Flash checkpoint — the
-fp32 CPU oracle in :mod:`benchmarks.accuracy.deepseek` and the bf16-on-disk
-variant in :mod:`benchmarks.accuracy.convert_v4_hf` — share this loader.
+fp32 CPU oracle in :mod:`tests.layer.deepseek` and the bf16-on-disk
+variant in :mod:`tests.layer.convert_v4_hf` — share this loader.
 transformers has no reader for the DSpark layout, so :func:`load_dspark_hf`
 renames keys through :func:`rapid_llm.models.deepseek_v4.adapt_dspark_key`
 plus the few leaves where transformers' module tree differs
@@ -106,9 +106,10 @@ def load_dspark_hf(
                 if _EXPERT_WEIGHT.match(key):
                     continue  # experts are rebuilt layer-by-layer below
                 tensor = f.get_tensor(key)
-                if key.endswith(".weight") and (
-                    twin := key.removesuffix(".weight") + ".scale"
-                ) in weight_map:
+                if (
+                    key.endswith(".weight")
+                    and (twin := key.removesuffix(".weight") + ".scale") in weight_map
+                ):
                     tensor = dequant_block_fp8(tensor, f.get_tensor(twin), dtype)
                 assign(hf_key(key), tensor)
 
@@ -134,7 +135,10 @@ def load_dspark_hf(
             for nm in ("w1", "w2", "w3"):
                 wk = f"layers.{layer}.ffn.experts.{e}.{nm}.weight"
                 sf = open_file(weight_map[wk])
-                parts[nm] = (sf.get_tensor(wk), sf.get_tensor(wk.removesuffix(".weight") + ".scale"))
+                parts[nm] = (
+                    sf.get_tensor(wk),
+                    sf.get_tensor(wk.removesuffix(".weight") + ".scale"),
+                )
             # HF's gate_up packs gate (w1) first, up (w3) second.
             gate_up[e, :inter] = dequant_mxfp4(*parts["w1"])
             gate_up[e, inter:] = dequant_mxfp4(*parts["w3"])
