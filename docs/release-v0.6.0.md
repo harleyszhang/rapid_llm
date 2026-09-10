@@ -30,7 +30,7 @@ python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype f
 > KV 容量提升 **1.91x**，throughput 仅降 9%（fp8 dequant 额外开销）。
 > 对长序列场景（4K+ context），fp8 KV 是纯收益：原本 OOM 的序列现在能服务。
 >
-> Benchmark 日志: [`docs/benchmark_logs/bench_kv_cache_fp8_v06.json`](benchmark_logs/bench_kv_cache_fp8_v06.json)
+> Benchmark 日志: [`docs/benchmark_logs/quantization/kv_cache_fp8_v06.json`](benchmark_logs/quantization/kv_cache_fp8_v06.json)
 
 ## 2. Feature: viz.structure (模型结构树)
 

@@ -235,10 +235,14 @@ def _payload_chunked_matches_blocking(rank: int) -> str:
     layer = _layer_on(rank, device)
     gen = torch.Generator().manual_seed(200 + rank)
     x = torch.randn(32, 32, IN // 2, generator=gen).to(device)  # 1024 tokens
-    ref = ps.tensor_model_parallel_all_reduce(layer.apply_linear(x.reshape(-1, IN // 2))).view(32, 32, OUT)
+    ref = ps.tensor_model_parallel_all_reduce(layer.apply_linear(x.reshape(-1, IN // 2))).view(
+        32, 32, OUT
+    )
     out = layer.forward(x)
     assert out.shape == (32, 32, OUT), "the leading dims come back as they went in"
-    assert torch.equal(out, ref)
+    # Row-chunked GEMMs pick different cuBLAS kernels than one wide GEMM, so
+    # parity is mathematical, not bitwise (a two-term all-reduce is exact).
+    assert torch.allclose(out, ref, rtol=1e-5, atol=1e-5)
     return "ok"
 
 

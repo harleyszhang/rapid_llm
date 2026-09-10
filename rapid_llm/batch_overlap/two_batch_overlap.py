@@ -91,12 +91,6 @@ def _ridge_rows() -> int:
     return _ridge_cache
 
 
-def reset_ridge_cache() -> None:
-    """Forget the cached ridge point — test hook between device contexts."""
-    global _ridge_cache
-    _ridge_cache = None
-
-
 #: State keys that outlive the whole layer stack. Everything else is an
 #: intermediate, and :func:`_head` asserts none survived.
 _PERSISTENT_KEYS = (

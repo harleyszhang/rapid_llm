@@ -158,7 +158,7 @@ GPU benchmark results are workload-specific. Hardware, batch shape, prompt lengt
 
 - [Optimization explanations, diagrams, and measured results](docs/optimization_features.md)
 - [Model benchmarks](docs/benchmark_models.md) and [evaluation](docs/eval_models.md)
-- [Quantization](docs/quantization.md) and [recorded quantization matrix](docs/benchmark_logs/quant_matrix_20260901.md)
+- [Quantization](docs/quantization.md) and [recorded quantization matrix](docs/benchmark_logs/quantization/quant_matrix_20260901.md)
 - [Overlap experiments](docs/release-v0.11.5.md) and [later kernel changes](docs/release-v0.12.0.md)
 
 Release notes and benchmark logs describe the revision and environment measured at the time. They are not the current API reference or a guarantee of speedup on another device.

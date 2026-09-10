@@ -508,11 +508,6 @@ class HFBackend(Backend):
             return []
         return [self.tokenizer.decode(row, skip_special_tokens=True) for row in self._last_gen]
 
-    def sample_text(self, limit: int = 120) -> str:
-        """Decode the first row of the last run, for eyeball-checking output."""
-        rows = self.texts()
-        return rows[0][:limit] if rows else ""
-
     def close(self) -> None:
         del self.model
         super().close()
@@ -636,9 +631,6 @@ class VLLMBackend(Backend):
 
     def texts(self) -> list[str]:
         return self._last_texts
-
-    def sample_text(self, limit: int = 120) -> str:
-        return self._last_texts[0][:limit] if self._last_texts else ""
 
     def close(self) -> None:
         del self.llm

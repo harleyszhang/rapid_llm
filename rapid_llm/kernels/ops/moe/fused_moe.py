@@ -1341,7 +1341,6 @@ def fused_moe(
     group_k: int = 0,
     swiglu_limit: float = float("inf"),
     mxfp4: bool = False,
-    down_overlap_args=None,
 ) -> torch.Tensor:
     """Run the routed-expert FFN: ``sum_k w_k * (silu(x @ W1g.T) * (x @ W1u.T)) @ W2.T``.
 
@@ -1459,53 +1458,24 @@ def fused_moe(
     # top_k=1 (vLLM does the same: the second invocation passes ``1``), turning
     # ``offs_token // top_k`` into the identity on slot indices.
     expanded = torch.empty((num_tokens * top_k, hidden), device=device, dtype=dtype)
-    # With overlap args the down projection is split into row chunks and each
-    # chunk's landing is published with an event, so the combine exchange can
-    # start on chunk 0 while the rest are still computing. GEMM2 runs with
-    # top_k=1, which makes sorted_ids the identity on slot indices, so slicing
-    # the activation rows is safe -- each chunk still addresses its own slots.
-    chunks = getattr(down_overlap_args, "chunks", None)
-    events = getattr(down_overlap_args, "events", None)
-    if chunks and events and len(chunks) > 1:
-        for (start, stop), event in zip(chunks, events, strict=True):
-            _invoke_moe_gemm(
-                act[start:stop],
-                w2,
-                expanded[start:stop],
-                None,
-                w2_scale,
-                w2_zeros,
-                flat_weights,
-                sorted_ids,
-                expert_ids,
-                num_post,
-                1,
-                mul_routed_weight=True,
-                quant_mode=quant_mode,
-                group_n=group_n,
-                group_k=group_k,
-                config=config,
-            )
-            event.record()
-    else:
-        _invoke_moe_gemm(
-            act,
-            w2,
-            expanded,
-            None,
-            w2_scale,
-            w2_zeros,
-            flat_weights,
-            sorted_ids,
-            expert_ids,
-            num_post,
-            1,
-            mul_routed_weight=True,
-            quant_mode=quant_mode,
-            group_n=group_n,
-            group_k=group_k,
-            config=config,
-        )
+    _invoke_moe_gemm(
+        act,
+        w2,
+        expanded,
+        None,
+        w2_scale,
+        w2_zeros,
+        flat_weights,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        1,
+        mul_routed_weight=True,
+        quant_mode=quant_mode,
+        group_n=group_n,
+        group_k=group_k,
+        config=config,
+    )
 
     # Reduce over the top_k slot dim -> [M, hidden]
     out = torch.empty((num_tokens, hidden), device=device, dtype=dtype)

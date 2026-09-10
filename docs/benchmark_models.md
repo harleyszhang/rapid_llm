@@ -18,7 +18,7 @@
 | 64×4096×4096 | 0.091 | 0.055 | **1.64×** | small prefill |
 | 512×4096×4096 | 0.191 | 0.280 | 0.68× | prefill (compute-bound) |
 
-判据（roofline）与 H100 矩阵一致，但 **W8A16 这一行的胜负在两台机器上是反的**。decode（M≤64）算术强度低、卡在 HBM 带宽上，W8A16 把权重字节减半直接缩短搬运，在 A10（~600 GB/s）稳定 1.6–1.7×；prefill（M≥512）算术强度高、卡在算力上，W8A16 反量化后走 fp16-rate dot，算力上限就是 cuBLAS fp16 同档，省下的字节不在瓶颈上，于是 0.68×——此时应回退 cuBLAS fp16。同一格式到 H100 上 decode 档反而输（qkv 的 M=1/8/32 为 0.76–0.79×；24 个 decode 测试点里只有 qwen3-4b/gate_up 的两个还赢，1.21–1.22×，见[下文](#h100-80-gb-sm90)）：3.35 TB/s 的带宽让 bf16 只占峰值 43.5%（gate_up 才到 60.9%），内核没在等显存，删字节省不下时间。A10（sm86）没有原生 fp8 GEMM，所以真 W8A8（激活也量化）在这里只能付量化开销、拿不到 MMA 收益；完整的「量化什么时候赢/输」推导见 [quantization.md](quantization.md) 的 roofline 一节与 [quant_matrix_20260901.md](benchmark_logs/quant_matrix_20260901.md) §1.1a。
+判据（roofline）与 H100 矩阵一致，但 **W8A16 这一行的胜负在两台机器上是反的**。decode（M≤64）算术强度低、卡在 HBM 带宽上，W8A16 把权重字节减半直接缩短搬运，在 A10（~600 GB/s）稳定 1.6–1.7×；prefill（M≥512）算术强度高、卡在算力上，W8A16 反量化后走 fp16-rate dot，算力上限就是 cuBLAS fp16 同档，省下的字节不在瓶颈上，于是 0.68×——此时应回退 cuBLAS fp16。同一格式到 H100 上 decode 档反而输（qkv 的 M=1/8/32 为 0.76–0.79×；24 个 decode 测试点里只有 qwen3-4b/gate_up 的两个还赢，1.21–1.22×，见[下文](#h100-80-gb-sm90)）：3.35 TB/s 的带宽让 bf16 只占峰值 43.5%（gate_up 才到 60.9%），内核没在等显存，删字节省不下时间。A10（sm86）没有原生 fp8 GEMM，所以真 W8A8（激活也量化）在这里只能付量化开销、拿不到 MMA 收益；完整的「量化什么时候赢/输」推导见 [quantization.md](quantization.md) 的 roofline 一节与 [quant_matrix_20260901.md](benchmark_logs/quantization/quant_matrix_20260901.md) §1.1a。
 
 ##### W4A16 (int4, group_size=128)（初版内核，勿引用）
 
@@ -44,7 +44,7 @@ tile 配置来自 autotune 落盘表（`~/.cache/rapid_llm/autotune/w4a16_matmul
 
 #### H100 (80 GB, SM90)
 
-测于 NVIDIA H100 80GB HBM3（3352 GB/s 峰值带宽、989 TFLOP/s dense tensor core），torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7，2026-09-03 口径，数据来自 [`bench_quant_gemm_h100_20260903d.json`](benchmark_logs/bench_quant_gemm_h100_20260903d.json)，以 `RAPID_LLM_AUTOTUNE=0` 运行——即用户没有调优缓存时拿到的启发式 tile。shape 是两个 checkpoint 的四个真实投影（qwen3-4b：hidden 2560 / intermediate 9728；qwen3-30b-a3b：hidden 2048 / moe_intermediate 768）× 6 个 token 档（1/8/32/128/512/2048）= 48 个测试点 × 6 个 scheme。括号内为相对 bf16 的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 即快于基线。
+测于 NVIDIA H100 80GB HBM3（3352 GB/s 峰值带宽、989 TFLOP/s dense tensor core），torch 2.13.0+cu130 / triton 3.7.1 / python 3.14.7，2026-09-03 口径，数据来自 [`quant_gemm_h100_20260903d.json`](benchmark_logs/kernels/quant_gemm_h100_20260903d.json)，以 `RAPID_LLM_AUTOTUNE=0` 运行——即用户没有调优缓存时拿到的启发式 tile。shape 是两个 checkpoint 的四个真实投影（qwen3-4b：hidden 2560 / intermediate 9728；qwen3-30b-a3b：hidden 2048 / moe_intermediate 768）× 6 个 token 档（1/8/32/128/512/2048）= 48 个测试点 × 6 个 scheme。括号内为相对 bf16 的加速比（bf16 耗时 ÷ 该格式耗时），大于 1 即快于基线。
 
 ##### 中尺寸投影：qwen3-4b/qkv（N=6144, K=2560）
 
@@ -120,7 +120,7 @@ print('w4a16', triton.testing.do_bench(lambda: w4a16_matmul(x, q4, s4, z4, group
 
 # H100 口径：全格式矩阵（48 个测试点 × 6 scheme，真实投影 shape）
 RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py \
-    --json docs/benchmark_logs/bench_quant_gemm_h100_20260903d.json
+    --json docs/benchmark_logs/kernels/quant_gemm_h100_20260903d.json
 RAPID_LLM_AUTOTUNE=0 python benchmarks/kernels/bench_quant_gemm.py --tokens 1 32 2048   # 只测自己服务的宽度
 python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                          # int4 tile 搜索（唯一读缓存的内核）
 ```
@@ -138,7 +138,7 @@ python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                  
 
 ### rapid_llm vs HF transformers（examples/benchmark.py）
 
-**测试环境**：单卡 NVIDIA A10 24GB（sm86，~600 GB/s），torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12（2026-08-31 重测）；TP2 行为 2×A10。**推理负载**：`examples/benchmark.py` 的 PROMPTS 扩到 batch 8（gen_len 128）或 batch 16（gen_len 256），贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数；rapid_llm 默认启用 CUDA graph，HF 侧 sdpa attention。**日志**：每行对应一份 `docs/benchmark_logs/bench_<模型>_b<batch>_g<gen>_<日期>_<时间>.json`（如 `bench_Qwen2.5-1.5B-Instruct_b8_g128_20260831_200147.json`，含完整 config 与环境 meta）。指标口径对齐 vLLM/SGLang serving benchmark：
+**测试环境**：单卡 NVIDIA A10 24GB（sm86，~600 GB/s），torch 2.11.0+cu129 / transformers 5.8.0 / Python 3.12（2026-08-31 重测）；TP2 行为 2×A10。**推理负载**：`examples/benchmark.py` 的 PROMPTS 扩到 batch 8（gen_len 128）或 batch 16（gen_len 256），贪心解码、两端同一 tokenizer 统计输出 token、两端自然 EOS 停止、`torch.cuda.synchronize` 计时、取中位数；rapid_llm 默认启用 CUDA graph，HF 侧 sdpa attention。**日志**：每行对应一份 `docs/benchmark_logs/models/<模型>_b<batch>_g<gen>_<日期>_<时间>.json`（如 `models/Qwen2.5-1.5B-Instruct_b8_g128_20260831_200147.json`，含完整 config 与环境 meta）。指标口径对齐 vLLM/SGLang serving benchmark：
 
 - **TTFT**（首 token 时延，s）= 预填充延迟；
 - **TPOT**（每输出 token 时延，ms）= `(latency - ttft) / (output_len - 1)`；
@@ -209,7 +209,7 @@ python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                  
 - rapid_llm 的 **decode 全面更快** — TPOT 加速比在 **1.15×～7.1×** 之间，模型越大比值越低（0.6B 档 ~6-7×，3B 档收敛到 ~1.6-1.9×，多模态 7B 档 1.15×；模型越大 decode 越偏 compute-bound，两端都吃满算力）；多模态 4B 档（Qwen3-VL）拿到 **1.72×**—decode 步与纯文本同构，CUDA graph 的收益直接兑现；
 - 8B 级 TP2 双卡档同样领先（Qwen3-8B 1.24×、Llama-3.1-8B 1.46×，两端都在同样的两张卡上），说明 TP 切分 + eager decode 在通信开销下仍保住优势；
 - 聚合吞吐 TGS 同步放大，TPS 加速比 **1.15×～6.8×**（与 TPOT 同向、略低——TTFT 摊进总时延）。每组配置两端输出 token 数一致，工作量对等。
-- **TTFT** 绝对值小（纯文本 6～50 ms），加速比 **1.04×～1.94×**，rapid_llm 普遍略优但 run-to-run 抖动明显，不逐行解读；多模态 TTFT（129～200 ms）含视觉塔前向，rapid_llm 优 1.11×～1.22×。原始日志见 `docs/benchmark_logs/bench_*.json`（每份含完整 config）。
+- **TTFT** 绝对值小（纯文本 6～50 ms），加速比 **1.04×～1.94×**，rapid_llm 普遍略优但 run-to-run 抖动明显，不逐行解读；多模态 TTFT（129～200 ms）含视觉塔前向，rapid_llm 优 1.11×～1.22×。原始日志见 `docs/benchmark_logs/models/*.json`（每份含完整 config）。
 - 30B 级 MoE（Qwen3-30B-A3B-FP8，TP2 eager decode）：TPOT ~84 ms 与 batch 8/16 无关（~3B 激活参数 + top-8 专家权重读取，A10 带宽主导），batch 8→16 吞吐线性放大（95→190 tok/s）说明带宽还有余量；权重 29.06 GB 分两卡后每卡仍有 ~6 GB KV（104,528 token/卡）。transformers 侧无法对照（fp8 反量化为 bf16 需 ~60 GB，双卡 44 GB 放不下），同 14B-AWQ 一样记 rapid_llm 单侧。
 
 > 本节表中未出现的组合：**8B 级 b16 单卡档**的 KV 预算（16×2048 token ≈ 4.8 GiB + 16 GiB 权重）超出 22 GiB—已用 `--tensor-parallel-size 2` 双卡 TP 补上（GPU=A10×2 行）；**8B 级 b8 档的 transformers 侧**因 transformers 5.8 的 `caching_allocator_warmup` 需要约双倍模型显存，单卡放不下（b16 双卡档已补测，b8 不再用双卡测以保持与 rapid_llm 单卡 graph 行的硬件口径一致）；**14B-AWQ 的 transformers 侧**因 AWQ 反量化需要 gptqmodel/autoawq（未安装）标为 rapid_llm 单侧。
@@ -290,7 +290,7 @@ python examples/benchmark.py --model $RAPID_LLM_MODELZOO/Qwen3-30B-A3B-Instruct-
     --batch-size 16 --gen-len 128 --iters 2 --tensor-parallel-size 2 --engine rapid_llm
 ```
 
-原始日志见 `docs/benchmark_logs/bench_Qwen*_20260903_*.json`。
+原始日志见 `docs/benchmark_logs/models/Qwen*_20260903_*.json`。
 
 rapid_llm 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录制）：
 
@@ -298,7 +298,7 @@ rapid_llm 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录
 
 #### 2×H100 80GB 复测（2026-09-08，short 128 / medium 4k / long 32k × 三方）
 
-新基准框架（sglang 式重构后的 `benchmarks/`）首次全模型套件：`bench_models.py` 预检/计划/编排，`bench_offline_throughput.py` 三方引擎臂（rapid_llm / transformers / vllm 0.28 跨 venv），RandomDataset 精确 token 长度（vLLM 同款 decode→re-encode 校正，三档零漂移），greedy、batch 8、iters 2。rapid_llm 按生产默认开三件套（CUDA graph + prefix cache + chunked prefill），完整 engine args 落 JSON。TTFT/TPOT 列为逐请求 p50/p99（transformers 为 batch 级均值，标 `*`）；TPS 两端口径一致可直接比。逐臂原始 JSON 与扩展点明细见 [benchmark_logs/models_suite_h100_20260908_125429.md](benchmark_logs/models_suite_h100_20260908_125429.md)。
+新基准框架（sglang 式重构后的 `benchmarks/`）首次全模型套件：`bench_models.py` 预检/计划/编排，`bench_offline_throughput.py` 三方引擎臂（rapid_llm / transformers / vllm 0.28 跨 venv），RandomDataset 精确 token 长度（vLLM 同款 decode→re-encode 校正，三档零漂移），greedy、batch 8、iters 2。rapid_llm 按生产默认开三件套（CUDA graph + prefix cache + chunked prefill），完整 engine args 落 JSON。TTFT/TPOT 列为逐请求 p50/p99（transformers 为 batch 级均值，标 `*`）；TPS 两端口径一致可直接比。逐臂原始 JSON 与扩展点明细见 [benchmark_logs/models/models_suite_h100_20260908_125429.md](benchmark_logs/models/models_suite_h100_20260908_125429.md)。
 
 **Qwen2.5-0.5B-Instruct（bf16，TP1；long 档因 max_position_embeddings=32768 收缩为 31744 输入）**
 
@@ -378,7 +378,7 @@ python benchmarks/suites/run.py models             # 全套实跑（tee 到 docs
 
 ### eager vs CUDA graph（benchmarks/bench_e2e.py）
 
-**测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/bench_e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `bench_e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
+**测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/engine/e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
 
 | 模型 | 架构 / 优化 | TTFT (ms) | TPOT eager (ms) | TPOT graph (ms) | graph 加速 | TPS (tok/s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -433,7 +433,7 @@ batch=8、gen_len=128、iters=2、bf16。**每个框架在自己的 venv 下测*
 
 （TPS = `1000 / TPOT` 每请求口径——V2/V3 的日志产生于 TPS 字段加入前的脚本版本，由 TPOT 折算，与同次 run 内实测等价；TGS = 总输出 token / latency 聚合口径；每卡 TGS：TP2 行按 TGS/2 折算，单卡行即 TGS 本身。加速比 = `对照指标 / rapid_llm 指标`，标在 rapid_llm 行；vLLM 行的 TPOT 加速比小于 1 即 vLLM 的 decode 更快，TGS 加速比同理是吞吐比。）
 
-结果日志（`docs/benchmark_logs/`）：V2-Lite 的 rapid_llm / transformers 行在 `bench_DeepSeek-V2-Lite_b8_g128_tp2_20260903_170619.json`，vLLM 行在 `bench_DeepSeek-V2-Lite_b8_g128_tp2_20260903_021325.json`（三方同次运行的 vLLM 数字；lite 行取 k-tile 修复与管线落地后的最新值，对比见下方结论）；V3 三方分别为 `bench_DeepSeek-V3-4layers-MTP-BF16_b8_g128_20260904_050014.json`（rapid_llm）、`..._050117.json`（transformers）、`..._052340.json`（vLLM），双 venv 重测。
+结果日志（`docs/benchmark_logs/models/`）：V2-Lite 的 rapid_llm / transformers 行在 `DeepSeek-V2-Lite_b8_g128_tp2_20260903_170619.json`，vLLM 行在 `DeepSeek-V2-Lite_b8_g128_tp2_20260903_021325.json`（三方同次运行的 vLLM 数字；lite 行取 k-tile 修复与管线落地后的最新值，对比见下方结论）；V3 三方分别为 `DeepSeek-V3-4layers-MTP-BF16_b8_g128_20260904_050014.json`（rapid_llm）、`..._050117.json`（transformers）、`..._052340.json`（vLLM），双 venv 重测。
 
 结论（四项指标 TTFT / TPOT / TPS / TGS 齐报）：
 
@@ -503,7 +503,7 @@ V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能�
 
 V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层。rapid_llm eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护；这是 V4 在 rapid_llm 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。transformers 臂的 TPOT 1565.8 ms 主要耗在每个 decode 步把 routed 激活搬去 CPU、在 CPU 上做 bf16 专家 GEMM（256 选 6 的 grouped GEMM 无 GPU 加速）再搬回，PCIe 往返 + CPU 算力共同拉长步时；TTFT 2.03 s 同构成（prefill 每 token 同样过 CPU 专家栈）。
 
-复现（日志：lite 臂 `docs/benchmark_logs/bench_DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`，transformers 臂 `bench_DeepSeek-V4-Flash-6layers-hf-bf16-v2_b8_g128_tp2_20260904_162952.json`，均含完整 config 与指标）：
+复现（日志：lite 臂 `docs/benchmark_logs/models/DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`，transformers 臂 `models/DeepSeek-V4-Flash-6layers-hf-bf16-v2_b8_g128_tp2_20260904_162952.json`，均含完整 config 与指标）：
 
 ```bash
 cd /home/honggao/projects/rapid_llm

@@ -48,7 +48,6 @@ class MoeRunnerCore(ABC):
         local_x: torch.Tensor,
         local_ids: torch.Tensor,
         local_weights: torch.Tensor,
-        down_overlap_args=None,
     ) -> torch.Tensor:
         """Run the local experts over ``local_x`` (pad rows carry -1 ids)."""
 

@@ -5,7 +5,6 @@ run?* — as a list of :class:`DatasetRow`. The row is the currency every runner
 accepts, the way vLLM's ``SampleRequest`` is for its benchmark suite.
 """
 
-import random
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from dataclasses import dataclass
@@ -118,10 +117,3 @@ def gen_prompt_decode_to_target_len(
             token_sequence = token_sequence[:target_token_len]
         remain -= 1
     return prompt, token_sequence, token_mismatch
-
-
-def gen_prompt(tokenizer, token_num) -> str:
-    """A random text prompt whose re-encoding is exactly ``token_num`` tokens."""
-    ids = random.choices(get_available_tokens(tokenizer), k=token_num)
-    prompt, _, _ = gen_prompt_decode_to_target_len(tokenizer, ids, token_num)
-    return prompt

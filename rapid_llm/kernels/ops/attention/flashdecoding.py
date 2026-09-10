@@ -456,12 +456,21 @@ def flash_decoding(
     assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
     batchs, num_heads, head_dim = q.shape  # decode 阶段 q 的 seq_len = 1,
 
+    # GQA-packed stage 1: one program carries a kv head's whole q-head group,
+    # so K/V is read once per group instead of once per q head, and the qk/pv
+    # products run on tensor cores. Same Mid_O layout, same stage 2.
+    num_kv_heads = k_cache.shape[1]
+    packed = packed_decode_supported(num_heads, num_kv_heads, head_dim)
+    # The occupancy unit of the packed grid is (batch, kv head); size the
+    # partition split against that, not the q-head count.
+    grid_heads = num_kv_heads if packed else num_heads
+
     # O8: split the KV history by the decode shape rather than a fixed 128.
     # batch=1 long context splits finer to fill the SMs; large batch splits
     # coarser because batch*heads already saturates and the stage-2 combine is
     # pure overhead. Exact for any partition size, and a pure function of Python
     # ints so a captured graph bakes in one deterministic value per bucket.
-    PARTITION_SIZE = _resolve_partition_size(batchs, num_heads, max_actual_seq_len, q.device)
+    PARTITION_SIZE = _resolve_partition_size(batchs, grid_heads, max_actual_seq_len, q.device)
 
     kv_fp8 = k_cache.dtype == torch.uint8
     if kv_fp8:
@@ -484,22 +493,41 @@ def flash_decoding(
     )
 
     # decode stage 1: attention in partitions
-    flash_decode_stage1(
-        q,
-        k_cache,
-        v_cache,
-        qk_scale,
-        b_req_tokens_table,
-        b_req_idx,
-        b_seq_len,
-        max_actual_seq_len,
-        mid_o,
-        mid_o_logexpsum,
-        PARTITION_SIZE,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        kv_fp8=kv_fp8,
-    )
+    if packed:
+        flash_decode_packed_stage1(
+            q,
+            k_cache,
+            v_cache,
+            qk_scale,
+            b_req_tokens_table,
+            b_req_idx,
+            b_seq_len,
+            max_actual_seq_len,
+            mid_o,
+            mid_o_logexpsum,
+            PARTITION_SIZE,
+            num_heads // num_kv_heads,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            kv_fp8=kv_fp8,
+        )
+    else:
+        flash_decode_stage1(
+            q,
+            k_cache,
+            v_cache,
+            qk_scale,
+            b_req_tokens_table,
+            b_req_idx,
+            b_seq_len,
+            max_actual_seq_len,
+            mid_o,
+            mid_o_logexpsum,
+            PARTITION_SIZE,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            kv_fp8=kv_fp8,
+        )
 
     # decode stage 2: reduction among partitions
     atten_output = torch.empty_like(q)
@@ -507,3 +535,250 @@ def flash_decoding(
     flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, b_seq_len, PARTITION_SIZE)
 
     return atten_output
+
+
+# ---------------------------------------------------------------------------
+# GQA-packed stage 1
+#
+# 逐头版一个 program 只算一个 q head, 同一 kv head 的组内邻居各自把同样的
+# K/V 块重新加载一遍 (读流量 x group size), 且 num_warps=1 的逐元素乘加
+# 摸不到 tensor core。packed 版让一个 program 携带一个 kv head 的整个
+# q head 组: K/V 每块只加载一次, 被组内全部 q head 共享, qk 与 pv 都走
+# ``tl.dot``。Mid_O 的布局与逐头版完全一致 (每行仍对应一个 q head),
+# stage-2 归约 kernel 原样复用。
+#
+# 数值: tensor core 对 fp16/bf16 输入是全精度乘 (10/8 bit 尾数相乘不超
+# fp32 的 24 bit) + fp32 累加, 与逐头版"升 fp32 再乘加"同阶; 旧版注释里
+# 的精度问题针对的是 fp16 乘积直接累加, 不适用于 tl.dot。fp8 KV 先
+# dequant 再降到 q 的 dtype (fp8 的 3 bit 尾数在 fp16/bf16 下精确),
+# 反量化标量是常数, 从循环提到 qk/归一化两步上。
+# ---------------------------------------------------------------------------
+
+#: packed stage-1 的 KV 块长; partition 尾块由 mask 兜底, 不要求整除。
+_PACKED_BLOCK_N = 64
+
+#: tl.dot 的最小 M。group size 不足时 pad 行 load 0、store 时 mask 掉。
+_PACKED_BLOCK_M = 16
+
+#: packed 路径开关: ``RAPID_LLM_PACKED_DECODE=0`` 回退逐头版 (A/B 用)。
+_PACKED_DECODE_ENV = "RAPID_LLM_PACKED_DECODE"
+
+
+def packed_decode_supported(num_heads: int, num_kv_heads: int, head_dim: int) -> bool:
+    """Whether the packed stage-1 kernel can serve this decode shape.
+
+    一个 program 装一个 kv head 的组: 要求整除、组大小不超过 ``BLOCK_M``
+    (组再小也打包, 但 group<4 时 K/V 复用收益抵不上 pad 浪费, 走逐头版),
+    head_dim 需满足 tl.dot 的最小 K 维且为 2 的幂 (tl.arange 约束)。
+    """
+    if os.environ.get(_PACKED_DECODE_ENV, "1") == "0":
+        return False
+    if num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
+        return False
+    group = num_heads // num_kv_heads
+    return (
+        4 <= group <= _PACKED_BLOCK_M
+        and head_dim >= 16
+        and (head_dim & (head_dim - 1)) == 0
+    )
+
+
+@triton.jit
+def _flash_decoding_packed_stage1_kernel(
+    Q,
+    K,
+    V,
+    qk_scale,
+    k_scale,  # fp8 KV cache 反量化标量, 作为常数乘在 qk 上
+    v_scale,  # 同, 乘在归一化一步
+    b_req_tokens_table,
+    B_Req_Idx,
+    B_Seqlen,
+    Mid_O,
+    Mid_O_LogExpSum,
+    stride_req_to_tokens_b,
+    stride_req_to_tokens_s,
+    q_bs_stride,
+    q_heads_stride,
+    q_dim_stride,
+    k_bs_stride,
+    k_heads_stride,
+    k_dim_stride,
+    v_bs_stride,
+    v_heads_stride,
+    v_dim_stride,
+    mido_batch_stride,
+    mido_heads_stride,
+    mido_partitions_stride,
+    mido_dim_stride,
+    mido_les_batch_stride,
+    mido_les_heads_stride,
+    mido_les_partitions_stride,
+    GROUP_SIZE: tl.constexpr,  # 每个 kv head 携带的 q head 数
+    BLOCK_SEQ: tl.constexpr,  # partition 大小
+    BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,  # pad 后的组行数 (>= GROUP_SIZE, >= 16)
+    BLOCK_DMODEL: tl.constexpr,
+    KV_FP8: tl.constexpr,
+):
+    """Packed stage 1: one program per (batch row, kv head, partition)."""
+    batch_pid = tl.program_id(0)
+    kv_head_pid = tl.program_id(1)
+    seq_block_pid = tl.program_id(2)
+
+    cur_batch_seq_len = tl.load(B_Seqlen + batch_pid)
+    cur_req_idx = tl.load(B_Req_Idx + batch_pid)
+    req_table_offset = b_req_tokens_table + stride_req_to_tokens_b * cur_req_idx
+
+    cur_batch_partition_start_index = seq_block_pid * BLOCK_SEQ
+    cur_batch_partition_end_index = tl.minimum(
+        cur_batch_seq_len, cur_batch_partition_start_index + BLOCK_SEQ
+    )
+    num_blocks = tl.where(
+        cur_batch_partition_end_index - cur_batch_partition_start_index <= 0,
+        0,
+        (cur_batch_partition_end_index - cur_batch_partition_start_index + BLOCK_N - 1) // BLOCK_N,
+    )
+
+    offs_m = tl.arange(0, BLOCK_M)  # 组内 q head 偏移
+    offs_n = cur_batch_partition_start_index + tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    head_ids = kv_head_pid * GROUP_SIZE + offs_m  # [BLOCK_M] 全局 q head 号
+    m_mask = offs_m < GROUP_SIZE
+
+    # Q 一次加载整组 [BLOCK_M, D]; pad 行 load 0, 算出的垃圾行 store 时 mask。
+    q_ptrs = (
+        Q
+        + batch_pid * q_bs_stride
+        + head_ids[:, None] * q_heads_stride
+        + offs_d[None, :] * q_dim_stride
+    )
+    q = tl.load(q_ptrs, mask=m_mask[:, None], other=0.0)
+
+    # K 直接按 [D, BLOCK_N] 转置布局 gather (地址集合与 [BLOCK_N, D] 相同),
+    # 省掉 kernel 内的 tl.trans。
+    k_offs = kv_head_pid * k_heads_stride + offs_d[:, None] * k_dim_stride
+
+    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    d_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+
+    for start_n in range(0, num_blocks, 1):
+        offs_n_new = offs_n + start_n * BLOCK_N
+        n_mask = offs_n_new < cur_batch_partition_end_index
+        k_loc = tl.load(
+            req_table_offset + offs_n_new,
+            mask=n_mask,
+            other=0.0,
+        )
+        kv_row_offs = k_loc * k_bs_stride
+
+        k = tl.load(
+            K + kv_row_offs[None, :] + k_offs, mask=n_mask[None, :], other=0.0
+        )  # [D, BLOCK_N]
+        v = tl.load(
+            V
+            + kv_row_offs[:, None]
+            + kv_head_pid * v_heads_stride
+            + offs_d[None, :] * v_dim_stride,
+            mask=n_mask[:, None],
+            other=0.0,
+        )  # [BLOCK_N, D]
+
+        if KV_FP8:
+            # e4m3 字节升到 fp32 (欠 2**8, 已折入 scale), 再降到 q 的 dtype
+            # 上 tensor core; fp8 的 3 bit 尾数在 fp16/bf16 下精确表示。
+            k = dequant_fp8e4m3(k).to(q.dtype)
+            v = dequant_fp8e4m3(v).to(q.dtype)
+
+        qk = tl.dot(q, k)  # [BLOCK_M, BLOCK_N] fp32 累加
+        qk = qk * (qk_scale * k_scale)
+        qk = tl.where(n_mask[None, :], qk, float("-inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))  # [BLOCK_M]
+        p = tl.exp(qk - m_ij[:, None])
+        alpha = tl.exp(m_i - m_ij)
+        d_i = d_i * alpha + tl.sum(p, axis=1)
+        acc = acc * alpha[:, None] + tl.dot(p.to(q.dtype), v)
+        m_i = m_ij
+
+    off_mid_o = (
+        batch_pid * mido_batch_stride
+        + head_ids * mido_heads_stride
+        + seq_block_pid * mido_partitions_stride
+    )
+    off_mid_o_les = (
+        batch_pid * mido_les_batch_stride
+        + head_ids * mido_les_heads_stride
+        + seq_block_pid * mido_les_partitions_stride
+    )
+
+    # 越界分区不写 (与逐头版同一理由: triton 的 if 会谓词化整个 store)。
+    need_store = tl.where(num_blocks == 0, 0, 1)
+    for _ in range(0, need_store, 1):
+        tl.store(
+            Mid_O + off_mid_o[:, None] + offs_d[None, :] * mido_dim_stride,
+            acc * v_scale / d_i[:, None],
+            mask=m_mask[:, None],
+        )
+        tl.store(
+            Mid_O_LogExpSum + off_mid_o_les,
+            m_i + tl.log(d_i),
+            mask=m_mask,
+        )
+
+
+@torch.no_grad()
+def flash_decode_packed_stage1(
+    q,
+    k,
+    v,
+    qk_scale,
+    b_req_tokens_table,
+    b_req_idx,
+    b_seq_len,
+    max_actual_seq_len,
+    mid_o,
+    mid_o_logexpsum,
+    PARTITION_SIZE,
+    group_size,
+    k_scale=1.0,
+    v_scale=1.0,
+    kv_fp8=False,
+):
+    """Launch packed stage 1; outputs land in the same Mid_O layout as stage 1."""
+    batchs, num_heads, head_dim = q.shape
+    num_kv_heads = num_heads // group_size
+    grid = (
+        batchs,
+        num_kv_heads,
+        triton.cdiv(max_actual_seq_len, PARTITION_SIZE),
+    )
+    _flash_decoding_packed_stage1_kernel[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        k_scale,
+        v_scale,
+        b_req_tokens_table,
+        b_req_idx,
+        b_seq_len,
+        mid_o,
+        mid_o_logexpsum,
+        *b_req_tokens_table.stride(),
+        *q.stride(),
+        *k.stride(),
+        *v.stride(),
+        *mid_o.stride(),
+        *mid_o_logexpsum.stride(),
+        GROUP_SIZE=group_size,
+        BLOCK_SEQ=PARTITION_SIZE,
+        BLOCK_N=_PACKED_BLOCK_N,
+        BLOCK_M=_PACKED_BLOCK_M,
+        BLOCK_DMODEL=head_dim,
+        KV_FP8=kv_fp8,
+        num_warps=4,
+        num_stages=2,
+    )

@@ -31,9 +31,12 @@ from tests.distributed.tp_harness import needs_gpus, run_on_tp_ranks
 TOKENS = 2048
 HIDDEN = 2048
 
+#: Forwards issued back to back before the overlap assertion.
+_ITERATIONS = 5
+
 
 def _payload_overlap_evidence(rank: int) -> dict:
-    """Run one chunked row-parallel forward and return its overlap numbers."""
+    """Run chunked row-parallel forwards; return the last iteration's overlap."""
     os.environ[COMM_OVERLAP_ENV] = "1"
     os.environ[L3_CHUNKS_ENV] = "2"
     os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
@@ -50,7 +53,10 @@ def _payload_overlap_evidence(rank: int) -> dict:
     torch.cuda.synchronize()
     CommStreamPool.reset()  # a fresh pool carries a fresh, empty timeline
 
-    layer.forward(x)
+    # Back-to-back forwards saturate the queue: the overlap window is set by
+    # the device, not by host enqueue jitter around a single launch.
+    for _ in range(_ITERATIONS):
+        layer.forward(x)
     torch.cuda.synchronize()
 
     pool = CommStreamPool.for_device(device)

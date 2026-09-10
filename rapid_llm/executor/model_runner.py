@@ -32,10 +32,14 @@ from ..models.registry import ModelRegistry, ModelSpec
 from ..utils.logger import get_logger
 from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
+    _PREFILL_GRAPH_ENV,
+    PREFILL_GRAPH_RESERVED_BYTES,
+    PREFILL_GRAPH_RESERVED_BYTES_EP,
     DEFAULT_BATCH_SIZES,
     DEFAULT_SEQ_LEN_BUCKETS,
     TP_GRAPH_PARITY_ATOL,
     CUDAGraphManager,
+    PrefillGraphManager,
     estimate_capture_workspace,
 )
 from .kv_cache_manager import KVCacheManager, MemoryProfiler
@@ -101,6 +105,16 @@ class ModelRunner:
                 if use_cuda_graph
                 else 0
             )
+            if use_cuda_graph and os.environ.get(_PREFILL_GRAPH_ENV, "1") != "0":
+                # Prefill grids capture lazily too; their pools come out of the
+                # same margin, so withhold a flat allowance for them up front.
+                # EP pins a dispatch workspace per captured grid, so its
+                # allowance matches the smaller token ceiling it gets.
+                reserved += (
+                    PREFILL_GRAPH_RESERVED_BYTES_EP
+                    if expert_parallel_enabled()
+                    else PREFILL_GRAPH_RESERVED_BYTES
+                )
             profiler = MemoryProfiler(
                 num_layers=self.num_layers,
                 kv_row=self.kv_row,
@@ -139,6 +153,9 @@ class ModelRunner:
 
         # Set by :meth:`enable_cuda_graph`; when set, :meth:`forward` replays graphs.
         self._graph_manager: CUDAGraphManager | None = None
+        # Prefill-grid graphs, same discipline as decode; set by
+        # :meth:`enable_cuda_graph` alongside the decode manager.
+        self._prefill_graphs: PrefillGraphManager | None = None
         # Set by :meth:`enable_slot_kv_cache` for continuous batching.
         self._slot_batch: SlotBatch | None = None
 
@@ -412,6 +429,38 @@ class ModelRunner:
 
         self._graph_manager = manager
 
+        if os.environ.get(_PREFILL_GRAPH_ENV, "1") != "0":
+            # Prefill grids capture lazily on first use: the grid is exact-match
+            # (request count x chunk width), so startup cannot know the shapes.
+            # Each capture is gated on a graph-vs-eager parity check run against
+            # the live step that triggered it.
+            self._prefill_graphs = PrefillGraphManager(
+                self.model,
+                kv_buffer=self.kv_cache_manager.gpu_kv_buffer,
+                b_req_tokens_table=self.b_req_tokens_table,
+                device=self.device,
+            )
+
+    def try_replay_prefill(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        logits_positions: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Replay the captured prefill graph for this grid shape, if one exists.
+
+        The metadata must already be installed by ``begin_prefill``; this only
+        copies it into the graph's persistent buffers. Returns ``None`` for an
+        uncaptured shape (or when the feature is off), and the caller runs the
+        eager pass as before.
+        """
+        manager = self._prefill_graphs
+        if manager is None:
+            return None
+        return manager.try_replay(
+            input_ids, position_ids, logits_positions, self.atten_info
+        )
+
     def _tp_graphs_are_safe(self, manager: CUDAGraphManager, captured: bool) -> bool:
         """Whether this rank's captured graphs may serve traffic. Same answer everywhere.
 
@@ -479,6 +528,9 @@ class ModelRunner:
         and ``destroy_process_group`` would wait on them forever. Eager engines
         (no manager) pass through untouched.
         """
+        if self._prefill_graphs is not None:
+            self._prefill_graphs.discard()
+            self._prefill_graphs = None
         if self._graph_manager is not None:
             self._graph_manager.discard()
             self._graph_manager = None

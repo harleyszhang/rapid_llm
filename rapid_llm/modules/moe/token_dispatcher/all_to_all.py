@@ -21,6 +21,7 @@ import torch
 
 from ....batch_overlap import CommStreamPool
 from ....distributed.parallel_state import get_ep_group
+from ....kernels.ops.moe.ep_dispatch import ep_combine, ep_dispatch_place, ep_local_ids
 from ..utils import MoeA2ABackend
 from .base import (
     BaseDispatcher,
@@ -28,6 +29,15 @@ from .base import (
     DispatchOutputFormat,
     register_dispatcher,
 )
+
+#: Default per-destination capacity headroom over the mean load (n/ep_size);
+#: ``None`` = unbounded cap == n. Measured on this 2-GPU NVLink box (ep2,
+#: graph): decode a2a messages are 0.85 vs 1.0 MB, a ~0.1 us/layer bandwidth
+#: delta dwarfed by the collective's latency floor -- and NCCL's graph-captured
+#: algorithm choice for the smaller message ran 4-9% *slower* end to end
+#: (bs16-2k TPOT 17.1 vs 16.5 ms). Capacity pays off where the wire is
+#: bandwidth-bound (high ep_size, big batches, slower interconnect).
+_DEFAULT_CAPACITY_FACTOR: float | None = None
 
 
 @dataclass
@@ -39,7 +49,9 @@ class DispatchHandle:
         top_k: Routing slots per token.
         cap: Per-destination capacity of the exchange (``rows * top_k``).
         ep_size: Ranks in the EP group; the buffers are ``ep_size * cap`` rows.
-        order: ``[ep*cap]`` permutation — flat slot index of each sorted row.
+        order: ``[ep*cap]`` permutation — flat slot index of each sorted row;
+            ``None`` when the fused placement path ran (it needs no
+            permutation: combine gathers by ``send_pos`` directly).
         send_pos: ``[n]`` positions of the sorted rows in the send buffer.
         flat_weights: ``[n]`` routing weights, kept on the sender.
         recv_x / recv_ids: Dispatch receive buffers (rows and expert ids).
@@ -51,7 +63,7 @@ class DispatchHandle:
     top_k: int
     cap: int
     ep_size: int
-    order: torch.Tensor
+    order: torch.Tensor | None
     send_pos: torch.Tensor
     flat_weights: torch.Tensor
     recv_x: torch.Tensor
@@ -98,11 +110,16 @@ class AllToAllDispatcher(BaseDispatcher):
             ``[0, num_experts)``).
         num_local_experts: Experts this rank owns.
         expert_offset: Global id of this rank's first expert.
-        capacity_factor: Multiplicative slack over the mean load. Opt-in:
-            ``None`` (the default, from an unset ``RAPID_EP_CAPACITY_FACTOR``)
-            keeps ``cap == n`` -- no drops, no crash -- so the safe win is the
-            -1 GEMM skip alone; set it to bound the padded buffer at
-            ``mean * factor`` (pays off as ep_size grows).
+        capacity_factor: Multiplicative headroom over the mean load,
+            sglang's DeepEP-LL ``num_max_dispatch_tokens_per_rank`` sizing:
+            ``cap = min(n, ceil(n/ep_size * factor) + slack)`` instead of the
+            rows*top_k worst case (which pads the wire to ep_size x the mean).
+            Opt-in via ``RAPID_EP_CAPACITY_FACTOR``: measured ep2+graph decode
+            is latency-bound (see ``_DEFAULT_CAPACITY_FACTOR``), so the default
+            ``None`` keeps ``cap == n``. ``<= 0`` (or a non-numeric value)
+            also restores the unbounded cap. Slots past the cap drop to the
+            trash row -- the drop-is-a-feature semantics every capacity-bound
+            EP stack (DeepEP LL, vLLM EPMoE ``capacity_ratio``) ships.
         capacity_slack: Additive rows over ``ceil(mean * factor)`` so tiny
             batches keep ``cap == n``; defaults to ``RAPID_EP_CAPACITY_SLACK`` (8).
     """
@@ -123,27 +140,41 @@ class AllToAllDispatcher(BaseDispatcher):
         self.num_local_experts = num_local_experts
         self.expert_offset = expert_offset
         # Receive capacity = mean load (n / ep_size) * factor + slack, sglang's
-        # DeepEP sizing rather than the rows*top_k worst case. Opt-in: unset it
-        # (the default) keeps cap == n -- no drops, no crash -- so the safe win is
-        # the -1 GEMM skip alone. When set, the multiplicative factor is the
-        # load-imbalance headroom; the additive slack keeps tiny (decode) batches
-        # at cap == n. Both are host constants, so cap stays a pure function of
-        # (rows, top_k, ep_size) and CUDA-graph safe. The comm/buffer savings
-        # scale with ep_size (mean is n/ep_size), so this pays off most at high
-        # EP degree; at ep_size 2 real routing skew leaves little safe headroom.
+        # DeepEP-LL sizing rather than the rows*top_k worst case. The mean and
+        # the slack are host constants, so cap stays a pure function of
+        # (rows, top_k, ep_size) and CUDA-graph safe. Opt-in (the measured
+        # ep2 wire is latency-bound; see ``_DEFAULT_CAPACITY_FACTOR``): unset
+        # keeps cap == n. Load imbalance beyond the factor drops past-cap
+        # slots to the trash row (zero on combine): with a static NCCL exchange
+        # and graph capture there is no room for DeepEP-normal's dynamic
+        # per-expert counts, so the tight cap plus bounded drops is the
+        # LL-mode trade. Raise the factor for skewed routers; ``<= 0`` restores
+        # the unbounded cap == n.
         env_factor = os.environ.get("RAPID_EP_CAPACITY_FACTOR")
-        self.capacity_factor = (
-            capacity_factor
-            if capacity_factor is not None
-            else float(env_factor)
-            if env_factor is not None
-            else None
-        )
+        if capacity_factor is not None:
+            factor: float | None = capacity_factor
+        elif env_factor is not None:
+            try:
+                factor = float(env_factor)
+            except ValueError:  # e.g. "none"/"off"
+                factor = None
+        else:
+            factor = _DEFAULT_CAPACITY_FACTOR
+        self.capacity_factor = factor if factor is None or factor > 0 else None
         self.capacity_slack = (
             capacity_slack
             if capacity_slack is not None
             else int(os.environ.get("RAPID_EP_CAPACITY_SLACK", "8"))
         )
+        # Fused Triton placement/combine (one kernel per phase instead of the
+        # aten sort/scatter chain). Only the unbounded-cap path is fusible —
+        # atomic placement cannot say *which* slots a cap would drop — so the
+        # flag is always consulted together with ``capacity_factor is None``.
+        self._fused = os.environ.get("RAPID_EP_FUSED_DISPATCH", "1") != "0"
+        # combine_b's unit weights are constant per (rows, dtype, device); the
+        # cache is warm from the pre-capture eager warmup, so graphs never
+        # allocate it. Saves a fill kernel per layer per step.
+        self._unit_cache: dict[tuple[int, torch.dtype, torch.device], torch.Tensor] = {}
 
     # ------------------------------------------------------------------ #
     # dispatch: tokens out, per-expert batches in
@@ -189,17 +220,16 @@ class AllToAllDispatcher(BaseDispatcher):
                 f"groups of {self.num_local_experts}"
             )
         # Receive capacity per destination rank: the mean load grown by a slack
-        # factor, sglang's DeepEP sizing rather than the rows*top_k worst case.
-        # A rank almost never owns every routing slot, so padding the exchange
-        # to the worst case burns all-to-all bandwidth and, once the pads reach
-        # the grouped GEMM as -1 rows, still costs the align a scan over dead
-        # slots. mean+slack keeps the useful work (valid tokens * top_k)
-        # unchanged while shrinking the padded buffer that crosses the wire.
-        # cap is a pure function of (n, ep_size) -- static per (rows, top_k) --
-        # so the path stays CUDA-graph capturable. Opt-in: an unset factor keeps
-        # cap == n (no drops, no crash), so the safe default win is the -1 GEMM
-        # skip alone; setting the factor trades a small drop risk for a smaller
-        # padded buffer, which pays off as ep_size (and thus mean = n/ep_size) grows.
+        # factor, sglang's DeepEP-LL sizing rather than the rows*top_k worst
+        # case. A rank almost never owns every routing slot, so padding the
+        # exchange to the worst case burns all-to-all bandwidth at ep_size x
+        # the mean and, once the pads reach the grouped GEMM as -1 rows, still
+        # costs the align a scan over dead slots. mean+slack keeps the useful
+        # work (valid tokens * top_k) unchanged while shrinking the padded
+        # buffer that crosses the wire. cap is a pure function of (n, ep_size)
+        # -- static per (rows, top_k) -- so the path stays CUDA-graph
+        # capturable. Overflow past the cap drops to the trash row; see
+        # :meth:`_detect_overflow` for the opt-in visibility knobs.
         if self.capacity_factor is None:
             cap = n
         else:
@@ -209,46 +239,81 @@ class AllToAllDispatcher(BaseDispatcher):
         buf = ep_size * cap
 
         flat_ids = topk_ids.reshape(-1)
-        dest = torch.div(flat_ids, self.num_local_experts, rounding_mode="floor")
-        # Stable sort keeps slots of one token in routing order within a
-        # destination segment — deterministic across ranks.
-        sorted_dest, order = torch.sort(dest, stable=True)
-        # Position of each row inside its destination segment: sort is stable,
-        # so segment start = first index with the same dest (searchsorted left).
-        seg_start = torch.searchsorted(sorted_dest, sorted_dest, side="left")
-        pos_in_seg = torch.arange(n, device=x.device) - seg_start
-        # Rows past their destination's cap spill to a trash slot (the extra row
-        # of an over-allocated buffer) instead of corrupting the next segment;
-        # the trash row is sliced off before the exchange, so those tokens never
-        # cross the wire and combine reads a zero back for them.
-        keep = pos_in_seg < cap
-        send_pos = torch.where(keep, sorted_dest * cap + pos_in_seg, buf)
-        self._detect_overflow(keep, cap, rows, k, ep_size, x.device)
+        # x and ids cross in ONE exchange: a per-row byte layout [hidden*esize
+        # | 4B id | pad to 16B]. A second all_to_all for the ids alone would
+        # carry ~1 KB yet pay the same latency floor as the 1 MB payload
+        # (~16-25 us in-graph on this box), and it fires once per layer.
+        # 16B row alignment keeps both views usable for vectorised access.
+        esize = x.element_size()
+        row_bytes = hidden * esize
+        stride_bytes = row_bytes + (16 - row_bytes % 16) % 16 + 16
+        if (
+            self._fused
+            and self.capacity_factor is None
+            and ep_size <= 32
+            and x.is_cuda
+            and x.stride(1) == 1
+        ):
+            # Atomic-ticket placement (kernels.ops.moe.ep_dispatch): two
+            # kernels — prep (counter clear + pad-id fill) and place&scatter —
+            # do the sort/searchsorted/where chain and both indexed scatters'
+            # work. cap == n here, so no slot overflows and the buffer needs
+            # no trash row; pad rows keep the -1 id from the prep kernel and
+            # their data is never read, so the payload is left uninitialised.
+            payload = torch.empty(buf * stride_bytes, dtype=torch.uint8, device=x.device)
+            rows2d = payload.view(buf, stride_bytes)
+            send_pos = ep_dispatch_place(
+                x,
+                topk_ids,
+                payload.view(x.dtype),
+                rows2d[:, row_bytes : row_bytes + 4].view(torch.int32).squeeze(-1),
+                num_local=self.num_local_experts,
+                cap=cap,
+                ep_size=ep_size,
+            )
+            order = None
+        else:
+            dest = torch.div(flat_ids, self.num_local_experts, rounding_mode="floor")
+            # Stable sort keeps slots of one token in routing order within a
+            # destination segment — deterministic across ranks.
+            sorted_dest, order = torch.sort(dest, stable=True)
+            # Position of each row inside its destination segment: sort is stable,
+            # so segment start = first index with the same dest (searchsorted left).
+            seg_start = torch.searchsorted(sorted_dest, sorted_dest, side="left")
+            pos_in_seg = torch.arange(n, device=x.device) - seg_start
+            # Rows past their destination's cap spill to a trash slot (the extra row
+            # of an over-allocated buffer) instead of corrupting the next segment;
+            # the trash row is sliced off before the exchange, so those tokens never
+            # cross the wire and combine reads a zero back for them.
+            keep = pos_in_seg < cap
+            send_pos = torch.where(keep, sorted_dest * cap + pos_in_seg, buf)
+            self._detect_overflow(keep, cap, rows, k, ep_size, x.device)
 
-        # Pad slots carry -1 (fused_moe drops any id outside [0, num_local))
-        # and zero data: they cross the wire but never reach the grouped GEMM,
-        # and combine gathers back only the ``send_pos`` rows.
-        send_x = torch.zeros(buf + 1, hidden, dtype=x.dtype, device=x.device)
-        send_ids = torch.full((buf + 1,), -1, dtype=flat_ids.dtype, device=x.device)
-        # ``order[i]`` is the flat slot (token*k + j) placed at sorted position
-        # ``i``; // k folds it back to its token row.
-        send_x[send_pos] = x[order // k]
-        send_ids[send_pos] = flat_ids[order]
-        # Drop the trash row; the exchange sees only the ep_size*cap real slots.
-        send_x = send_x[:buf]
-        send_ids = send_ids[:buf]
+            # Pad slots carry -1 (fused_moe drops any id outside [0, num_local))
+            # and zero data: they cross the wire but never reach the grouped GEMM,
+            # and combine gathers back only the ``send_pos`` rows.
+            payload = torch.zeros((buf + 1) * stride_bytes, dtype=torch.uint8, device=x.device)
+            rows2d = payload.view(buf + 1, stride_bytes)
+            send_x = rows2d[:, :row_bytes].view(x.dtype)
+            send_ids = rows2d[:, row_bytes : row_bytes + 4].view(torch.int32)
+            # ``order[i]`` is the flat slot (token*k + j) placed at sorted position
+            # ``i``; // k folds it back to its token row.
+            send_x[send_pos] = x[order // k]
+            send_ids[send_pos] = flat_ids[order].to(torch.int32).unsqueeze(-1)
+        # (Fused path: the buffer holds exactly the ep_size*cap real slots.)
+        send_flat = payload[: buf * stride_bytes]
 
         pool = CommStreamPool.for_device(x.device)
-        recv_x = torch.empty_like(send_x)
-        recv_ids = torch.empty_like(send_ids)
-        events = [
-            e
-            for e in (
-                pool.all_to_all_async(recv_x, send_x, group=group, label="ep.dispatch.x"),
-                pool.all_to_all_async(recv_ids, send_ids, group=group, label="ep.dispatch.ids"),
-            )
-            if e is not None
-        ]
+        recv_flat = torch.empty_like(send_flat)
+        event = pool.all_to_all_async(
+            recv_flat, send_flat, group=group, label="ep.dispatch"
+        )
+        recv_rows = recv_flat.view(buf, stride_bytes)
+        # recv_x keeps a row stride of stride_bytes/esize elements; the MoE
+        # GEMM only requires a contiguous last dim, so no copy is needed.
+        recv_x = recv_rows[:, :row_bytes].view(x.dtype)
+        recv_ids = recv_rows[:, row_bytes : row_bytes + 4].view(torch.int32).squeeze(-1)
+        events = [event] if event is not None else []
         return DispatchHandle(
             rows=rows,
             top_k=k,
@@ -272,6 +337,21 @@ class AllToAllDispatcher(BaseDispatcher):
             real ones in :meth:`combine_b`.
         """
         self._fence(handle)
+        buf = handle.recv_ids.shape[0]
+        if handle.order is None:
+            # Fused placement ran: one rebase kernel replaces the sub/compare/
+            # and/where chain, and the unit weights come from the cache.
+            local_ids = ep_local_ids(
+                handle.recv_ids,
+                expert_offset=self.expert_offset,
+                num_local=self.num_local_experts,
+            ).reshape(-1, 1)
+            key = (buf, handle.recv_x.dtype, handle.recv_x.device)
+            ones = self._unit_cache.get(key)
+            if ones is None:
+                ones = torch.ones(buf, 1, dtype=handle.recv_x.dtype, device=handle.recv_x.device)
+                self._unit_cache[key] = ones
+            return handle.recv_x, local_ids, ones
         # A real id always lands in [0, num_local) after the shift; anything
         # outside the window is a pad row, mapped back to -1 for fused_moe to
         # skip. Clamping to expert 0 instead would run every pad row as work.
@@ -308,6 +388,18 @@ class AllToAllDispatcher(BaseDispatcher):
         """
         self._fence(handle)
         assert handle.recv_out is not None, "combine_b before combine_a"
+        if handle.order is None:
+            # Fused placement: one gather-weight-sum kernel replaces the
+            # cat/gather/scatter/mul/reduce chain. cap == n means no slot
+            # overflowed, so there is no trash row to absorb.
+            handle.events.clear()
+            return ep_combine(
+                handle.recv_out,
+                handle.send_pos,
+                handle.flat_weights,
+                handle.rows,
+                handle.top_k,
+            )
         # A trailing zero row absorbs the trash slot: dropped (over-capacity)
         # rows carry ``send_pos == ep_size*cap``, so their gather lands on this
         # zero and contributes nothing. When nothing overflowed no send_pos hits
@@ -377,15 +469,20 @@ class AllToAllDispatcher(BaseDispatcher):
     def _detect_overflow(
         self, keep: torch.Tensor, cap: int, rows: int, k: int, ep_size: int, device: torch.device
     ) -> None:
-        """Raise if the mean+slack capacity dropped any routed slot.
+        """Optionally surface capacity drops: warn or raise, never silent.
 
-        A silent drop biases the routed output, so overflow is a hard error the
-        operator fixes by raising ``capacity_factor``/``capacity_slack``. The
-        check reads a CUDA predicate (``keep.all()``), a host sync that is
-        illegal during graph capture -- so it is skipped there. In practice the
-        default cap clears balanced routing with room to spare (see the module
-        docstring); capture replays a shape already exercised in eager warmup.
+        Overflow past the cap drops to the trash row by design (zero on
+        combine) -- the trade every capacity-bound EP stack ships. Reading the
+        ``keep`` predicate costs a host sync eager mode cannot pay per layer,
+        so visibility is opt-in: ``RAPID_EP_CAPACITY_WARN=1`` prints a
+        measurement-only warning, ``RAPID_EP_CAPACITY_STRICT=1`` raises so a
+        skewed router cannot silently lose slots. Both skip graph capture
+        (replays never run Python) and the impossible case ``cap >= n``.
         """
+        strict = os.environ.get("RAPID_EP_CAPACITY_STRICT", "0") == "1"
+        warn = os.environ.get("RAPID_EP_CAPACITY_WARN", "0") == "1"
+        if not (strict or warn) or cap >= rows * k:
+            return
         if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
             return
         if bool(keep.all()):
@@ -396,12 +493,6 @@ class AllToAllDispatcher(BaseDispatcher):
             f"(rows={rows} top_k={k} ep_size={ep_size} factor={self.capacity_factor} "
             f"slack={self.capacity_slack}); raise RAPID_EP_CAPACITY_FACTOR/SLACK to fit the load"
         )
-        # RAPID_EP_CAPACITY_WARN turns the hard error into a measurement-only
-        # warning: the graph-capture warmup routes degenerate all-zero tokens
-        # (every token to the same experts, ~all load on one rank), which is not
-        # a real routing pattern -- warn mode lets a benchmark run past it and
-        # observe how often *real* inference overflows a tight cap.
-        if os.environ.get("RAPID_EP_CAPACITY_WARN", "0") == "1":
-            print(f"[ep-capacity-warn] {msg}", file=sys.stderr, flush=True)
-            return
-        raise RuntimeError(msg)
+        if strict:
+            raise RuntimeError(msg)
+        print(f"[ep-capacity-warn] {msg}", file=sys.stderr, flush=True)

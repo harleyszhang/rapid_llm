@@ -418,6 +418,18 @@ class ModelWorker:
             prepared.event, prepared.input_ids, prepared.positions, prepared.logits_positions
         )
         wants_prompt = any(k is not None for k in plan.prompt_logprobs)
+        if not wants_prompt:
+            # A captured grid replays the whole prefill for a few buffer
+            # copies; the eager pass below pays its ~50 ms of host launches on
+            # every first token. Prompt-logprob passes need the full-grid
+            # logits a capture does not produce, so they stay eager.
+            replayed = self._runner.try_replay_prefill(
+                prepared.input_ids, prepared.positions, prepared.logits_positions
+            )
+            if replayed is not None:
+                return self._pick(replayed, plan.sampled, len(plan.slots)), (None,) * len(
+                    plan.slots
+                )
         with self.timeline.region("forward.prefill", "compute"):
             # Prompt scoring needs every column's logits, so the gather is
             # skipped and lm_head projects the whole grid (paid in GEMM width).

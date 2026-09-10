@@ -217,6 +217,46 @@ def test_small_all_reduce_does_not_switch_collectives_after_p2p_error(monkeypatc
     ps.abandon_parallel()
 
 
+def _warmup_probe_worlds(rank: int) -> list[int]:
+    """The world size of every group ``warmup_collectives`` issues a probe on."""
+    import torch.distributed as dist
+
+    worlds: list[int] = []
+    real_all_reduce = dist.all_reduce
+
+    def spy(tensor, *, op=None, group=None):
+        real_all_reduce(tensor, op=op, group=group)
+        worlds.append(dist.get_world_size(group))
+
+    dist.all_reduce = spy
+    try:
+        ps.warmup_collectives()
+    finally:
+        dist.all_reduce = real_all_reduce
+    return worlds
+
+
+def test_warmup_collectives_probes_every_group_the_grid_built():
+    """TP, the DP-attention group and the grid-wide EP group each get one probe.
+
+    Under DP-attention the module owns three NCCL communicators, and a CUDA-graph
+    capture may hold the *first* collective of any of them — the failure
+    :func:`warmup_collectives` exists to prevent. A TP-only world must keep
+    probing exactly one group.
+    """
+    tp_only = run_on_tp_ranks(_warmup_probe_worlds, tp_size=2, backend="gloo")
+    assert tp_only == [[2], [2]]
+    both = run_on_tp_ranks(
+        _warmup_probe_worlds,
+        tp_size=2,
+        dp_size=2,
+        backend="gloo",
+        enable_expert_parallel=True,
+        enable_dp_attention=True,
+    )
+    assert both == [[2, 2, 4]] * 4
+
+
 # --------------------------------------------------------------------------- #
 # Two-rank gloo collectives: the tensor primitives over a real process group.
 # --------------------------------------------------------------------------- #

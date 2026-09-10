@@ -128,7 +128,7 @@ cap = max(manager.batch_sizes, default=0) if manager else max(DEFAULT_BATCH_SIZE
 - **TP2 多特性组合**：受 §4 的挂起阻塞，只验证了 `cuda_graph` 单特性。
 - **TP4+/DP4+**：本机仅 2 卡。
 - **DP 下的特性组合**：本轮未跑（DP 与特性正交，DP 侧性能已在
-  [`qk_norm`](../../qk_norm/README.md) §9 覆盖）
+  [`qk_norm`](../../qk_norm/README.md) §9 覆盖）。
 
 ## 7. 归档
 

@@ -225,7 +225,6 @@ def fused_moe(
     swiglu_limit=float("inf"),
     mxfp4=False,
     activation_scheme: str | None = None,
-    down_overlap_args=None,
 ) -> torch.Tensor:
     def project(x, weights, scales, zeros, expert):
         weight = weights[expert]

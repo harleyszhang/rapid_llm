@@ -223,7 +223,7 @@ Autotune searches candidate tile shapes offline and stores the best configuratio
 
 For eligible TP=2 small messages, the P2P all-reduce path reduces collective launch overhead and remains graph-capturable. The v0.12 A10 measurements reported 15–25 µs for the NCCL ring path and 5–8 µs for the P2P path; applicability depends on payload, topology, NCCL, and driver versions.
 
-`fused_allreduce_rmsnorm` is a blocking composition API, not an in-collective fusion claim. The fused elementwise stage combines residual addition and RMSNorm after the reduction while preserving the TBO and L3 communication schedulers. On the recorded TP=2 A10 shapes, baseline and fused paths were both about 4.411 ms because communication dominated; no speedup was claimed. Current design, tests, and logs are in [release v0.12.0](release-v0.12.0.md) and `docs/benchmark_logs/fused_allreduce_rmsnorm_*.json`.
+`fused_allreduce_rmsnorm` is a blocking composition API, not an in-collective fusion claim. The fused elementwise stage combines residual addition and RMSNorm after the reduction while preserving the TBO and L3 communication schedulers. On the recorded TP=2 A10 shapes, baseline and fused paths were both about 4.411 ms because communication dominated; no speedup was claimed. Current design, tests, and logs are in [release v0.12.0](release-v0.12.0.md) and `docs/benchmark_logs/kernels/fused_allreduce_rmsnorm_*.json`.
 
 ## Quantization
 
@@ -245,7 +245,7 @@ quantisation launches land on an already launch-bound layer. NVFP4 is weight-onl
 (sm90 has no fp4 MMA), so it buys memory and costs time. Both, with the measured
 numbers behind them, are in [quantization.md](quantization.md); the full
 2×H100 matrix — kernel, offline, online, TP/DP/graph/KV — is in
-[benchmark_logs/quant_matrix_20260901.md](benchmark_logs/quant_matrix_20260901.md).
+[benchmark_logs/quantization/quant_matrix_20260901.md](benchmark_logs/quantization/quant_matrix_20260901.md).
 
 **FP8 checkpoint** (auto-detected from `config.json`):
 
@@ -297,7 +297,7 @@ How to run Benchmarks:
 ```bash
 # Single model
 python benchmarks/engine/run.py quant --model-dir /data/shared/llm_weights/Qwen3-0.6B \
-    --schemes fp16 int8 fp8 --json docs/benchmark_logs/bench_quant_Qwen3-0.6B.json
+    --schemes fp16 int8 fp8 --json docs/benchmark_logs/quantization/quant_Qwen3-0.6B.json
 
 # All representative models (Qwen3-0.6B, 0.6B-FP8, VL-4B, 30B-MoE)
 python benchmarks/engine/run.py quant --all
@@ -395,7 +395,7 @@ The consequence: requests sharing a system prompt prefill it once; later request
 
 fp8 KV cache (e4m3 + uint8 container + per-tensor scale) halves KV memory — but the quantisation error must be bounded. `tests/kernels/test_fp8_kv_accuracy.py` is the gate: 8 test scenarios covering decode/prefill shapes, heavy-tailed distributions, near-zero values, independent K/V quantisation, and scale sensitivity. The gate requires rel_err < 5% (normal) / < 10% (heavy-tailed) and cosine_sim > 0.999 — all 8 pass.
 
-End-to-end benchmark (`benchmarks/bench_fp8_kv.py`): fp16 0.784s vs fp8 0.812s — **3.6% throughput cost for 2× KV capacity**. Evidence in `docs/benchmark_logs/fp8_kv_o14_*.json`.
+End-to-end benchmark (`benchmarks/bench_fp8_kv.py`): fp16 0.784s vs fp8 0.812s — **3.6% throughput cost for 2× KV capacity**. Evidence in `docs/benchmark_logs/quantization/fp8_kv_o14_*.json`.
 
 ## Ngram Speculative Decoding (v0.12)
 
@@ -405,7 +405,7 @@ The proposer (`rapid_llm/engine/ngram_proposer.py`) searches from the longest n-
 
 Enabled via `LITE_LLAMA_SPECULATE=1` (off by default). The worker gains an `execute_verify` method that returns full `[tokens, vocab]` logits alongside sampled tokens; `ModelInput.return_logits` controls the path.
 
-Repetitive workload (Qwen3-0.6B, batch=4, gen=32): steps 32→11 (**-65.6%**), wall time 0.153s→0.083s (**1.85× speedup**). Evidence in `docs/benchmark_logs/speculative_o5_*.json`.
+Repetitive workload (Qwen3-0.6B, batch=4, gen=32): steps 32→11 (**-65.6%**), wall time 0.153s→0.083s (**1.85× speedup**). Evidence in `docs/benchmark_logs/kernels/speculative_o5_*.json`.
 
 ## Observability
 
@@ -436,7 +436,7 @@ curl localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
   "max_tokens": 8, "logprobs": 5, "prompt_logprobs": 5}'
 ```
 
-Cost, measured with `python benchmarks/serving/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`benchmark_logs/observability_v0.10.json`](benchmark_logs/observability_v0.10.json).
+Cost, measured with `python benchmarks/serving/bench_observability.py` (A10, Qwen3-0.6B, batch=16, gen=128): `logprobs=5` moves TPOT 4.75 → 5.35 ms (throughput -10.4%) because each step adds a `log_softmax` + `topk` + a device-to-host copy; `prompt_logprobs=5` moves TTFT 23.3 → 32.0 ms and costs -1.5% throughput, since it only touches prefill. Log: [`benchmark_logs/kernels/observability_v0.10.json`](benchmark_logs/kernels/observability_v0.10.json).
 
 ### Metrics and Tracing
 
