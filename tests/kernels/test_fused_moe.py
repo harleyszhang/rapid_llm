@@ -624,6 +624,74 @@ def test_fused_moe_a8_inline_quant_matches_separate(mode, monkeypatch):
     torch.testing.assert_close(inline, separate, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("entry", ["weight_only", "w8a8_fp8", "w8a8_int8"])
+def test_fused_moe_swiglu_limit_reaches_every_entry_point(entry):
+    """``swiglu_limit`` clamps the activation on all three MoE entry points.
+
+    Regression test. The W8A8 rows had no ``swiglu_limit`` parameter and their
+    shared body hardcoded ``LIMIT=inf``, so a DeepSeek-V4 quantised to W8A8
+    ran plain-silu routed experts and quietly disagreed with its own fp16
+    self. The spec test pins that the parameter *exists*; this one pins that
+    it *acts*. ``limit=0.75`` sits inside the standard-normal gate/up range,
+    so a large share of slots clamp and a dropped bound cannot hide in
+    tolerance noise.
+    """
+    hidden, inter, num_experts, top_k = 256, 128, 8, 2
+    limit = 0.75
+    dtype = torch.float16
+    torch.manual_seed(0)
+    x = torch.randn(33, hidden, device="cuda", dtype=dtype)
+    w1 = torch.randn(num_experts, 2 * inter, hidden, device="cuda") / hidden**0.5
+    w2 = torch.randn(num_experts, hidden, inter, device="cuda") / inter**0.5
+    ids = torch.rand(33, num_experts, device="cuda").topk(top_k, dim=-1).indices.to(torch.int32)
+    weights = torch.softmax(torch.randn(33, top_k, device="cuda"), dim=-1).to(dtype)
+
+    if entry == "weight_only":
+        call, kw = fused_moe, {}
+        # The weight-only path wants the experts in the activation dtype; the
+        # quantised branches below quantise the fp32 originals, like the a8 tests.
+        w1, w2 = w1.to(dtype), w2.to(dtype)
+        ref = fused_moe_reference(x, w1, w2, weights, ids, swiglu_limit=limit)
+    else:
+        if entry == "w8a8_fp8":
+            call = fused_moe_w8a8_fp8
+            (q1, s1, _), d1 = _fp8_experts(w1)
+            (q2, s2, _), d2 = _fp8_experts(w2)
+            round_trip = _fp8_round_trip
+        else:
+            call = fused_moe_w8a8_int8
+            (q1, s1, _), d1 = _int8_experts(w1)
+            (q2, s2, _), d2 = _int8_experts(w2)
+            round_trip = _int8_round_trip
+        kw = {"w1_scale": s1, "w2_scale": s2, "group_n": 1, "group_k": max(hidden, inter)}
+        ref = fused_moe_reference(
+            x,
+            d1,
+            d2,
+            weights,
+            ids,
+            act_quant=lambda t: round_trip(t, dtype),
+            swiglu_limit=limit,
+        )
+        w1, w2 = q1, q2
+
+    bounded = call(x, w1, w2, weights, ids, swiglu_limit=limit, **kw)
+    plain = call(x, w1, w2, weights, ids, **kw)
+    # The clamp has to bite: 0.75 is inside the gate/up range, so the two calls
+    # disagree far beyond either tolerance — a dropped bound shows up here
+    # rather than hiding as a rounding difference.
+    assert not torch.equal(bounded, plain)
+
+    if entry == "weight_only":
+        torch.testing.assert_close(bounded.float(), ref, rtol=2e-2, atol=2e-2)
+    else:
+        err = (bounded.float() - ref).abs()
+        rms_rel = (err.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item()
+        assert rms_rel < _A8_RMS_REL[dtype], f"rms relative error {rms_rel:.3e}"
+        peak_rel = (err.max() / ref.abs().max()).item()
+        assert peak_rel < _A8_MAX_OVER_PEAK, f"worst element {peak_rel:.3e} of peak"
+
+
 @pytest.mark.parametrize("act_dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe_fp8_blockwise_matches_reference(act_dtype):
     """fp8-e4m3 expert weights with 128x128 block scales, in either activation
@@ -668,8 +736,7 @@ def test_fused_moe_fp8_blockwise_matches_reference(act_dtype):
 
 
 # e2m1 code points indexed by nibble (bit3 sign, bits[2:1] exponent, bit0 mantissa).
-_E2M1_LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+_E2M1_LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
 
 
 def _pack_mxfp4(nibbles: torch.Tensor) -> torch.Tensor:
@@ -752,6 +819,14 @@ def test_fused_moe_mxfp4_rejects_non_32_group_k():
     scale = torch.ones(4, 32, 1, device="cuda")
     with pytest.raises(ValueError, match="group_k"):
         fused_moe(
-            x, w1, w2, weights, ids,
-            w1_scale=scale, w2_scale=scale, group_n=1, group_k=64, mxfp4=True,
+            x,
+            w1,
+            w2,
+            weights,
+            ids,
+            w1_scale=scale,
+            w2_scale=scale,
+            group_n=1,
+            group_k=64,
+            mxfp4=True,
         )
