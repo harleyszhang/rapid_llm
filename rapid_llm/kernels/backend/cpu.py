@@ -209,7 +209,7 @@ def linear(
     return F.linear(x.float(), values, None if bias is None else bias.float()).to(x.dtype)
 
 
-def fused_moe(
+def _fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -260,15 +260,115 @@ def fused_moe(
     return out.to(hidden_states.dtype)
 
 
-def fused_moe_w8a8_fp8(hidden_states, w1, w2, topk_weights, topk_ids, **kwargs):
-    return fused_moe(
-        hidden_states, w1, w2, topk_weights, topk_ids, activation_scheme="w8a8_fp8", **kwargs
+# Three public names for the three CUDA counterparts (ops/moe/fused_moe.py):
+# the registry pins every row to the MoeOp ABC's parameter list, so the scheme
+# flag lives on the private body instead of a public signature.
+def fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    w1_scale=None,
+    w2_scale=None,
+    w1_zeros=None,
+    w2_zeros=None,
+    group_n=0,
+    group_k=0,
+    swiglu_limit=float("inf"),
+    mxfp4=False,
+) -> torch.Tensor:
+    return _fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zeros=w1_zeros,
+        w2_zeros=w2_zeros,
+        group_n=group_n,
+        group_k=group_k,
+        swiglu_limit=swiglu_limit,
+        mxfp4=mxfp4,
     )
 
 
-def fused_moe_w8a8_int8(hidden_states, w1, w2, topk_weights, topk_ids, **kwargs):
-    return fused_moe(
-        hidden_states, w1, w2, topk_weights, topk_ids, activation_scheme="w8a8_int8", **kwargs
+def fused_moe_w8a8_fp8(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    w1_scale=None,
+    w2_scale=None,
+    w1_zeros=None,
+    w2_zeros=None,
+    group_n=0,
+    group_k=0,
+    swiglu_limit=float("inf"),
+    mxfp4=False,
+) -> torch.Tensor:
+    if mxfp4:
+        raise ValueError(
+            "mxfp4 experts are the fused_moe row's int4-packed path; "
+            "W8A8 fp8 experts are uint8 e4m3 bytes"
+        )
+    return _fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zeros=w1_zeros,
+        w2_zeros=w2_zeros,
+        group_n=group_n,
+        group_k=group_k,
+        swiglu_limit=swiglu_limit,
+        activation_scheme="w8a8_fp8",
+    )
+
+
+def fused_moe_w8a8_int8(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    w1_scale=None,
+    w2_scale=None,
+    w1_zeros=None,
+    w2_zeros=None,
+    group_n=0,
+    group_k=0,
+    swiglu_limit=float("inf"),
+    mxfp4=False,
+) -> torch.Tensor:
+    if mxfp4:
+        raise ValueError(
+            "mxfp4 experts are the fused_moe row's int4-packed path; "
+            "W8A8 int8 experts are int8 bytes"
+        )
+    return _fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zeros=w1_zeros,
+        w2_zeros=w2_zeros,
+        group_n=group_n,
+        group_k=group_k,
+        swiglu_limit=swiglu_limit,
+        activation_scheme="w8a8_int8",
     )
 
 

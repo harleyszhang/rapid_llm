@@ -114,6 +114,9 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             w2_scale=block.experts["down_proj_scale_inv"],
             group_n=1,
             group_k=max(block.hidden_size, block.moe_intermediate_size),
+            # V4's bounded SwiGLU rides inside the activation epilogue; every
+            # other family's blocks have no attribute and keep plain silu.
+            swiglu_limit=float(getattr(block, "swiglu_limit", float("inf"))),
         )
 
     def quantize_from_fp16(self, block: nn.Module, config: QuantizationConfig) -> None:

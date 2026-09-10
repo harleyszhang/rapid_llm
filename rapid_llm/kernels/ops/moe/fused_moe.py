@@ -1112,11 +1112,13 @@ def _fused_moe(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
+    swiglu_limit: float = float("inf"),
     act_quant: str | None = None,
 ) -> torch.Tensor:
     """Body of the three public entry points; ``act_quant`` is their only
     difference: ``None`` leaves the activation at full precision, ``"fp8"`` and
-    ``"int8"`` quantise it per token.
+    ``"int8"`` quantise it per token. ``swiglu_limit`` rides into the
+    activation kernel's clamp untouched.
 
     Private, and the thin wrappers below are what callers and the registry see,
     because ``tests/ops/test_native_specs.py`` pins every registered target's
@@ -1266,7 +1268,7 @@ def _fused_moe(
         act_scale,
         gate_up.stride(0),
         intermediate,
-        LIMIT=float("inf"),
+        LIMIT=swiglu_limit,
         QMAX=act_qmax,
         QUANT_OUT=act_quant_out if fuse_act_quant else 0,
         BLOCK_N=block_n,
@@ -1497,6 +1499,8 @@ def fused_moe_w8a8_fp8(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
+    swiglu_limit: float = float("inf"),
+    mxfp4: bool = False,
 ) -> torch.Tensor:
     """The same FFN with the activations in fp8 as well: true W8A8 experts.
 
@@ -1509,8 +1513,12 @@ def fused_moe_w8a8_fp8(
     with no host synchronisation either way; the layer must stay CUDA-graph
     capturable, which is also why ``moe_align_block_size`` avoids ``bincount``.
 
-    ``w1_zeros``/``w2_zeros`` exist only to keep the :class:`MoeOp` contract; fp8
-    is symmetric, so a non-``None`` value is a caller error.
+    ``w1_zeros``/``w2_zeros`` and ``mxfp4`` exist only to keep the
+    :class:`MoeOp` contract: fp8 is symmetric and the MXFP4 experts are
+    int4-packed, so a non-default value is a caller error. ``swiglu_limit`` is
+    not filler — it rides into the activation kernel's clamp, which this row
+    used to drop, silently turning a bounded-SwiGLU checkpoint (DeepSeek-V4)
+    into plain-silu experts.
 
     Args:
         See :func:`fused_moe`. ``w1``/``w2`` must be ``uint8`` e4m3 bytes with
@@ -1522,6 +1530,11 @@ def fused_moe_w8a8_fp8(
     """
     if w1_zeros is not None or w2_zeros is not None:
         raise ValueError("fp8 is symmetric; zero points belong to the int4 path")
+    if mxfp4:
+        raise ValueError(
+            "mxfp4 experts are the fused_moe row's int4-packed path; "
+            "W8A8 fp8 experts are uint8 e4m3 bytes"
+        )
     return _fused_moe(
         hidden_states,
         w1,
@@ -1532,6 +1545,7 @@ def fused_moe_w8a8_fp8(
         w2_scale=w2_scale,
         group_n=group_n,
         group_k=group_k,
+        swiglu_limit=swiglu_limit,
         act_quant="fp8",
     )
 
@@ -1549,6 +1563,8 @@ def fused_moe_w8a8_int8(
     w2_zeros: torch.Tensor | None = None,
     group_n: int = 0,
     group_k: int = 0,
+    swiglu_limit: float = float("inf"),
+    mxfp4: bool = False,
 ) -> torch.Tensor:
     """The routed-expert FFN with int8 activations as well: SmoothQuant experts.
 
@@ -1558,8 +1574,12 @@ def fused_moe_w8a8_int8(
     there is no capability split, so ``NATIVE_FP8``'s sm89 widening does not
     exist here.
 
-    ``w1_zeros``/``w2_zeros`` exist only to keep the :class:`MoeOp` contract;
-    symmetric int8 has no zero points, so a non-``None`` value is a caller error.
+    ``w1_zeros``/``w2_zeros`` and ``mxfp4`` exist only to keep the
+    :class:`MoeOp` contract: symmetric int8 has no zero points and the MXFP4
+    experts are int4-packed, so a non-default value is a caller error.
+    ``swiglu_limit`` is not filler — it rides into the activation kernel's
+    clamp, which this row used to drop, silently turning a bounded-SwiGLU
+    checkpoint (DeepSeek-V4) into plain-silu experts.
 
     Args:
         See :func:`fused_moe`. ``w1``/``w2`` must be ``int8`` bytes with scales
@@ -1571,6 +1591,11 @@ def fused_moe_w8a8_int8(
     """
     if w1_zeros is not None or w2_zeros is not None:
         raise ValueError("symmetric int8 has no zero points; those belong to the int4 path")
+    if mxfp4:
+        raise ValueError(
+            "mxfp4 experts are the fused_moe row's int4-packed path; "
+            "W8A8 int8 experts are int8 bytes"
+        )
     return _fused_moe(
         hidden_states,
         w1,
@@ -1581,5 +1606,6 @@ def fused_moe_w8a8_int8(
         w2_scale=w2_scale,
         group_n=group_n,
         group_k=group_k,
+        swiglu_limit=swiglu_limit,
         act_quant="int8",
     )

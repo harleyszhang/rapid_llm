@@ -167,6 +167,7 @@ def fused_moe_reference(
     topk_ids: torch.Tensor,
     *,
     act_quant: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    swiglu_limit: float = float("inf"),
 ) -> torch.Tensor:
     """Reference for :func:`fused_moe`: gather per expert, matmul, scatter-add.
 
@@ -197,6 +198,9 @@ def fused_moe_reference(
             gather is equivalent to applying it per gathered row, which is what
             the kernel does: the round trip is per row, and a gather copies rows
             without changing their amax.
+        swiglu_limit: Clamp gate at ``+limit`` and up at ``+-limit`` before the
+            activation, mirroring the fused kernels' ``LIMIT`` (DeepSeek-V4's
+            bounded SwiGLU); ``inf``, the default, keeps plain silu.
 
     Returns:
         ``[num_tokens, hidden]`` fp32 output, summed over the ``top_k`` slots.
@@ -217,7 +221,9 @@ def fused_moe_reference(
         sel = flat_ids == e
         rows = token_of_slot[sel]
         gate_up = x[rows] @ w1[e].float().T
-        h = F.silu(gate_up[:, :inter]) * gate_up[:, inter:]
+        gate = gate_up[:, :inter].clamp(max=swiglu_limit)
+        up = gate_up[:, inter:].clamp(min=-swiglu_limit, max=swiglu_limit)
+        h = F.silu(gate) * up
         if act_quant is not None:
             # The kernel quantises the silu output per slot row before GEMM2, so
             # the second rounding has to be modelled too, or the reference would
