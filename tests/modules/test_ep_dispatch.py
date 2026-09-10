@@ -17,6 +17,9 @@ import pytest
 import torch
 
 from rapid_llm.modules.moe import AllToAllDispatcher
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 
 def _grouped_expert(recv_x: torch.Tensor, local_ids: torch.Tensor, weight: torch.Tensor):

@@ -22,6 +22,9 @@ import pytest
 import torch
 
 from rapid_llm.modules.moe import grouped_topk
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 
 def _naive_grouped_topk(

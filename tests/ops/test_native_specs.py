@@ -29,6 +29,9 @@ from rapid_llm.kernels.ops import LOGICAL_OPS
 from rapid_llm.kernels.ops.gemm.linear import linear_torch
 from rapid_llm.modules.quantization.unquant import UnquantizedLinearMethod
 from rapid_llm.platform import PlatformInfo
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 #: resolve_target imports the native Triton modules to prove they are callable;
 #: on a machine without Triton there is nothing to resolve.

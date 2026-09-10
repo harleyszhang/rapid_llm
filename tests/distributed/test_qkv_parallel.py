@@ -19,6 +19,9 @@ from rapid_llm.distributed import parallel_state as ps
 from rapid_llm.models import weights
 from rapid_llm.models.base import CausalLM
 from rapid_llm.modules import QKVParallelLinear
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 HIDDEN = 32
 HEAD_DIM = 8

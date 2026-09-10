@@ -14,6 +14,9 @@ import pytest
 import torch
 
 from rapid_llm.models.interfaces import merge_multimodal_embeddings
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 
 def test_merge_replaces_placeholder_positions():
