@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import pickle
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -193,9 +194,7 @@ def init_parallel(
         # MoE tokens, so the group object is literally shared. With it, the
         # experts spread over every rank in the grid and need their own group.
         _EP_GROUP = (
-            dist.new_group(list(range(world_size)), backend=backend)
-            if _DP_ATTENTION
-            else _TP_GROUP
+            dist.new_group(list(range(world_size)), backend=backend) if _DP_ATTENTION else _TP_GROUP
         )
 
     _log.info(
@@ -540,6 +539,169 @@ def reduce_scatter(
     return shard.movedim(0, dim)
 
 
+#: ``(sizes, padded, device)`` -> the pool <-> rectangle position plan the ragged
+#: v-collectives share. Host-computed from sizes the step handshake already agreed
+#: on, and cached like the dispatcher's unit weights: warm from the pre-capture
+#: eager steps, so a CUDA graph only replays the copy.
+_RAGGED_PLANS: dict[tuple[tuple[int, ...], int, torch.device], torch.Tensor] = {}
+
+
+def _ragged_plan(sizes: tuple[int, ...], padded: int, device: torch.device) -> torch.Tensor:
+    """Positions of the ragged pool's rows in the ``world x padded`` rectangle.
+
+    One plan serves both directions: ``gathered.index_select(0, plan)`` compacts
+    the all-gather rectangle back to ``[sum(sizes)]``, and
+    ``buf.index_copy_(0, plan, pool)`` scatters the pool into the zero-padded
+    reduce-scatter buffer. Chunk ``r`` sits at rows
+    ``[r * padded, r * padded + sizes[r])`` -- the layout
+    ``dist.all_gather`` / ``dist.reduce_scatter_tensor`` build when every rank
+    contributes ``padded`` rows.
+    """
+    key = (sizes, padded, device)
+    plan = _RAGGED_PLANS.get(key)
+    if plan is None:
+        plan = torch.cat(
+            [
+                torch.arange(r * padded, r * padded + rows, dtype=torch.int64, device=device)
+                for r, rows in enumerate(sizes)
+            ]
+        )
+        _RAGGED_PLANS[key] = plan
+    return plan
+
+
+def all_gatherv(
+    tensors: Sequence[torch.Tensor],
+    dim: int = 0,
+    sizes: Sequence[int] | None = None,
+    *,
+    group: dist.ProcessGroup | None = None,
+) -> list[torch.Tensor]:
+    """Gather uneven shards into one ragged concatenation per tensor.
+
+    vLLM's ``all_gatherv`` role (``AgRsAll2AllManager.dispatch``): the DP ranks
+    serve different batch sizes, so the pooled batch is the concatenation of
+    unequal shards, which a plain all-gather -- every rank contributing the same
+    shape -- cannot express. This transport has no ragged collective to call:
+    torch exposes no ``all_gatherv`` binding and rapid_llm ships no pynccl, so
+    the wire stays equal-length. Each rank pads its shard to ``max(sizes)``, one
+    plain all-gather runs, and the receiver compacts the ``world x padded``
+    rectangle back with a cached index plan (:func:`_ragged_plan`) -- the same
+    degradation vLLM takes under CUDA graph capture, where a host-side ragged
+    split is illegal. Equal sizes take the plain gather directly, with no pad
+    and no compaction.
+
+    Args:
+        tensors: This rank's shards. The MoE exchange passes the hidden states
+            and the routing results (weights, ids) together, as vLLM's AgRs
+            dispatch does; each is gathered under the same plan.
+        dim: Shard axis -- 0, the token axis, for the MoE exchange.
+        sizes: Shard length per rank, in group order. ``None`` means every rank
+            brings the same length.
+        group: Defaults to the DP group, the axis this was added for.
+
+    Returns:
+        One gathered tensor per input, concatenated in group rank order.
+
+    Raises:
+        ValueError: If ``sizes`` is not one entry per rank, or a tensor's shard
+            axis does not hold the length this rank declared.
+    """
+    group = _DP_GROUP if group is None else group
+    if group is None or dist.get_world_size(group) <= 1:
+        return list(tensors)
+    world = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    first = tensors[0]
+    dim = dim % first.dim()
+    if sizes is None:
+        sizes = (first.shape[dim],) * world
+    sizes = tuple(int(count) for count in sizes)
+    if len(sizes) != world:
+        raise ValueError(f"all_gatherv got {len(sizes)} sizes for {world} ranks")
+    for tensor in tensors:
+        if tensor.shape[dim] != sizes[rank]:
+            raise ValueError(
+                f"all_gatherv shard with {tensor.shape[dim]} rows along dim {dim} does "
+                f"not hold the {sizes[rank]} rows this rank declared"
+            )
+    if len(set(sizes)) == 1:
+        return [data_parallel_all_gather(tensor, dim, group=group) for tensor in tensors]
+    padded = max(sizes)
+    plan = _ragged_plan(sizes, padded, first.device)
+    gathered_tensors = []
+    for tensor in tensors:
+        # Pad only the shard axis; F.pad's tuple runs from the last dim inwards.
+        pads = [0, 0] * tensor.dim()
+        pads[2 * (tensor.dim() - 1 - dim) + 1] = padded - tensor.shape[dim]
+        padded_in = torch.nn.functional.pad(tensor, pads) if any(pads) else tensor
+        gathered = data_parallel_all_gather(padded_in, dim, group=group)
+        gathered_tensors.append(torch.index_select(gathered, dim, plan))
+    return gathered_tensors
+
+
+def reduce_scatterv(
+    tensor: torch.Tensor,
+    sizes: Sequence[int],
+    dim: int = 0,
+    *,
+    group: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Sum the ragged pool across ranks, keeping this rank's shard.
+
+    vLLM's ``reduce_scatterv`` role (``AgRsAll2AllManager.combine``, the AgRs
+    combine half): every rank holds the pooled expert output -- an uneven
+    concatenation, one chunk per rank -- and only wants the group-sum of its
+    own chunk back. ``reduce_scatter_tensor`` splits evenly, so ragged sizes go
+    through the equal-length adaptation: the pool is scattered into a
+    zero-padded ``world x padded`` buffer (each chunk followed by the zeros
+    standing in for its missing rows), one plain reduce-scatter runs, and the
+    receiver narrows its ``padded``-row shard to ``sizes[rank]``. Equal sizes
+    reduce-scatter directly and skip the padding; see :func:`all_gatherv` for
+    why the wire is equal-length either way -- there is no
+    ``reduce_scatterv`` binding to call.
+
+    Args:
+        tensor: The full pool -- ``sum(sizes)`` rows along ``dim``, chunk ``r``
+            at the pool offset of rank ``r``, in group rank order.
+        sizes: Rows per rank's chunk, in group order.
+        dim: Shard axis -- 0, the token axis, for the MoE combine.
+        group: Defaults to the DP group, the axis this was added for.
+
+    Returns:
+        ``sizes[this rank]`` rows, summed across the group.
+
+    Raises:
+        ValueError: If ``sizes`` is not one entry per rank, or the pool does not
+            hold ``sum(sizes)`` rows along ``dim``.
+    """
+    group = _DP_GROUP if group is None else group
+    if group is None or dist.get_world_size(group) <= 1:
+        return tensor
+    world = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    sizes = tuple(int(count) for count in sizes)
+    if len(sizes) != world:
+        raise ValueError(f"reduce_scatterv got {len(sizes)} sizes for {world} ranks")
+    dim = dim % tensor.dim()
+    if tensor.shape[dim] != sum(sizes):
+        raise ValueError(
+            f"reduce_scatterv pool with {tensor.shape[dim]} rows along dim {dim} does not "
+            f"hold the declared {sum(sizes)}"
+        )
+    if len(set(sizes)) == 1:
+        return reduce_scatter(tensor, dim, group=group)
+    moved = tensor.movedim(dim, 0).contiguous()
+    padded = max(sizes)
+    plan = _ragged_plan(sizes, padded, tensor.device)
+    buf = torch.zeros(padded * world, *moved.shape[1:], dtype=moved.dtype, device=moved.device)
+    buf.index_copy_(0, plan, moved)
+    shard = torch.empty(padded, *moved.shape[1:], dtype=moved.dtype, device=moved.device)
+    dist.reduce_scatter_tensor(shard, buf, op=dist.ReduceOp.SUM, group=group)
+    CollectiveStats.record(Collective.REDUCE_SCATTER, _payload(buf))
+    return shard.narrow(0, 0, sizes[rank]).movedim(0, dim)
+
+
 def all_to_all(tensor: torch.Tensor, *, group: dist.ProcessGroup | None = None) -> torch.Tensor:
     """Equal-split exchange: slice ``j`` of rank ``i``'s tensor lands on rank ``j``.
 
@@ -760,11 +922,7 @@ def warmup_collectives() -> None:
         groups.append((_TP_GROUP, _TP_WORLD_SIZE))
     if _DP_GROUP is not None:
         groups.append((_DP_GROUP, _DP_WORLD_SIZE))
-    if (
-        _EP_GROUP is not None
-        and _EP_GROUP is not _TP_GROUP
-        and _EP_GROUP is not _DP_GROUP
-    ):
+    if _EP_GROUP is not None and _EP_GROUP is not _TP_GROUP and _EP_GROUP is not _DP_GROUP:
         groups.append((_EP_GROUP, _EP_WORLD_SIZE))
     for group, expected in groups:
         on_gpu = dist.get_backend(group) == "nccl"

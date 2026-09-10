@@ -2,7 +2,9 @@
 
 Pure CPU: initialise a grid and assert the coordinate maths — distinct
 cells, contiguous TP groups — plus rejection of out-of-range ranks. The
-collectives run over a real two-rank gloo group, which needs no device.
+collectives — including the dp-attention v-collectives, ``all_gatherv`` /
+``reduce_scatterv`` — run over a real two-rank gloo group, which needs no
+device.
 
 Usage:
     pytest tests/distributed/test_parallel_state.py
@@ -202,6 +204,7 @@ def test_small_all_reduce_does_not_switch_collectives_after_p2p_error(monkeypatc
     monkeypatch.setattr(ps, "_TP_WORLD_SIZE", 2)
     monkeypatch.setattr(ps, "_TP_GROUP", object())
     monkeypatch.setattr(ps.dist, "get_backend", lambda _group: "nccl")
+
     def fail_p2p(_tensor):
         raise RuntimeError("p2p")
 
@@ -304,6 +307,60 @@ def _default_group_is_the_tp_group(rank: int) -> bool:
     return bool(torch.equal(implicit, over_explicit))
 
 
+def _all_gatherv_matches_manual_cat(rank: int) -> dict:
+    """Ragged and equal gathers both equal a manual cat of every rank's shard.
+
+    The dp-attention transport: the ragged case is what the DP ranks hit (unequal
+    batches), the equal one its fast path, and two tensors ride one plan the way the
+    AgRs dispatch carries hidden + ids together.
+    """
+    import torch
+
+    def gather(sizes: tuple[int, ...]) -> list:
+        rows = sizes[rank]
+        shard = torch.arange(rows, dtype=torch.float32).add(10 * rank).unsqueeze(-1).repeat(1, 2)
+        ids = shard[:, :1].to(torch.int64)
+        pooled, pooled_ids = ps.all_gatherv([shard, ids], dim=0, sizes=sizes)
+        expected = (
+            torch.cat(
+                [
+                    torch.arange(count, dtype=torch.float32).add(10 * owner)
+                    for owner, count in enumerate(sizes)
+                ]
+            )
+            .unsqueeze(-1)
+            .repeat(1, 2)
+        )
+        return [
+            bool(torch.equal(pooled, expected))
+            and bool(torch.equal(pooled_ids, expected[:, :1].to(torch.int64))),
+            list(pooled.shape),
+        ]
+
+    return {"ragged": gather((3, 4)), "equal": gather((4, 4))}
+
+
+def _reduce_scatterv_is_dp_all_reduce_then_slice(rank: int) -> bool:
+    """``reduce_scatterv`` == the pooled DP all-reduce, narrowed to this rank's chunk.
+
+    The ragged twin of the ``reduce_scatter`` equivalence above: every rank holds a
+    full ragged pool, the reduce sums them element-wise, and only the chunk the sizes
+    hand out stays.
+    """
+    import torch
+
+    for sizes in ((3, 4), (4, 4)):
+        pool = (
+            torch.arange(sum(sizes), dtype=torch.float32).add(10 * rank).unsqueeze(-1).repeat(1, 2)
+        )
+        shard = ps.reduce_scatterv(pool.clone(), sizes, dim=0)
+        reduced = ps.data_parallel_all_reduce(pool.clone())
+        start = sum(sizes[:rank])
+        if not torch.equal(shard, reduced[start : start + sizes[rank]]):
+            return False
+    return True
+
+
 class TestGlooCollectives:
     """The data-plane primitives over a real two-rank gloo group, no device needed."""
 
@@ -322,3 +379,31 @@ class TestGlooCollectives:
     def test_default_group_is_the_tp_group(self):
         both = run_on_tp_ranks(_default_group_is_the_tp_group, tp_size=2, backend="gloo")
         assert both == [True, True]
+
+    def test_all_gatherv_matches_manual_cat(self):
+        """Over the DP group: the ragged pool is 7 rows (3 + 4), the equal one 8.
+
+        The row counts are the assertion that no pad rows survive the ragged
+        gather: the wire carried 4 rows per rank, the pool keeps only the real
+        ones.
+        """
+        seen = run_on_tp_ranks(
+            _all_gatherv_matches_manual_cat,
+            tp_size=1,
+            dp_size=2,
+            backend="gloo",
+            enable_dp_attention=True,
+        )
+        for entry in seen:
+            assert entry["ragged"] == [True, [7, 2]]
+            assert entry["equal"] == [True, [8, 2]]
+
+    def test_reduce_scatterv_is_dp_all_reduce_then_slice(self):
+        seen = run_on_tp_ranks(
+            _reduce_scatterv_is_dp_all_reduce_then_slice,
+            tp_size=1,
+            dp_size=2,
+            backend="gloo",
+            enable_dp_attention=True,
+        )
+        assert seen == [True, True]

@@ -1,21 +1,35 @@
-"""Data-parallel attention: attention per DP rank, experts pooled across them.
+"""DeepSeek-V3-style DP attention with DPxTP expert parallelism:
 
-The parallelism MoE inference wants — the one sglang and vLLM both ship for
-DeepSeek-V3. The two stages of a decoder layer scale oppositely:
+- Attention is replicated across DP ranks: each rank owns its requests and
+  KV cache, avoiding the redundant KV-cache reads that TP would impose.
+- Expert layers pool tokens from all DP ranks. Once per step, a handshake
+  exchanges local token counts; the routed stage then runs over the whole
+  pool, and the combine hands each rank its own rows back.
 
-* **Attention** is per request: with MLA the KV cache is one compressed vector
-  per layer, so TP duplicates the cache and every rank pays the whole read;
-  replicate the small weights instead — ``dp`` x KV capacity, ``dp`` x batch,
-  no collective at all.
-* **The experts** are per token, hundreds of them: they want the widest token
-  pool, so the routed stage runs over the *union* of every DP rank's tokens,
-  experts split whole-expert across the ``dp x tp`` grid.
+Two pooling contracts share that geometry:
 
-The seam between the two: :func:`dp_attention_region` is the once-per-step
-handshake (peer token counts); :func:`dp_gather` / :func:`dp_scatter` pool the
-tokens for the routed stage and hand back each rank's rows. The MoE block calls
-the pair — where vLLM puts it too, inside ``FusedMoE``'s prepare/finalize — so
-nothing between the two stages has to know the batch is split.
+* **AgRs** (the default; vLLM's ``allgather_reducescatter`` backend): every
+  rank routes its own rows first and :func:`dp_dispatch` carries the hidden
+  states, weights and ids together into a ragged pool -- ``sum(counts)``
+  rows, no padding. :func:`dp_combine` reduce-scatters the pool's expert
+  output back to each rank's chunk. One exchange in, one exchange out, and
+  no pad rows waste expert FLOPs.
+* **a2a** (kept for A/B): :func:`dp_gather` pads every rank to the largest
+  count and builds a rectangle, the MoE block routes the pooled rows, and an
+  all-to-all dispatcher exchanges them by expert; :func:`dp_scatter` slices
+  the result back out.
+
+The transport has no ragged collective to call -- torch binds no
+``all_gatherv`` and rapid_llm ships no pynccl -- so both v-collectives run
+equal-length on the wire and compact on the receiver (gather) or zero-pad on
+the sender (reduce); see :mod:`rapid_llm.distributed.parallel_state`. That is
+the same degradation vLLM takes under CUDA graph capture, where a host-side
+ragged split is illegal.
+
+The handshake runs over the CPU Gloo group, so the counts stay host values
+and the shapes they fix derive from the step's buckets, not its data -- the
+compaction and scatter plans follow from them, which is what keeps the
+forward capturable.
 
 Usage:
     with dp_attention_region(num_tokens=input_ids.numel()):
@@ -32,11 +46,16 @@ from dataclasses import dataclass
 import torch
 
 from .parallel_state import (
+    all_gatherv,
     data_parallel_all_gather,
     dp_attention_enabled,
     get_data_parallel_cpu_group,
+    get_data_parallel_group,
     get_data_parallel_rank,
     get_data_parallel_world_size,
+    get_tensor_model_parallel_world_size,
+    reduce_scatterv,
+    tensor_model_parallel_all_reduce,
 )
 
 __all__ = [
@@ -44,6 +63,8 @@ __all__ = [
     "coordinate_tokens_across_dp",
     "current_dp_metadata",
     "dp_attention_region",
+    "dp_combine",
+    "dp_dispatch",
     "dp_gather",
     "dp_scatter",
 ]
@@ -55,7 +76,9 @@ class DPMetadata:
 
     vLLM's ``DPMetadata`` (``vllm/forward_context.py``) under a different
     spelling: the same ``num_tokens_across_dp`` vector, agreed once per forward
-    and read by every MoE layer.
+    and read by every MoE layer. Both pooling contracts derive their geometry
+    from it -- the ragged pool is the concatenation of these counts, the a2a
+    rectangle is every rank padded to the largest of them.
 
     Args:
         num_tokens_across_dp: Rows per DP rank, in rank order.
@@ -72,35 +95,57 @@ class DPMetadata:
 
     @property
     def local_tokens(self) -> int:
-        """Rows this rank brought -- what :func:`dp_scatter` hands back."""
+        """Rows this rank brought -- what :func:`dp_scatter` and
+        :func:`dp_combine` hand back."""
         return self.num_tokens_across_dp[self.rank]
 
     @property
+    def uniform(self) -> bool:
+        """Whether every rank brought the same count.
+
+        The AgRs fast case: equal shards let both v-collectives take their
+        plain, plan-free route (see :mod:`rapid_llm.distributed.parallel_state`).
+        """
+        return len(set(self.num_tokens_across_dp)) == 1
+
+    @property
     def padded_tokens(self) -> int:
-        """Rows every rank *contributes*, the largest local count.
+        """Rows every rank contributes to the *a2a* pool, the largest count.
 
-        The pooled batch is a rectangle rather than a ragged concatenation. A
-        ragged one would need a variable-split ``all_gatherv`` whose splits are
-        host values, which costs a device-to-host sync per layer and cannot be
-        captured into a CUDA graph; padding to the maximum makes every rank's
-        contribution the same shape, so one plain all-gather does it and the
-        shape is a function of the step's buckets, not its data. It is also what
-        vLLM pads to, for the same reason.
-
-        The padded rows are zeros. They route (to whichever experts a zero
-        hidden state scores highest), run through those experts, and are dropped
-        by :func:`dp_scatter` -- so they cost expert FLOPs and change nothing.
+        Only the a2a pooling (:func:`dp_gather`) pads to the maximum: it is one
+        plain all-gather, which takes equal contributions. The padded rows are
+        zeros; they route (to whichever experts a zero hidden state scores
+        highest), run through those experts, and are dropped by
+        :func:`dp_scatter` -- so they cost expert FLOPs and change nothing.
+        That waste is what the AgRs pool (:func:`dp_dispatch`) does not pay:
+        it gathers ragged. The maximum itself is a function of the step's
+        buckets, not its data, so the shape stays CUDA-graph friendly.
         """
         return max(self.num_tokens_across_dp)
 
     @property
     def total_tokens(self) -> int:
-        """Rows in the pooled batch the routed stage runs over."""
-        return self.padded_tokens * self.world_size
+        """Rows in the ragged pool the routed stage runs over."""
+        return sum(self.num_tokens_across_dp)
 
     @property
     def local_offset(self) -> int:
-        """Where this rank's rows start in the pooled batch."""
+        """Where this rank's rows start in the *ragged* pool.
+
+        The cumulative count of every earlier rank -- the ragged
+        concatenation's layout, which is what :func:`dp_dispatch` and
+        :func:`dp_combine` run on.
+        """
+        return sum(self.num_tokens_across_dp[: self.rank])
+
+    @property
+    def padded_offset(self) -> int:
+        """Where this rank's rows start in the *a2a rectangle*.
+
+        ``rank * padded_tokens`` -- the rectangle's layout, which
+        :func:`dp_scatter` slices with. The two offsets differ whenever the
+        counts are not uniform.
+        """
         return self.rank * self.padded_tokens
 
 
@@ -181,10 +226,11 @@ def coordinate_tokens_across_dp(num_tokens: int) -> DPMetadata:
 
 
 def dp_gather(x: torch.Tensor, metadata: DPMetadata) -> torch.Tensor:
-    """Pool ``[local_tokens, hidden]`` into the step's ``[total_tokens, hidden]``.
+    """Pool ``[local_tokens, hidden]`` into the step's padded a2a rectangle.
 
     Pads to :attr:`DPMetadata.padded_tokens` first, so every rank contributes
-    the same shape and one all-gather suffices. Inverse of :func:`dp_scatter`.
+    the same shape and one plain all-gather suffices -- the a2a path's pooling,
+    kept alongside :func:`dp_dispatch` for A/B. Inverse of :func:`dp_scatter`.
 
     Raises:
         ValueError: If ``x`` does not hold the row count the handshake agreed --
@@ -203,10 +249,93 @@ def dp_gather(x: torch.Tensor, metadata: DPMetadata) -> torch.Tensor:
 
 
 def dp_scatter(x: torch.Tensor, metadata: DPMetadata) -> torch.Tensor:
-    """Take this rank's rows out of a pooled ``[total_tokens, hidden]`` result.
+    """Take this rank's rows out of the a2a rectangle's routed result.
 
     A slice, not a collective: the routed combine already landed every pooled
     token's full expert sum on every rank, so each rank only has to find its
     own. Inverse of :func:`dp_gather`.
     """
-    return x[metadata.local_offset : metadata.local_offset + metadata.local_tokens]
+    return x[metadata.padded_offset : metadata.padded_offset + metadata.local_tokens]
+
+
+def dp_dispatch(
+    x: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    metadata: DPMetadata,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pool the hidden states *and* this rank's routing into the ragged pool.
+
+    vLLM's AgRs dispatch (``AgRsAll2AllManager.dispatch``): the route runs
+    before the exchange, on this rank's own rows, and its results travel with
+    the hidden states -- one ragged all-gather and every rank holds the whole
+    pool together with the whole routing. The pool is ragged:
+    ``sum(num_tokens_across_dp)`` rows where the a2a rectangle :func:`dp_gather`
+    builds would hold ``padded * world``. The difference is the pad rows --
+    zeros that route, run through their experts, and are thrown away again.
+
+    Args:
+        x: This rank's hidden rows, ``[local_tokens, hidden]``.
+        topk_weights: This rank's routing weights, ``[local_tokens, top_k]``.
+        topk_ids: This rank's routing ids, ``[local_tokens, top_k]``, in the
+            global id space; the caller rebases them to the local expert window
+            (``-1`` outside) after the gather.
+        metadata: The step geometry.
+
+    Returns:
+        ``(pool_x, pool_weights, pool_ids)``, one concatenation each, in group
+        rank order.
+
+    Raises:
+        ValueError: If ``x`` does not hold the row count the handshake agreed --
+            something between :func:`dp_attention_region` and here re-partitioned
+            the token axis.
+    """
+    if x.shape[0] != metadata.local_tokens:
+        raise ValueError(
+            f"DP dispatch expected {metadata.local_tokens} rows (the count this rank "
+            f"declared for the step) but holds {x.shape[0]}"
+        )
+    pool_x, pool_weights, pool_ids = all_gatherv(
+        [x, topk_weights, topk_ids],
+        dim=0,
+        sizes=metadata.num_tokens_across_dp,
+        group=get_data_parallel_group(),
+    )
+    return pool_x, pool_weights, pool_ids
+
+
+def dp_combine(pooled_out: torch.Tensor, metadata: DPMetadata) -> torch.Tensor:
+    """Sum the ragged pool's expert output and keep this rank's rows.
+
+    vLLM's AgRs combine (``AgRsAll2AllManager.combine``): one reduce-scatter
+    over the pool returns each rank its own chunk, already summed. Which
+    peers' partials meet in that sum is the topology's business:
+
+    * ``tp == 1``: the DP group spans the replicas, so the reduce covers every
+      rank holding the pool -- the complete expert sum.
+    * ``tp > 1``: a DP group is one TP lane, and a lane's ranks own a stride
+      of the expert windows, so the reduce covers only that stride's experts.
+      The trailing TP all-reduce sums the replica's lanes -- whose windows
+      partition the expert set -- and the full sum is back. vLLM does not
+      need that step because its MoE runs sequence-parallel under TP>1: the
+      ranks meeting in its reduce own disjoint experts *and* disjoint chunks.
+      Here the lanes hold identical tokens, so the chunks overlap and the
+      missing experts are added back explicitly instead.
+
+    Args:
+        pooled_out: The pool's routed output, ``[total_tokens, hidden]``.
+        metadata: The step geometry.
+
+    Returns:
+        This rank's ``[local_tokens, hidden]`` expert sum.
+    """
+    out = reduce_scatterv(
+        pooled_out,
+        sizes=metadata.num_tokens_across_dp,
+        dim=0,
+        group=get_data_parallel_group(),
+    )
+    if get_tensor_model_parallel_world_size() > 1:
+        out = tensor_model_parallel_all_reduce(out)
+    return out

@@ -2,7 +2,7 @@
 
 Wraps the block's quantization method (``quant_method.apply``) — the same call
 :meth:`SparseMoeBlock._run_experts` made before the refactor. The pre/post
-permutes registered here for both a2a backends are identity: rapid_llm's
+permutes registered here for every a2a backend are identity: rapid_llm's
 dispatch already delivers the layout the grouped GEMM wants, so the hooks
 exist only as the seam a reshuffling backend would fill.
 """
@@ -48,8 +48,13 @@ def _identity_post(out):
     return out
 
 
-# Both dispatch backends feed the Triton core the layout it wants, so the hooks
-# are identity — registered to keep the (a2a, runner) seam populated and honest.
-for _a2a in (MoeA2ABackend.ALL_TO_ALL, MoeA2ABackend.NONE):
+# Every dispatch backend feeds the Triton core the layout it wants, so the
+# hooks are identity — registered to keep the (a2a, runner) seam populated and
+# honest.
+for _a2a in (
+    MoeA2ABackend.ALL_TO_ALL,
+    MoeA2ABackend.ALLGATHER_REDUCESCATTER,
+    MoeA2ABackend.NONE,
+):
     register_pre_permute(_a2a, MoeRunnerBackend.TRITON)(_identity_pre)
     register_post_permute(_a2a, MoeRunnerBackend.TRITON)(_identity_post)

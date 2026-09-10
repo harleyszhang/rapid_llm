@@ -12,6 +12,11 @@ three seams the refactor split out -- :class:`~rapid_llm.modules.moe.router.TopK
 5. combine   -- the dispatcher reduces the results back to ``[tokens, hidden]``.
 finalize     -- routed scaling / shared expert / deferred-AR fence / TP all-reduce.
 
+Under DP-attention stages 2-5 take one of two pooled shapes instead, both
+described in ``distributed.dp_attention``: the a2a rectangle, or the default
+AgRs ragged pool, whose exchange *is* the dispatch/combine (no dispatcher
+object involved).
+
 Two route families, dispatched on the HF ``topk_method``: greedy top-k (Qwen3-MoE,
 DeepSeek-V2-Lite) and :func:`grouped_topk` (the group-limited selection DeepSeek-V2
 and the biased ``noaux_tc`` routing DeepSeek-V2.5+/V3 ship).
@@ -29,7 +34,14 @@ import torch.nn as nn
 
 from ...batch_overlap import CommStreamPool, current_deferred_ar
 from ...batch_overlap.single_batch_overlap import SboFlags, sbo_alt_stream
-from ...distributed.dp_attention import DPMetadata, current_dp_metadata, dp_gather, dp_scatter
+from ...distributed.dp_attention import (
+    DPMetadata,
+    current_dp_metadata,
+    dp_combine,
+    dp_dispatch,
+    dp_gather,
+    dp_scatter,
+)
 from ...distributed.parallel_state import (
     divide,
     expert_parallel_enabled,
@@ -39,6 +51,7 @@ from ...distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from ...kernels.ops.moe.ep_dispatch import ep_local_ids
 from ...models.config import ModelConfig
 from ..mlp import FusedMLP
 from ..quantization import QuantizationConfig, RawParameter, UnquantizedFusedMoEMethod
@@ -162,11 +175,13 @@ class SparseMoeBlock(nn.Module):
             topk_group=self.topk_group,
         )
 
-        # Stages 2 & 5: the dispatch/combine seam. ``ALL_TO_ALL`` when EP is on,
-        # ``NONE`` otherwise. The all-to-all dispatcher is stateless apart from
-        # the placement, so one instance serves every forward; handles carry the
-        # per-call buffers. ``self.dispatcher`` keeps the ``is not None`` gate the
-        # forward paths branch on (EP present vs the dense TP path).
+        # Stages 2 & 5: the dispatch/combine seam. ``ALL_TO_ALL`` when EP is on
+        # without DP-attention; ``ALLGATHER_REDUCESCATTER`` -- the DP-attention
+        # default -- builds *no* dispatcher, because its exchange lives in
+        # ``distributed.dp_attention`` and the forward branches on the backend;
+        # ``NONE`` otherwise. The dispatcher is stateless apart from the
+        # placement, so one instance serves every forward; handles carry the
+        # per-call buffers.
         self.a2a_backend = get_moe_a2a_backend()
         self.dispatcher: AllToAllDispatcher | None = (
             get_dispatcher(
@@ -285,16 +300,27 @@ class SparseMoeBlock(nn.Module):
         # so the routed stage runs over the pooled batch instead (the routing
         # itself included -- a token's experts must be picked from the same
         # weights on whichever rank ends up computing them).
-        metadata = current_dp_metadata() if self.dispatcher is not None else None
-        if metadata is not None:
-            out, shared = self._forward_dp_attention(x, metadata)
-        elif self.dispatcher is not None:
-            # EP: tokens travel to the ranks owning their experts and the
-            # results travel back — the combine already lands every token's
-            # full routed sum here, so no all_reduce follows (unlike the TP
-            # expert split below, where each rank only holds a partial sum).
-            weights, ids = self._route(x)
-            out, shared = self._forward_ep(x, ids, weights)
+        metadata = current_dp_metadata()
+        if self.a2a_backend is MoeA2ABackend.ALLGATHER_REDUCESCATTER:
+            if metadata is None:
+                # AgRs has no a2a handle to fall back on, and the dense path
+                # would index this rank's local experts with global ids.
+                raise RuntimeError(
+                    "the AgRs MoE backend is selected but no DP-attention region is "
+                    "active: there is no all-to-all handle to fall back on, and the "
+                    "dense path would index local experts with global routing ids"
+                )
+            out, shared = self._forward_dp_attention_agrs(x, metadata)
+        elif self.a2a_backend is MoeA2ABackend.ALL_TO_ALL:
+            if metadata is not None:
+                out, shared = self._forward_dp_attention_a2a(x, metadata)
+            else:
+                # EP: tokens travel to the ranks owning their experts and the
+                # results travel back — the combine already lands every token's
+                # full routed sum here, so no all_reduce follows (unlike the TP
+                # expert split below, where each rank only holds a partial sum).
+                weights, ids = self._route(x)
+                out, shared = self._forward_ep(x, ids, weights)
         else:
             # Dense TP path expressed on the standard seam: route, then the
             # passthrough dispatch/combine bracket the grouped GEMM (both
@@ -321,17 +347,19 @@ class SparseMoeBlock(nn.Module):
             out = out + shared
         return out.reshape(*leading_shape, self.hidden_size)
 
-    def _forward_dp_attention(
+    def _forward_dp_attention_a2a(
         self, x: torch.Tensor, metadata: DPMetadata
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The routed stage over *every* DP rank's tokens, then this rank's rows back.
+        """The a2a pooling contract: pad, pool, route the pool, all-to-all.
 
-        The point of pairing DP-attention with EP. Attention ran ``dp`` batches
-        independently, so without this each rank would dispatch ``1/dp`` of the
-        step's tokens over an EP group ``dp`` times wider than a replica's --
-        every expert seeing a ``dp**2`` smaller share of the work, which is the
-        opposite of what a widened expert split is for. Gathering first means one
-        exchange carries the whole step and each expert gets the full batch.
+        The original pairing of DP-attention with EP, kept for A/B against the
+        default :meth:`_forward_dp_attention_agrs`. Attention ran ``dp``
+        batches independently, so without pooling each rank would dispatch
+        ``1/dp`` of the step's tokens over an EP group ``dp`` times wider than
+        a replica's -- every expert seeing a ``dp**2`` smaller share of the
+        work, which is the opposite of what a widened expert split is for.
+        Gathering first means one exchange carries the whole step and each
+        expert gets the full batch.
 
         Returns ``(routed_out, shared_out)`` on this rank's own rows, so
         :meth:`forward` keeps owning the deferred-all-reduce fence and the sum.
@@ -348,6 +376,50 @@ class SparseMoeBlock(nn.Module):
         # and throw ``dp - 1`` of it away.
         shared = self.shared_experts(x) if self.shared_experts is not None else None
         return dp_scatter(routed, metadata), shared
+
+    def _forward_dp_attention_agrs(
+        self, x: torch.Tensor, metadata: DPMetadata
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The AgRs contract: route locally, pool routing + hidden, reduce-scatter.
+
+        vLLM's default pairing (``allgather_reducescatter``). The route runs on
+        this rank's own rows and :func:`dp_dispatch` carries the hidden states,
+        weights and ids together into the ragged pool, so every rank holds the
+        whole step's routing after one exchange -- no pad rows, no separate
+        permute round trip. Pool rows outside this rank's expert window are
+        masked to ``-1`` and skipped by the grouped GEMM; :func:`dp_combine`
+        reduce-scatters the expert output back to this rank's rows.
+
+        Returns ``(routed_out, shared_out)`` on this rank's own rows, so
+        :meth:`forward` keeps owning the deferred-all-reduce fence and the sum.
+        """
+        weights, ids = self._route(x)
+        pool_x, pool_weights, pool_ids = dp_dispatch(x, weights, ids, metadata)
+        # Rebase the pooled global ids to this rank's window; -1 marks rows the
+        # grouped GEMM skips. The Triton kernel does it in one launch; on CPU
+        # it is the sub/compare/where chain the a2a dispatcher's non-fused
+        # branch runs.
+        flat_ids = pool_ids.reshape(-1)
+        if flat_ids.is_cuda:
+            local_ids = ep_local_ids(
+                flat_ids,
+                expert_offset=self.expert_offset,
+                num_local=self.num_local_experts,
+            )
+        else:
+            local = flat_ids - self.expert_offset
+            local_ids = torch.where(
+                (local >= 0) & (local < self.num_local_experts),
+                local,
+                torch.full_like(local, -1),
+            )
+        local_ids = local_ids.view_as(pool_ids)
+        routed = dp_combine(self._run_experts(pool_x, local_ids, pool_weights), metadata)
+        # The shared expert stays on this rank's own tokens: it is a dense MLP,
+        # so pooling would have every rank compute the whole step's shared half
+        # and throw ``dp - 1`` of it away.
+        shared = self.shared_experts(x) if self.shared_experts is not None else None
+        return routed, shared
 
     def _forward_ep(
         self, x: torch.Tensor, ids: torch.Tensor, weights: torch.Tensor

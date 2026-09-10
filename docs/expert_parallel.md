@@ -34,6 +34,8 @@ MoE 模块镜像 sglang `srt/layers/moe/` 的分层：单文件 `moe.py` 已拆�
 3-4. 接收端把全局 id 转为本地 id，只运行本 rank 的专家（grouped GEMM）。
 5. Combine 用第二次 all-to-all 把结果送回来源 rank，并在来源端恢复顺序、应用 router 权重。
 
+DP-attention + EP 的默认交换是 AgRs（`MoeA2ABackend.ALLGATHER_REDUCESCATTER`，对齐 vLLM 默认后端）：路由仍在本地完成，池化把 hidden、`topk_weights`、`topk_ids` 随行做变长 all-gather（`dp_dispatch`），池长 = 各 replica 真实行数之和、无填充行；接收端把全局 id 经范围守卫转成本地 id（窗口外 `-1`，与 a2a 填充行同一守卫），本 rank 专家在整池上跑 grouped GEMM，`dp_combine` 用 reduce-scatter 把每行部分和加回来源 replica。TP>1 时 combine 再补一次 TP all-reduce——vLLM 在 TP 下 MoE 走 SP、chunk 天然互斥因而省掉这步，rapid_llm 拒绝 SP+DP-attention、TP 复本持有相同 token，交换恒在 DP 组（每 lane 天然去重），这一步就是 no-SP 适配。`RAPID_MOE_A2A_BACKEND=all_to_all` 可降级回 a2a 矩形池做 A/B；原语（`all_gatherv`/`reduce_scatterv`，等长 wire + 接收端压紧）与 region 契约在 `distributed/`，token_dispatcher 里没有 AgRs dispatcher——它的交换住在 `distributed.dp_attention`。
+
 **诚实标注架构开销**：rapid_llm 只有 1 个 a2a dispatch 后端 + 1 个 Triton runner，两个枚举（`MoeA2ABackend`/`MoeRunnerBackend`）与注册表多为单条目，permute pool 注册的是恒等函数——它们是对齐 sglang DeepEP/pplx/nixl 多后端结构留的**扩展位**，不是当前在用的机制。这层分层是为可读性与可扩展性付的一点结构性开销，**不改变数值，也不改变 EP 性能**（下方实测：重构后 ep/tp 比值与重构前、与 vLLM 均落在同一区间）。
 
 每个目的 rank 的缓冲区默认按最坏路由（`top_k × ep_size` 份）预留：固定形状避免先交换计数，也能进入 CUDA Graph，极端不均衡也不溢出。**填充行携带 `-1` 专家 id**，`_moe_align_count_kernel` 有范围守卫直接跳过 `[0, num_experts)` 之外的 id——它们跨线但绝不进入 grouped GEMM，combine 时读回零；这修掉了填充行白算专家 GEMM 的浪费（microbench：rows=2048 时 padded 973µs vs exact 374µs，2.60x）。
@@ -57,6 +59,14 @@ GPU 使用 NCCL 和 fused grouped GEMM。CUDA Graph 捕获包含 EP collective�
 ```
 
 它覆盖两 rank dispatch/combine、完整 MoE 前向、量化数值、所有已注册专家权重布局，以及非法路由输入。双 GPU 环境会额外执行 NCCL fused-MoE 与 EP+TBO 数值测试。
+
+DP-attention 的交换契约另有一组不需要 checkpoint 的回归（gloo，spawn 出的两/四 rank 网格）：
+
+```bash
+.venv/bin/python -m pytest tests/distributed/test_dp_attention.py tests/distributed/test_parallel_state.py -q
+```
+
+`test_parallel_state.py` 在两 rank gloo 上验证 `all_gatherv` / `reduce_scatterv` 的等长与变长两档（变长档对照手工 cat 与 all-reduce 切片）；`test_dp_attention.py` 在 dp2×tp2 网格上覆盖两种池化契约——a2a 矩形与默认 AgRs 变长池（无填充行、weights/ids 随行对齐、reduce-scatter 的合成公式、id 窗口掩码）——以及两个交换后端下 MoE 前向与 all-local 参照的数值一致。双 GPU 环境会把同一数值断言在 nccl 与 Triton grouped GEMM 上再跑一遍。
 
 双 GPU 上还有一道真实引擎门禁（`tests/distributed/test_ep_engine.py`）：同一 checkpoint 起 tp2 / ep2 / ep2_tbo / ep2_graph 四个真实两 rank 引擎，要求 EP 的 fork 只落在基线自己 margin（≤ 0.5 nat tie-gap）容许的步骤上——EP 重排 MoE 归约，只能翻转算术上未定的 token：
 
@@ -151,11 +161,11 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 本页的负结果**不能**外推到生产部署——生产推荐 EP 的前提，本测试一个都没占：
 
 1. **TP 出不了 NVLink 域**。V3/R1 671B 的 FP8 权重约 685 GB，8×H100（640 GB）放不下，最小部署 8×H200 或 2×8×H100 起步，必然跨节点；TP 每层两次 all-reduce 不能跨 IB，专家只能按 EP 分出去。本测试两张卡在同一 NVLink 域内，这条从未被触发。
-2. **生产拓扑是 DP-attention + EP，不是纯 EP**。MLA 的压缩 KV（576/层）按 token 共享、无法按注意力头切分，TP 下每个 rank 都要存全批 token 的 KV；DP-attention 把请求分给各 rank（MLA 注意力权重 ~4 GB FP8，复制得起），KV 容量 ×N，还顺手消掉 attention 的 all-reduce。本实现是纯 EP（attention 仍走 TP）——ep2 剩下的 6272 次 all-reduce 就是那一半。
+2. **生产拓扑是 DP-attention + EP，不是纯 EP**。MLA 的压缩 KV（576/层）按 token 共享、无法按注意力头切分，TP 下每个 rank 都要存全批 token 的 KV；DP-attention 把请求分给各 rank（MLA 注意力权重 ~4 GB FP8，复制得起），KV 容量 ×N，还顺手消掉 attention 的 all-reduce。本实现是纯 EP（attention 仍走 TP）——ep2 剩下的 6272 次 all-reduce 就是那一半。DP-attention 的交换面已在库面就位（DP 组、region 与默认的 AgRs 池化——TP>1 的 no-SP 适配见上文五阶段段），差引擎侧把 region 接进 step 循环，KV 容量 ×N 与 attention all-reduce 的消失才进实测。
 3. **交换按需，不按最坏**。DeepEP 的 dispatch 把每个 token 去重后发给实际命中的 ~E[distinct] 个目的（top-8、ep=8 时约 5.25 份），LL 模式还允许溢出丢弃换紧凑容量；本实现默认容量预留线上恒为 `top_k×ep_size` 份——ep=2 时 16 份 vs 需要 ~2 份，ep=8 时 64 份 vs ~5.25，ep=32 时 256 份 vs ~8。本次重构已落下可选的均值+松弛容量（`RAPID_EP_CAPACITY_FACTOR`，DeepEP-LL 定容式 + 标准丢弃语义）+ WARN/STRICT 可见性开关，但默认关，两层原因：ep=2 真实偏斜大（热层 1.58x，factor=1.25 会丢 16% token）；且本机 NVLink 上 a2a 消息太小（decode 0.85-1.0 MB），带宽节省 ~0.1µs/层被集合通信延迟地板淹没，graph 捕获下 NCCL 对更小消息的算法选择反而让 bs16-2k 慢 4%（A/B 交替复现，丢弃率实测仅 0.42% 且 parity 全过）——**容量压缩的收益边界在高 ep_size/大 batch/带宽受限互联**，不在本机这种低延迟双卡拓扑。真正的解法仍是 DeepEP 那样的**去重发送**（而非单纯缩容量）。**wire 随 rank 数线性变差**：不改这条，规模化也兑现不了 EP 的字节优势。
 4. **传输栈**。DeepEP 用 NVSHMEM/RDMA、把排列折进拷贝、单次交换几十 μs；本实现是 NCCL `all_to_all_single` + 独立的 sort/searchsorted/scatter kernel。bs16 下每层 EP 通信路径与 TP 的差值实测 96 μs，而同规模消息在 NVLink 上的线时间 ≈1 μs——差值几乎全是延迟与发射，不是带宽。
 
-结论：rapid_llm 的 EP **正确但 baseline 级**——数值（tie-gap 门禁）、graph 捕获、无损路由都过关；差距是三件事：拓扑配对（DP-attention）、按需交换（去重/动态容量）、融合传输。它们是把 EP 从"扩展维度的正确性路径"变成"性能路径"的先决条件。
+结论：rapid_llm 的 EP **正确但 baseline 级**——数值（tie-gap 门禁）、graph 捕获、无损路由都过关；差距是三件事：拓扑配对（DP-attention）、按需交换（去重/动态容量）、融合传输。其中拓扑配对的交换面已经落地——DP-attention 网格与 region 握手在 `distributed/`，MoE 在 region 激活时默认 AgRs（见上文五阶段段），剩下引擎侧接线；按需交换与融合传输仍是把 EP 从"正确性路径"变成"性能路径"的先决条件。
 
 ### MoE all-reduce 确实没了，但换来的更贵
 

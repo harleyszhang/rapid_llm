@@ -5,7 +5,9 @@
 results → per-token weighted sum). Two backends register on import, keyed by
 :class:`~rapid_llm.modules.moe.utils.MoeA2ABackend`: ``standard`` is the
 non-EP passthrough — every rank already holds all tokens — and ``all_to_all``
-is the EP path over NCCL ``all_to_all_single``. Both ``DispatchOutput`` /
+is the EP path over NCCL ``all_to_all_single``. The AgRs backend is *not* a
+dispatcher: its exchange lives in ``distributed.dp_attention``
+(``dp_dispatch`` / ``dp_combine``). Both ``DispatchOutput`` /
 ``CombineInput`` carry a format tag so the runner can branch on layout
 without isinstance checks.
 

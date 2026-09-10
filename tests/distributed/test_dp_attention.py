@@ -8,14 +8,16 @@ adds is *topology and data movement*, not numerics:
   four per rank twice over. This is the difference between vLLM's DP-attention
   topology and this repo's replica-level DP, and it is the whole reason
   ``get_ep_world_size()`` had to stop being a synonym for the TP world size.
-* **the pooling** — :func:`dp_gather` / :func:`dp_scatter` round-trip a ragged
-  batch (each replica brings a different number of tokens) through the padded
-  rectangle the exchange needs.
+* **the pooling** — both contracts round-trip a ragged batch (each replica
+  brings a different number of tokens): the a2a rectangle (:func:`dp_gather` /
+  :func:`dp_scatter`) and the default AgRs ragged pool (:func:`dp_dispatch` /
+  :func:`dp_combine`), which keeps no pad rows.
 * **the numerics** — a :class:`SparseMoeBlock` forward under ``dp2 x tp2`` with
   EP equals the same block with every expert local, fed the concatenation of
   both replicas' tokens. That is the property that makes DP-attention an
   optimisation rather than a different model: pooling the tokens changes which
-  rank computes an expert, never what the expert computes.
+  rank computes an expert, never what the expert computes. Both pooling
+  backends are run: AgRs (the default) and a2a via ``RAPID_MOE_A2A_BACKEND``.
 
 The fourth is the same numerics claim on **nccl / 2 GPUs**, which is not
 redundant with the gloo tier: the pooled all-gather and the expert exchange run
@@ -42,16 +44,16 @@ _HIDDEN = 64
 _INTER = 32
 _TOP_K = 2
 
-#: Tokens each replica brings to the step. Deliberately unequal: the padded
-#: rectangle :attr:`DPMetadata.padded_tokens` builds is the only reason a
-#: ragged batch can ride one equal-split all-gather, so a test where every
-#: replica brought the same count would never exercise it.
+#: Tokens each replica brings to the step. Deliberately unequal: both pooling
+#: contracts exist precisely for this shape -- the a2a rectangle pads to
+#: :attr:`DPMetadata.padded_tokens`, the AgRs pool compacts without padding --
+#: so a test where every replica brought the same count would exercise neither.
 _ROWS_PER_REPLICA = (3, 5)
 
 #: Tolerance for the fp32 tiers. Not epsilon, and not a fudge: the pooled path
 #: and the all-local reference sum the same products in a different order (the
-#: exchange groups rows by owning expert, and EP applies the routing weight on
-#: the sender), so the two disagree by fp32 rounding on a reduction of
+#: exchange splits each token's expert sum across the owning ranks and adds the
+#: partials back), so the two disagree by fp32 rounding on a reduction of
 #: ``_HIDDEN`` + ``_INTER`` terms. What the test is licensed to claim is that
 #: the difference stays at that scale; a wrong expert or a mis-ordered gather
 #: moves whole rows by O(1), which this still catches by three orders of
@@ -241,7 +243,12 @@ def _gather_scatter_round_trip(rank: int) -> dict:
         return {
             "counts": list(metadata.num_tokens_across_dp),
             "padded": metadata.padded_tokens,
-            "offset": metadata.local_offset,
+            # The rectangle offset dp_scatter slices with, the ragged cumsum
+            # the v-collectives pool with, and the geometry that ties them.
+            "offset": metadata.padded_offset,
+            "local_offset": metadata.local_offset,
+            "total_tokens": metadata.total_tokens,
+            "uniform": metadata.uniform,
             "pooled": pooled[:, 0].tolist(),
             "round_trip": torch.equal(back, mine),
         }
@@ -265,13 +272,134 @@ def test_gather_pads_to_the_widest_replica_and_scatter_inverts_it():
     assert all(entry["pooled"] == expected for entry in seen)
     # Lane 0 of a replica and lane 1 of the same replica pool the same batch.
     assert [entry["offset"] for entry in seen] == [0, 0, 5, 5]
+    # The metadata owns both geometries: the rectangle offset above, the ragged
+    # pool's cumulative one here, and the pool's true row count (3 + 5).
+    assert [entry["local_offset"] for entry in seen] == [0, 0, 3, 3]
+    assert all(entry["total_tokens"] == sum(_ROWS_PER_REPLICA) for entry in seen)
+    assert not any(entry["uniform"] for entry in seen)
+
+
+# --------------------------------------------------------------------------- #
+# the AgRs exchange
+# --------------------------------------------------------------------------- #
+def _agrs_exchange_round_trip(rank: int) -> dict:
+    """The AgRs contract in one rank's hands: dispatch, combine, and the mask.
+
+    Both batch shapes ride the same helper: the step's ragged ``(3, 5)`` and an
+    equal ``(4, 4)`` -- the plain-collective fast path. What is pinned here:
+
+    * the ragged pool is the *concatenation* of the counts -- eight rows, no
+      pad rows, against the a2a rectangle's ten;
+    * the three tensors arrive row-aligned (one marker per row);
+    * ``dp_combine`` returns this replica's rows at four times their pooled
+      value: two DP peers meet in the reduce-scatter, two TP lanes in the
+      all-reduce after it;
+    * the id mask rebases this rank's window and marks everything else -1.
+    """
+    from rapid_llm.distributed.dp_attention import (
+        dp_attention_region,
+        dp_combine,
+        dp_dispatch,
+    )
+
+    replica = ps.get_data_parallel_rank()
+    num_local = _NUM_EXPERTS // ps.get_ep_world_size()
+    expert_offset = ps.get_ep_rank() * num_local
+
+    def exchange(rows: int) -> dict:
+        # Row content identifies its owner: replica r's row i is filled with
+        # r * 10 + i, weights carry +0.5 on top, ids sweep the expert range --
+        # a mis-ordered concatenation is visible, not epsilon-wrong.
+        marker = torch.arange(rows, dtype=torch.float32).add(10 * replica)
+        x = marker.unsqueeze(-1).repeat(1, 4)
+        weights = (marker + 0.5).unsqueeze(-1)
+        ids = ((marker.to(torch.int64) * 3 + 1) % _NUM_EXPERTS).unsqueeze(-1)
+        with dp_attention_region(rows) as metadata:
+            pool_x, pool_w, pool_ids = dp_dispatch(x, weights, ids, metadata)
+            combined = dp_combine(pool_x, metadata)
+            # The layer's CPU rebase branch, verbatim: inside the window the id
+            # shifts by the offset, outside it is -1 for the grouped GEMM.
+            local = pool_ids.reshape(-1) - expert_offset
+            masked = torch.where(
+                (local >= 0) & (local < num_local), local, torch.full_like(local, -1)
+            )
+            return {
+                "counts": list(metadata.num_tokens_across_dp),
+                "uniform": metadata.uniform,
+                "pool_x": pool_x[:, 0].tolist(),
+                "pool_w": pool_w[:, 0].tolist(),
+                "pool_ids": pool_ids[:, 0].tolist(),
+                "combined": combined[:, 0].tolist(),
+                "combined_rows": combined.shape[0],
+                "masked": masked.tolist(),
+            }
+
+    return {
+        "replica": replica,
+        "rank": rank,
+        "ragged": exchange(_ROWS_PER_REPLICA[replica]),
+        "equal": exchange(4),
+    }
+
+
+def test_agrs_exchange_pools_ragged_and_combines_by_reduce_scatter():
+    """The AgRs contract on gloo: a ragged pool, aligned routing, a 4x combine.
+
+    vLLM's default expert exchange as rapid_llm lands it: one ragged all-gather
+    carries hidden + weights + ids, one reduce-scatter (plus the TP all-reduce
+    the no-SP adaptation needs) brings each row's expert sum back -- and an
+    equal batch takes the plain collectives to the same place.
+    """
+    seen = run_on_tp_ranks(
+        _agrs_exchange_round_trip,
+        tp_size=2,
+        dp_size=2,
+        backend="gloo",
+        enable_expert_parallel=True,
+        enable_dp_attention=True,
+    )
+    ragged_markers = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+    for entry in seen:
+        ragged = entry["ragged"]
+        assert ragged["counts"] == list(_ROWS_PER_REPLICA)
+        assert not ragged["uniform"]
+        # Eight rows -- the concatenation, no pad -- against the a2a rectangle's
+        # ten (each count padded to the wider one); and the routing rode along.
+        assert ragged["pool_x"] == ragged_markers
+        assert ragged["pool_w"] == [m + 0.5 for m in ragged_markers]
+        assert ragged["pool_ids"] == [1, 4, 7, 7, 2, 5, 0, 3]
+        rows = _ROWS_PER_REPLICA[entry["replica"]]
+        markers = [10 * entry["replica"] + i for i in range(rows)]
+        assert ragged["combined"] == [4.0 * m for m in markers]
+        assert ragged["combined_rows"] == rows
+        # The mask is per *EP* rank -- window [rank * 2, rank * 2 + 2) here,
+        # since eight experts split over four EP ranks -- so the two lanes of
+        # one replica mask differently, as they must.
+        offset = entry["rank"] * (_NUM_EXPERTS // 4)
+        expected = [
+            i - offset if 0 <= i - offset < _NUM_EXPERTS // 4 else -1 for i in ragged["pool_ids"]
+        ]
+        assert ragged["masked"] == expected
+
+        equal = entry["equal"]
+        assert equal["counts"] == [4, 4]
+        assert equal["uniform"]
+        # The equal batch takes the plain collectives -- the fast path -- to the
+        # same formula on the same row count (4 + 4).
+        assert equal["pool_x"] == [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0]
+        assert equal["combined"] == [4.0 * (10 * entry["replica"] + i) for i in range(4)]
+        assert equal["combined_rows"] == 4
 
 
 # --------------------------------------------------------------------------- #
 # the numerics
 # --------------------------------------------------------------------------- #
 def _moe_under_dp_attention(rank: int) -> list:
-    """This rank's MoE output for its replica's batch, pooled across the DP axis."""
+    """This rank's MoE output for its replica's batch, pooled across the DP axis.
+
+    The default backend under DP-attention is AgRs, so this is the pool-carrying
+    path: route locally, exchange hidden + routing, reduce-scatter back.
+    """
     from rapid_llm.distributed.dp_attention import dp_attention_region
 
     config = _make_config()
@@ -279,6 +407,12 @@ def _moe_under_dp_attention(rank: int) -> list:
     tokens = _replica_tokens(ps.get_data_parallel_rank(), config.dtype)
     with torch.no_grad(), dp_attention_region(tokens.shape[0]):
         return block(tokens).float().tolist()
+
+
+def _moe_under_dp_attention_a2a(rank: int) -> list:
+    """The same forward with the a2a rectangle selected via the env override."""
+    os.environ["RAPID_MOE_A2A_BACKEND"] = "all_to_all"
+    return _moe_under_dp_attention(rank)
 
 
 def _moe_all_experts_local(rank: int) -> list:
@@ -293,27 +427,30 @@ def _moe_all_experts_local(rank: int) -> list:
 def test_dp_attention_moe_matches_a_single_process_forward():
     """``dp2 x tp2`` + EP == one process holding every expert, fed both batches.
 
-    The per-rank outputs concatenate back into the reference in replica order,
-    and the two TP lanes of a replica agree exactly -- they hold the same
-    requests, so a disagreement would mean the pooling depended on which slice
-    of the attention weights a rank owns.
+    Run once per pooling backend -- the default AgRs and the env-pinned a2a --
+    because the two split each token's expert sum across ranks differently and
+    the numerics claim is about the whole path, not one transport. The per-rank
+    outputs concatenate back into the reference in replica order, and the two
+    TP lanes of a replica agree exactly -- they hold the same requests, so a
+    disagreement would mean the pooling depended on which slice of the
+    attention weights a rank owns.
     """
-    sharded = run_on_tp_ranks(
-        _moe_under_dp_attention,
-        tp_size=2,
-        dp_size=2,
-        backend="gloo",
-        enable_expert_parallel=True,
-        enable_dp_attention=True,
-    )
     (reference,) = run_on_tp_ranks(_moe_all_experts_local, tp_size=1, backend="gloo")
-
-    assert sharded[0] == sharded[1], "TP lanes of replica 0 disagree"
-    assert sharded[2] == sharded[3], "TP lanes of replica 1 disagree"
-    pooled = torch.tensor(sharded[0] + sharded[2])
     expected = torch.tensor(reference)
-    assert pooled.shape == expected.shape
-    torch.testing.assert_close(pooled, expected, **_FP32_TOL)
+    for payload in (_moe_under_dp_attention, _moe_under_dp_attention_a2a):
+        sharded = run_on_tp_ranks(
+            payload,
+            tp_size=2,
+            dp_size=2,
+            backend="gloo",
+            enable_expert_parallel=True,
+            enable_dp_attention=True,
+        )
+        assert sharded[0] == sharded[1], f"{payload.__name__}: TP lanes of replica 0 disagree"
+        assert sharded[2] == sharded[3], f"{payload.__name__}: TP lanes of replica 1 disagree"
+        pooled = torch.tensor(sharded[0] + sharded[2])
+        assert pooled.shape == expected.shape
+        torch.testing.assert_close(pooled, expected, **_FP32_TOL)
 
 
 def _moe_dp_only(rank: int) -> list:
@@ -328,32 +465,46 @@ def _moe_dp_only(rank: int) -> list:
         return block(tokens).float().tolist()
 
 
+def _moe_dp_only_a2a(rank: int) -> list:
+    """The same two-rank forward with the a2a pooling selected explicitly."""
+    os.environ["RAPID_MOE_A2A_BACKEND"] = "all_to_all"
+    return _moe_dp_only(rank)
+
+
 def test_dp_attention_without_tensor_parallelism():
     """``dp2 x tp1`` still builds a DP group: pure DP-attention needs no TP.
 
     The case the old ``tp_size <= 1`` early return in ``init_parallel`` made
     unreachable, and the smallest topology that is recognisably sglang's
     DeepSeek deployment -- attention data-parallel, experts split across the
-    same ranks.
+    same ranks. Both pooling backends again; with ``tp == 1`` there is no TP
+    all-reduce after the combine, so this is each contract in its plainest
+    shape.
     """
-    sharded = run_on_tp_ranks(
-        _moe_dp_only,
-        tp_size=1,
-        dp_size=2,
-        backend="gloo",
-        enable_expert_parallel=True,
-        enable_dp_attention=True,
-    )
     (reference,) = run_on_tp_ranks(_moe_all_experts_local, tp_size=1, backend="gloo")
-    pooled = torch.tensor(sharded[0] + sharded[1])
-    torch.testing.assert_close(pooled, torch.tensor(reference), **_FP32_TOL)
+    expected = torch.tensor(reference)
+    for payload in (_moe_dp_only, _moe_dp_only_a2a):
+        sharded = run_on_tp_ranks(
+            payload,
+            tp_size=1,
+            dp_size=2,
+            backend="gloo",
+            enable_expert_parallel=True,
+            enable_dp_attention=True,
+        )
+        pooled = torch.tensor(sharded[0] + sharded[1])
+        torch.testing.assert_close(pooled, expected, **_FP32_TOL)
 
 
 # --------------------------------------------------------------------------- #
 # nccl / 2 GPUs: the same pooling on the real transport and the fused GEMM
 # --------------------------------------------------------------------------- #
 def _moe_dp_only_cuda(rank: int) -> list:
-    """``dp2 x tp1`` + EP on device: pooled all-gather over nccl, experts fused."""
+    """``dp2 x tp1`` + EP on device: the AgRs pool over nccl, experts fused.
+
+    The device tier's extra for this backend: the pooled routing crosses nccl,
+    and the id rebase runs as its Triton kernel rather than the CPU chain.
+    """
     from rapid_llm.distributed.dp_attention import dp_attention_region
 
     device = f"cuda:{rank}"
@@ -365,6 +516,12 @@ def _moe_dp_only_cuda(rank: int) -> list:
     tokens = _replica_tokens(ps.get_data_parallel_rank(), config.dtype).to(device)
     with torch.no_grad(), dp_attention_region(tokens.shape[0]):
         return block(tokens).float().cpu().tolist()
+
+
+def _moe_dp_only_cuda_a2a(rank: int) -> list:
+    """The same device forward with the a2a pooling selected explicitly."""
+    os.environ["RAPID_MOE_A2A_BACKEND"] = "all_to_all"
+    return _moe_dp_only_cuda(rank)
 
 
 def _moe_all_experts_local_cuda(rank: int) -> list:
@@ -384,20 +541,23 @@ def _moe_all_experts_local_cuda(rank: int) -> list:
 def test_dp_attention_moe_on_device_matches_all_experts_local():
     """``dp2 x tp1`` + EP over nccl == one device holding every expert.
 
-    Tolerance is the bfloat16 grouped-GEMM tolerance used elsewhere in the EP
-    tests, not the gloo tier's: the two sides reduce the same products in a
-    different order, so agreeing to fp32 epsilon was never the claim.
+    Both pooling backends; the AgRs run also puts the Triton id-rebase kernel
+    on a real device. Tolerance is the bfloat16 grouped-GEMM tolerance used
+    elsewhere in the EP tests, not the gloo tier's: the two sides reduce the
+    same products in a different order, so agreeing to fp32 epsilon was never
+    the claim.
     """
-    sharded = run_on_tp_ranks(
-        _moe_dp_only_cuda,
-        tp_size=1,
-        dp_size=2,
-        backend="nccl",
-        enable_expert_parallel=True,
-        enable_dp_attention=True,
-    )
     (reference,) = run_on_tp_ranks(_moe_all_experts_local_cuda, tp_size=1, backend="nccl")
-    pooled = torch.tensor(sharded[0] + sharded[1])
     expected = torch.tensor(reference)
-    assert pooled.shape == expected.shape
-    torch.testing.assert_close(pooled, expected, **_BF16_TOL)
+    for payload in (_moe_dp_only_cuda, _moe_dp_only_cuda_a2a):
+        sharded = run_on_tp_ranks(
+            payload,
+            tp_size=1,
+            dp_size=2,
+            backend="nccl",
+            enable_expert_parallel=True,
+            enable_dp_attention=True,
+        )
+        pooled = torch.tensor(sharded[0] + sharded[1])
+        assert pooled.shape == expected.shape
+        torch.testing.assert_close(pooled, expected, **_BF16_TOL)
