@@ -202,8 +202,15 @@ class CUDAGraphRunner:
         """Load a synthetic but valid decode step into the persistent buffers.
 
         Seeded on the host, so two TP ranks produce identical ids with no broadcast.
-        KV rows are ``arange``, not all-zero: pointed at row 0 the batch's writes
-        would race and the step would stop being reproducible.
+        ``cur_select_index`` is gathered from the token table —
+        ``table[b_req_idx, b_seq_len - 1]`` — because that is the invariant every
+        real decode step has (``SlotBatch`` derives it the same way): each row
+        writes the cache slot its own read path ends at. An ``arange`` instead
+        once pointed row 0's writes at slots inside row 0's *read path* that
+        other rows were about to write, so under the two-batch interleave the
+        first eager pass read pre-write state where every later pass (and the
+        replay) read post-write state — a probe that pinned the test's
+        ordering rather than the graph's.
         """
         generator = torch.Generator().manual_seed(
             _PARITY_SEED + self.batch_size * 100_003 + self.seq_len_bucket
@@ -214,11 +221,13 @@ class CUDAGraphRunner:
         self.input_ids.copy_(ids)
         self.position_ids.fill_(length - 1)
         self.atten_info.b_seq_len.fill_(length)
-        self.atten_info.cur_select_index.copy_(
-            torch.arange(self.batch_size, dtype=self.atten_info.cur_select_index.dtype)
-        )
         self.atten_info.b_req_idx.copy_(
             torch.arange(self.batch_size, dtype=self.atten_info.b_req_idx.dtype)
+        )
+        # Gathered after b_req_idx is in place — the write slot is derived from
+        # the read path, never chosen independently of it (see class docstring).
+        self.atten_info.cur_select_index.copy_(
+            self.atten_info.b_req_tokens_table[self.atten_info.b_req_idx, length - 1]
         )
 
     def parity_error(self, vocab_size: int) -> float:
