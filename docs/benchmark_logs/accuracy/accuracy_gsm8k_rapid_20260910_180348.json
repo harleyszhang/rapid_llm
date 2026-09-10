@@ -1,0 +1,21 @@
+{
+  "model_dir": "/home/honggao/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots/060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_gen_len": 256,
+  "batch_size": 32,
+  "accuracy": 0.335,
+  "invalid_rate": 0.0,
+  "latency_s": 10.088473338633776,
+  "generated_tokens": 30667,
+  "extra": {
+    "benchmark": "gsm8k",
+    "chat_template": "False",
+    "quantization": "none",
+    "kv_cache_dtype": "auto"
+  },
+  "questions_per_second": 19.82460509997094,
+  "tokens_per_second": 3039.805823004044,
+  "engine": "rapid_llm",
+  "cuda_graph": "on (default)"
+}

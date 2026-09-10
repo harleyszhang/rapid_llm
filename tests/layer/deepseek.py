@@ -15,7 +15,7 @@ eagerly, same module structure and quantization paths as the full models:
   attention require DeepGEMM, SM90+ only
   (``vllm/platforms/cuda.py::support_deep_gemm``) — so the reference is
   transformers 5.15's eager DeepseekV4ForCausalLM on CPU, its weights filled
-  from the DSpark files by :mod:`benchmarks.accuracy.dspark_to_hf`. The
+  from the DSpark files by :mod:`tests.layer.dspark_to_hf`. The
   rapid_llm side consumes the DSpark storage directly (TP-2, fp8/mxfp4)
   over the tests' tp harness, so the two sides meet through their JSONs.
 
@@ -25,15 +25,15 @@ and every step records its top-5 logprobs, the comparison record the
 agreement subcommands consume.
 
     rapid_llm venv, single GPU:
-        python -m benchmarks.accuracy.deepseek v3 parity
+        python -m tests.layer.deepseek v3 parity
     vLLM source tree's venv:
-        /path/to/vllm-venv/python -m benchmarks.accuracy.deepseek v3 vllm
+        /path/to/vllm-venv/python -m tests.layer.deepseek v3 vllm
     rapid_llm venv, GPUs (TP-2) / CPU:
-        python -m benchmarks.accuracy.deepseek v4 lite
-        python -m benchmarks.accuracy.deepseek v4 hf
+        python -m tests.layer.deepseek v4 lite
+        python -m tests.layer.deepseek v4 hf
     analyses (either venv):
-        python -m benchmarks.accuracy.deepseek v3 three-way PARITY.json VLLM.json
-        python -m benchmarks.accuracy.deepseek v4 compare LITE.json HF.json
+        python -m tests.layer.deepseek v3 three-way PARITY.json VLLM.json
+        python -m tests.layer.deepseek v4 compare LITE.json HF.json
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 GREEDY_STEPS = 32
-LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+LOG_DIR = Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "accuracy"
 
 V3_CKPT = "/data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16"
 V4_CKPT = "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers"
@@ -466,8 +466,8 @@ def cmd_v4_hf(args) -> int:
 
     from transformers.models.deepseek_v4 import DeepseekV4ForCausalLM
 
-    from benchmarks.accuracy.dspark_to_hf import load_dspark_hf
     from rapid_llm.models.config import ModelConfig
+    from tests.layer.dspark_to_hf import load_dspark_hf
 
     config = ModelConfig.from_pretrained(V4_CKPT, max_seq_len=2048).hf_config
     with torch.device("meta"):

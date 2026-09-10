@@ -11,7 +11,7 @@ verifies itself three ways: probe asserts on the table, a meta/missing sweep
 over the filled model, and a reopen of the written shards.
 
     rapid_llm venv (CPU only, no GPU needed):
-        python -X pycache_prefix=/tmp/pyc_v4conv -m benchmarks.accuracy.convert_v4_hf
+        python -X pycache_prefix=/tmp/pyc_v4conv -m tests.layer.convert_v4_hf
 Output: /data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2
 """
 
@@ -88,7 +88,9 @@ _EXPERT = re.compile(r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.w([123])\.(weight|sc
 _LAYER_PREFIX = re.compile(r"^layers\.(\d+)\.(.+)$")
 
 #: E2M1 lookup for one nibble (sign bit set -> negative half of the table).
-_E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
+_E2M1 = torch.tensor(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+)
 
 
 def hf_key(dspark_key: str) -> str:
@@ -147,7 +149,10 @@ def main() -> int:
     assert hf_key("head.weight") == "lm_head.weight"
     assert hf_key("layers.0.attn.wq_a.weight") == "model.layers.0.self_attn.q_a_proj.weight"
     assert hf_key("layers.0.ffn.gate.tid2eid") == "model.layers.0.mlp.gate.tid2eid"
-    assert float(e8m0_to_fp32(torch.tensor([127], dtype=torch.uint8).view(torch.float8_e8m0fnu))[0]) == 1.0
+    assert (
+        float(e8m0_to_fp32(torch.tensor([127], dtype=torch.uint8).view(torch.float8_e8m0fnu))[0])
+        == 1.0
+    )
 
     config = ModelConfig.from_pretrained(CKPT, max_seq_len=2048).hf_config
     with torch.device("meta"):
@@ -225,7 +230,9 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     for old in OUT.glob("model-*.safetensors"):
         old.unlink()
-    model.save_pretrained(OUT, safe_serialization=True, max_shard_size="12GB", save_original_format=False)
+    model.save_pretrained(
+        OUT, safe_serialization=True, max_shard_size="12GB", save_original_format=False
+    )
     for f in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
         src = ckpt / f
         if src.exists():

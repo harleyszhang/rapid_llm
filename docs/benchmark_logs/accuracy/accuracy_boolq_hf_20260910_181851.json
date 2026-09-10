@@ -1,0 +1,14 @@
+{
+  "engine": "hf",
+  "model_dir": "/data/shared/llm_weights/Qwen2.5-1.5B-Instruct",
+  "num_questions": 200,
+  "num_shots": 5,
+  "batch_size": 16,
+  "chat_template": "False",
+  "accuracy": 0.66,
+  "invalid_rate": 0.015,
+  "latency_s": 15.967126678675413,
+  "generated_tokens": 1200,
+  "questions_per_second": 12.525735157290768,
+  "tokens_per_second": 75.15441094374461
+}

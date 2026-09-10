@@ -1,0 +1,14 @@
+{
+  "engine": "hf",
+  "model_dir": "/data/shared/llm_weights/Qwen3-1.7B",
+  "num_questions": 200,
+  "num_shots": 5,
+  "batch_size": 16,
+  "chat_template": "False",
+  "accuracy": 0.68,
+  "invalid_rate": 0.0,
+  "latency_s": 19.752933904528618,
+  "generated_tokens": 1200,
+  "questions_per_second": 10.1250781765714,
+  "tokens_per_second": 60.7504690594284
+}

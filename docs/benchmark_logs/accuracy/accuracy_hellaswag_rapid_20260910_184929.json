@@ -1,0 +1,12 @@
+{
+  "engine": "rapid_llm",
+  "model_dir": "/data/shared/llm_weights/Qwen2.5-1.5B-Instruct",
+  "num_questions": 200,
+  "num_shots": 20,
+  "batch_size": 8,
+  "cuda_graph": "on (default)",
+  "accuracy": 0.52,
+  "accuracy_len": 0.58,
+  "latency_s": 43.98040345311165,
+  "questions_per_second": 4.5474798841539465
+}

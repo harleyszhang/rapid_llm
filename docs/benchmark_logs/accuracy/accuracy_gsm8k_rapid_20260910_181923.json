@@ -1,0 +1,21 @@
+{
+  "model_dir": "/data/shared/llm_weights/Qwen3-0.6B",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_gen_len": 256,
+  "batch_size": 32,
+  "accuracy": 0.385,
+  "invalid_rate": 0.0,
+  "latency_s": 21.77232190221548,
+  "generated_tokens": 51200,
+  "extra": {
+    "benchmark": "gsm8k",
+    "chat_template": "False",
+    "quantization": "none",
+    "kv_cache_dtype": "auto"
+  },
+  "questions_per_second": 9.185974784786213,
+  "tokens_per_second": 2351.6095449052705,
+  "engine": "rapid_llm",
+  "cuda_graph": "on (default)"
+}

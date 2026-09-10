@@ -1,0 +1,12 @@
+{
+  "engine": "rapid_llm",
+  "model_dir": "/home/honggao/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots/060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "num_questions": 200,
+  "num_shots": 20,
+  "batch_size": 16,
+  "cuda_graph": "on (default)",
+  "accuracy": 0.44,
+  "accuracy_len": 0.48,
+  "latency_s": 21.10684698075056,
+  "questions_per_second": 9.475598140375961
+}

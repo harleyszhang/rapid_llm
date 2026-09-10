@@ -1,0 +1,11 @@
+{
+  "engine": "hf",
+  "model_dir": "/data/shared/llm_weights/Qwen3-1.7B",
+  "num_questions": 200,
+  "num_shots": 20,
+  "batch_size": 8,
+  "accuracy": 0.455,
+  "accuracy_len": 0.51,
+  "latency_s": 58.350755661726,
+  "questions_per_second": 3.427547728078284
+}
