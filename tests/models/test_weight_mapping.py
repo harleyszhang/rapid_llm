@@ -20,6 +20,9 @@ from rapid_llm.executor.weight_utils import hf_weight_files
 from rapid_llm.models import weights
 from rapid_llm.models.base import CausalLM
 from rapid_llm.modules import ColumnParallelLinear, QKVParallelLinear, SparseMoeBlock
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 #: The packed-mapping the text models actually use; the translator is a pure
 #: function of the key and this table, so the tests exercise the production rules

@@ -1,9 +1,15 @@
 """Shared fixtures and collection policy for the rapid_llm test suite.
 
-``pytest_ignore_collect`` drops tests that import Triton-only runtime paths
-before Python imports them on a machine without CUDA; fixtures expose the
-resolved model dir, reset torch state, and keep dispatch deterministic
-between tests.
+Three policies live here:
+
+* Which modules a machine without CUDA may import at all: answered from the
+  per-module declarations in :mod:`tests.registry` (parsed with :mod:`ast`,
+  so finding out never imports anything).
+* What a marker means on this machine: ``gpu``/``weights`` become skips, and
+  the golden gate reports UNVERIFIED -- never a silent skip -- or fails
+  under ``RAPID_LLM_GOLDEN_STRICT=1``.
+* What must hold around every test: seeded torch state, a pinned dispatch
+  switch, and a rank grid restored to a world of one.
 
 Usage:
     pytest tests/   # collection policy from this file applies automatically
@@ -17,6 +23,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.registry import IMPORT_NEEDS_CUDA, declares
+
 # tests/conftest.py -> tests/ -> repository root.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,32 +37,12 @@ DEFAULT_MODEL_NAME = "Qwen2.5-0.5B"
 #: integration tier without symlinking them into ``my_weight/``.
 MODELZOO_ENV = "RAPID_LLM_MODELZOO"
 
-#: Directories whose tests always need a CUDA device.
+#: Directories whose modules reach the Triton runtime at module scope: the
+#: whole directory leaves collection on a machine without CUDA. Everything
+#: else answers for itself -- a module that cannot be imported there says so
+#: in its own source, with an :func:`~tests.registry.import_needs_cuda`
+#: declaration (see ``tests/registry.py`` for why a marker cannot do this).
 _GPU_ONLY_DIRS = ("kernels",)
-
-# These modules exercise the full GPU runtime but import it at module scope.
-# A ``gpu`` marker cannot help there: pytest evaluates it only after importing
-# the module, by which point macOS/CPU environments have already failed on the
-# optional Linux-only ``triton`` dependency. Keep CPU unit tests in their
-# neighbouring directories collectable instead of excluding whole directories.
-_GPU_RUNTIME_FILES = frozenset(
-    {
-        "compile/test_cuda_graph.py",
-        "engine/test_chunked_prefill.py",
-        "engine/test_continuous_batching.py",
-        "engine/test_continuous_perf.py",
-        "engine/test_engine_e2e.py",
-        "engine/test_llm_entrypoint.py",
-        "evals/test_gsm8k_correctness.py",
-        "evals/test_gsm8k_scoring.py",
-        "golden/test_deepseek_trimmed_parity.py",
-        "golden/test_logprob_parity.py",
-        "golden/test_token_parity.py",
-        "models/test_quant_methods.py",
-        "models/test_qwen3_moe.py",
-        "multimodal/test_multimodal.py",
-    }
-)
 
 #: Directories that constitute the golden gate — these must never silently skip.
 _GOLDEN_DIRS = ("golden",)
@@ -62,13 +50,19 @@ _GOLDEN_DIRS = ("golden",)
 #: When set, golden tests that cannot run become hard FAILs instead of xfail.
 _GOLDEN_STRICT = os.environ.get("RAPID_LLM_GOLDEN_STRICT", "") == "1"
 
+#: Marker `_golden_outcome` adds under the strict gate; `pytest_runtest_setup`
+#: turns it into a FAILED report. Registered in `pytest_configure`.
+_GOLDEN_GATE_FAIL = "golden_gate_fail"
+
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    """Do not import Triton-only test modules on a machine without CUDA.
+    """Do not import CUDA-bound test modules on a machine without CUDA.
 
-    Marker selection happens after Python imports a test module. Where Triton
-    is intentionally not installed (macOS), merely collecting ``tests/kernels``
-    would fail before the automatic ``gpu`` skip can apply.
+    Marker selection happens after Python imports a test module, so a module
+    whose *import* needs the Triton/CUDA runtime must leave collection before
+    pytest reaches it: files under ``_GPU_ONLY_DIRS`` by location, anything
+    else by the declaration in its own source (:func:`tests.registry.declares`
+    -- parsed, never imported).
     """
     if torch.cuda.is_available():
         return None
@@ -78,7 +72,9 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
         return None
     if any(relative.parts[:2] == ("tests", d) for d in _GPU_ONLY_DIRS):
         return True
-    return relative.as_posix().removeprefix("tests/") in _GPU_RUNTIME_FILES or None
+    if collection_path.suffix != ".py":
+        return None
+    return declares(collection_path, IMPORT_NEEDS_CUDA) or None
 
 
 def checkpoint_candidates(reference: str) -> list[Path]:
@@ -151,13 +147,44 @@ def _is_golden(nodeid: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Collection policy
 # --------------------------------------------------------------------------- #
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the marker the strict golden gate adds to unrunnable tests."""
+    config.addinivalue_line(
+        "markers",
+        "golden_gate_fail(reason): a golden test this machine cannot run while "
+        "RAPID_LLM_GOLDEN_STRICT=1; reported as FAILED, never as a skip",
+    )
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Report a strict-gated golden test as FAILED instead of skipped.
+
+    No marker combination expresses "cannot run *and* must fail": ``skip``
+    outranks ``xfail``, and ``xfail(run=False)`` reports xfailed even under
+    ``strict=True``. Failing from setup does say FAILED, which is what the
+    strict gate promises.
+    """
+    gate = item.get_closest_marker(_GOLDEN_GATE_FAIL)
+    if gate is not None:
+        pytest.fail(gate.kwargs.get("reason", "golden gate: cannot run"))
+
+
+def _golden_outcome(reason: str):
+    """How a golden test that cannot run is reported on this machine.
+
+    UNVERIFIED -- yellow/orange in CI, never green -- unless
+    ``RAPID_LLM_GOLDEN_STRICT=1`` upgrades it to a hard failure.
+    """
+    if _GOLDEN_STRICT:
+        return getattr(pytest.mark, _GOLDEN_GATE_FAIL)(reason=f"GOLDEN GATE FAIL: {reason}")
+    return pytest.mark.xfail(reason=f"UNVERIFIED: {reason}", run=False)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Apply directory-based marks, then skip what the machine cannot run.
 
-    For golden tests the outcome is never a silent skip:
-    - ``RAPID_LLM_GOLDEN_STRICT=1``: hard FAIL (pytest.fail at collect time).
-    - Otherwise: ``xfail(reason="UNVERIFIED: ...", run=False)`` — shows as
-      yellow/orange in CI rather than green.
+    For golden tests the outcome is never a silent skip; see
+    :func:`_golden_outcome`.
     """
     model_dir = _resolve_model_dir()
     checkpoint_problem_reason = checkpoint_problem(model_dir)
@@ -177,52 +204,67 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         is_golden_test = _is_golden(item.nodeid)
 
         if cuda_missing and "gpu" in item.keywords:
-            if is_golden_test:
-                # Golden tests must NOT silently skip — mark as UNVERIFIED.
-                if _GOLDEN_STRICT:
-                    item.add_marker(pytest.mark.skip(reason="GOLDEN GATE FAIL: no CUDA device"))
-                    # Override with a custom fixture that calls pytest.fail
-                    item.add_marker(
-                        pytest.mark.xfail(
-                            reason="UNVERIFIED: no CUDA device (set RAPID_LLM_GOLDEN_STRICT=1 to hard-fail)",
-                            run=False,
-                            strict=True,
-                        )
-                    )
-                else:
-                    item.add_marker(
-                        pytest.mark.xfail(
-                            reason="UNVERIFIED: no CUDA device",
-                            run=False,
-                        )
-                    )
-            else:
-                item.add_marker(skip_gpu)
+            item.add_marker(_golden_outcome("no CUDA device") if is_golden_test else skip_gpu)
 
         if checkpoint_problem_reason and "weights" in item.keywords:
-            if is_golden_test:
-                if _GOLDEN_STRICT:
-                    item.add_marker(
-                        pytest.mark.xfail(
-                            reason=f"UNVERIFIED: {checkpoint_problem_reason}",
-                            run=False,
-                            strict=True,
-                        )
-                    )
-                else:
-                    item.add_marker(
-                        pytest.mark.xfail(
-                            reason=f"UNVERIFIED: {checkpoint_problem_reason}",
-                            run=False,
-                        )
-                    )
-            else:
-                item.add_marker(skip_weights)
+            item.add_marker(
+                _golden_outcome(checkpoint_problem_reason) if is_golden_test else skip_weights
+            )
 
 
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
+#: ``parallel_state``'s coordinates after ``_reset_grid()``, read through the
+#: public accessors. ``_restore_parallel_grid`` compares against this.
+_WORLD_OF_ONE = (0, 1, 0, 1, 0, 1, False, False, False, False, False)
+
+
+@pytest.fixture(autouse=True)
+def _restore_parallel_grid():
+    """Restore the rank grid after every test; accuse a test that left it dirty.
+
+    ``rapid_llm.distributed.parallel_state`` keeps the grid in module globals,
+    and a teardown that cannot finish -- ``destroy_parallel`` raising out of
+    ``dist.destroy_process_group`` when its peer is already gone -- leaves
+    ``tp_size=2`` behind for the rest of the process: the next engine build
+    reads a world nobody asked for, and tests fail far from the leak.
+
+    Fixture teardown is innermost-first, so this conftest-level finalizer runs
+    *after* module-local teardowns (the ``_reset_grid`` fixtures in
+    tests/distributed and friends) -- anything still standing belongs to the
+    test that just ended. The state is cleared through ``abandon_parallel``:
+    ``destroy_parallel`` may be the very call that hung or raised, and this
+    path must not depend on it.
+    """
+    yield
+    from rapid_llm.distributed import parallel_state as ps
+
+    # Every public coordinate the module exposes, against _reset_grid's
+    # defaults; group objects are observed by presence.
+    observed = (
+        ps.get_tensor_model_parallel_rank(),
+        ps.get_tensor_model_parallel_world_size(),
+        ps.get_data_parallel_rank(),
+        ps.get_data_parallel_world_size(),
+        ps.get_ep_rank(),
+        ps.get_ep_world_size(),
+        ps.expert_parallel_enabled(),
+        ps.dp_attention_enabled(),
+        ps.get_tensor_model_parallel_group() is not None,
+        ps.get_data_parallel_group() is not None,
+        ps.get_ep_group() is not None,
+    )
+    if observed == _WORLD_OF_ONE:
+        return
+    ps.abandon_parallel()
+    pytest.fail(
+        f"left the parallel_state grid dirty: {observed} != {_WORLD_OF_ONE}; "
+        "the test's teardown did not return the process to a world of one "
+        "(the grid was reset, so later tests are not poisoned)"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_torch_state():
     """Seed every test identically and drop cached blocks afterwards.
@@ -248,14 +290,21 @@ os.environ["RAPID_LLM_FROZEN_RANK"] = "0"
 
 
 @pytest.fixture(autouse=True)
-def _frozen_rank_off(monkeypatch: pytest.MonkeyPatch):
+def _frozen_rank_off():
     """Re-pin the switch per test, so one opting in cannot leak the opt-in.
 
     A test opting into frozen ranking sets ``RAPID_LLM_FROZEN_RANK=1`` (via
-    monkeypatch) for its own duration; teardown restores the process-wide
-    ``"0"`` above rather than an unset variable.
+    monkeypatch) for its own duration; that undo restores the process-wide
+    ``"0"`` from this module's import, and this re-pin also covers a test
+    that unsets the variable outright.
+
+    A plain assignment, not ``monkeypatch.setenv``: a fixture that *depends*
+    on monkeypatch is set up before every other fixture and torn down after
+    them all, so the dependency would defer every test's monkeypatch undo
+    past the grid guard above -- and a grid simulated with
+    ``monkeypatch.setattr`` would still be standing when the guard looks.
     """
-    monkeypatch.setenv("RAPID_LLM_FROZEN_RANK", "0")
+    os.environ["RAPID_LLM_FROZEN_RANK"] = "0"
 
 
 @pytest.fixture(scope="session")
@@ -274,3 +323,32 @@ def cuda_available() -> bool:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
     return True
+
+
+def needs_capability(minimum: tuple[int, int], feature: str):
+    """Mark a test as needing a CUDA device of at least ``minimum`` capability.
+
+    The tier half is the ``gpu`` mark, the same reasoning as ``needs_gpus`` in
+    tests/distributed: a CPU-tier run must not reach for kernels it has no
+    device to test. The skip half tells "this box cannot verify the claim"
+    apart from "the claim is false": fp8 e4m3 starts at sm_89 and nvfp4 at
+    sm_100, so a box with an older device steps aside naming what it has
+    instead of blaming the kernel for the hardware's age.
+
+    Args:
+        minimum: ``(major, minor)`` the device must reach, e.g. ``(8, 9)``.
+        feature: What the floor buys, named in the skip reason.
+    """
+    found = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
+    skip = pytest.mark.skipif(
+        found < minimum,
+        reason=(
+            f"needs a CUDA device of capability >= {minimum[0]}.{minimum[1]} "
+            f"for {feature}; this box has {found[0]}.{found[1]}"
+        ),
+    )
+
+    def decorate(func):
+        return pytest.mark.gpu(skip(func))
+
+    return decorate

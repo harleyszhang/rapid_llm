@@ -19,6 +19,10 @@ import torch
 from rapid_llm.executor.weight_utils import dequant_block_fp8, hf_weights_iterator
 from rapid_llm.models.config import ModelConfig
 from rapid_llm.models.qwen3_moe import is_moe_layer
+from tests.conftest import needs_capability
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 # --------------------------------------------------------------------------- #
 # FP8 dequantisation
@@ -277,7 +281,7 @@ def test_qwen3_moe_logits_parity(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.usefixtures("cuda_available")
+@needs_capability((8, 9), "fp8 e4m3 MoE kernels")
 def test_qwen3_moe_fp8_forward(tmp_path):
     """``--quantization fp8`` on an MoE model: experts become e4m3 and still run.
 

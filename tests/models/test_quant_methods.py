@@ -30,6 +30,10 @@ from rapid_llm.modules.quantization.utils import (
 )
 from rapid_llm.modules.quantization.w8a8_fp8 import W8A8Fp8LinearMethod
 from rapid_llm.modules.quantization.w8a8_int8 import W8A8Int8LinearMethod
+from tests.conftest import needs_capability
+from tests.registry import import_needs_cuda
+
+import_needs_cuda()
 
 
 class _StubMoeBlock(SparseMoeBlock):
@@ -211,14 +215,21 @@ def test_nvfp4_refuses_moe_experts_rather_than_misserving_them():
     assert isinstance(ignored.get_quant_method(block, "mlp"), UnquantizedFusedMoEMethod)
 
 
+@needs_capability((10, 0), "nvfp4 blockwise quantization")
 def test_nvfp4_quantize_from_fp16_roundtrip():
-    """The runtime ``--quantization nvfp4`` path, end to end on one layer."""
+    """The runtime ``--quantization nvfp4`` path, end to end on one layer.
+
+    On the card, not on CPU staging: ``quantize_from_fp16`` refuses a CPU
+    weight (there is no CPU implementation of the blockwise kernel), and the
+    claim is about what the kernel writes — so the layer lives on the device
+    the capability gate allows, and the reference decoder reads it there.
+    """
     from rapid_llm.modules.quantization.nvfp4 import NVFP4Config, NVFP4LinearMethod
     from tests.reference import nvfp4_dequant
 
     torch.manual_seed(0)
     config = NVFP4Config()
-    layer = ReplicatedLinear(256, 128)
+    layer = ReplicatedLinear(256, 128).to("cuda")
     original = _fill_fp16(layer)
 
     NVFP4LinearMethod().quantize_from_fp16(layer, config)
