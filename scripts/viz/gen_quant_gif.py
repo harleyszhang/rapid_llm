@@ -14,8 +14,14 @@ import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, PROMPT_FG, DIM, TEXT_FG,
+    CYAN, YELLOW, GREEN, BLUE, RED, BAR_BG,
+    TITLE_H, PAD, LINE_H,
+    draw_title_bar, save_gif,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -23,21 +29,7 @@ FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 OUTPUT = REPO_ROOT / "docs" / "images" / "quantization_benchmark.gif"
 RESULTS_PATH = REPO_ROOT / "docs" / "benchmark_logs" / "quantization" / "quant_Qwen3-0.6B_all_20260823.json"
 
-# Terminal palette
 W, H = 1080, 640
-TITLE_H, PAD, LINE_H = 36, 16, 24
-BG = (14, 16, 20)
-TITLE_BG = (32, 36, 44)
-TITLE_FG = (222, 226, 232)
-PROMPT_FG = (118, 214, 118)
-DIM = (128, 136, 148)
-TEXT_FG = (222, 226, 232)
-CYAN = (86, 198, 224)
-YELLOW = (253, 188, 64)
-GREEN = (94, 193, 117)
-BLUE = (110, 160, 226)
-RED = (245, 99, 72)
-BAR_BG = (38, 42, 52)
 
 
 def _fonts():
@@ -53,10 +45,7 @@ def _fonts():
 
 def _draw_title_bar(draw, fonts):
     _, _, small, _ = fonts
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), "rapid_llm  —  Quantization Benchmark (A10 GPU)", fill=TITLE_FG, font=small)
-    for i, colour in enumerate([RED, YELLOW, GREEN]):
-        draw.ellipse([W - 78 + i * 18, 11, W - 68 + i * 18, 21], fill=colour)
+    draw_title_bar(draw, W, "rapid_llm  —  Quantization Benchmark (A10 GPU)", small=small)
 
 
 def _make_frame(fonts, lines, cursor_visible=True) -> Image.Image:
@@ -194,14 +183,7 @@ def main():
     durations.append(4000)
 
     # Save GIF
-    frames[0].save(
-        str(OUTPUT),
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=0,
-        optimize=True,
-    )
+    save_gif(frames, OUTPUT, duration=durations)
     print(f"GIF saved to {OUTPUT} ({len(frames)} frames, {sum(durations)/1000:.1f}s)")
 
 

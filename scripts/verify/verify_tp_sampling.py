@@ -8,12 +8,13 @@ To demonstrate the FIX, we run twice:
   2. With broadcast disabled (simulated bug) - ranks diverge
 """
 
+import argparse
 import json
 import sys
 from multiprocessing import Process, Queue
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 
 def _run_rank(
@@ -85,9 +86,16 @@ def run_tp2_test(model_dir: str, temperature: float, seed: int, disable_broadcas
 
 
 def main():
-    model_dir = "/data/shared/llm_weights/Qwen3-0.6B"
-    temperature = 0.7
-    seed = 42
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model-dir", default="/data/shared/llm_weights/Qwen3-0.6B",
+                    help="model checkpoint directory")
+    ap.add_argument("--temperature", type=float, default=0.7)
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+
+    model_dir = args.model_dir
+    temperature = args.temperature
+    seed = args.seed
 
     print("=" * 70)
     print("TEST: TP=2 sampling consistency (temperature=0.7, seed differs per rank)")

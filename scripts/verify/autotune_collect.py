@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import torch
 import triton
@@ -40,6 +40,9 @@ import triton
 from rapid_llm.kernels.dispatcher.autotune import ConfigStore
 from rapid_llm.kernels.dispatcher.autotune.config_key import normalize_gpu_name
 from rapid_llm.kernels.dispatcher.autotune.searcher import AutotuneSearcher
+
+#: (M, N, K, dtype_label) per op — shared shape descriptor across all model configs.
+type _ShapeMap = dict[str, list[tuple[int, int, int, str]]]
 
 # --------------------------------------------------------------------------- #
 # Shape derivation from model config
@@ -331,11 +334,11 @@ def main() -> int:
 
     # One shape set per model, plus one for the explicit shapes (GEMM ops only:
     # flash_attn's triple is (seq, head_dim, head_dim), not a GEMM).
-    shape_sets: list[tuple[str, dict[str, list[tuple[int, int, int, str]]]]] = [
+    shape_sets: list[tuple[str, _ShapeMap]] = [
         (Path(model_dir).name, derive_shapes(model_dir)) for model_dir in args.model_dir or []
     ]
     if args.extra_shape:
-        explicit: dict[str, list[tuple[int, int, int, str]]] = {
+        explicit: _ShapeMap = {
             "w4a16_matmul": [
                 (m, n, k, "int4") for m, n, k in _parse_extra_shapes(args.extra_shape)
             ],

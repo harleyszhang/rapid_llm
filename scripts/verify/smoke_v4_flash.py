@@ -18,7 +18,7 @@ import torch
 
 CKPT = "/data/shared/llm_weights/DeepSeek-V4-Flash-6layers"
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "distributed"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tests" / "distributed"))
 
 from tp_harness import needs_gpus, run_on_tp_ranks
 

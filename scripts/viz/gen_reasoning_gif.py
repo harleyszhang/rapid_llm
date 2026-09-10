@@ -25,13 +25,16 @@ import sys
 import textwrap
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, PROMPT_FG, DIM, TEXT_FG,
+    CYAN, YELLOW, AMBER, GREEN, BLUE, RED,
+    FontPack, draw_title_bar, save_gif,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 OUTPUT = REPO_ROOT / "docs" / "images" / "reasoning.gif"
 
 #: Tokens per frame in the streaming section: fast enough to read as a stream,
@@ -39,21 +42,8 @@ OUTPUT = REPO_ROOT / "docs" / "images" / "reasoning.gif"
 TOKENS_PER_FRAME = 2
 WRAP_COLS = 122
 
-# Terminal palette (shared look with the other README GIFs)
 W, H = 1080, 640
 TITLE_H, PAD, LINE_H = 36, 16, 24
-BG = (14, 16, 20)
-TITLE_BG = (32, 36, 44)
-TITLE_FG = (222, 226, 232)
-PROMPT_FG = (118, 214, 118)
-DIM = (128, 136, 148)
-TEXT_FG = (222, 226, 232)
-CYAN = (86, 198, 224)
-YELLOW = (253, 188, 64)
-AMBER = (196, 154, 74)
-GREEN = (94, 193, 117)
-BLUE = (110, 160, 226)
-RED = (245, 99, 72)
 
 #: The user-facing request the GIF types out; the run underneath uses a prompt
 #: that opens the think tag so the splitter starts inside a thinking section.
@@ -65,13 +55,8 @@ CALL_LINES = [
 
 
 def _fonts():
-    try:
-        body = ImageFont.truetype(FONT_PATH, 14)
-        bold = ImageFont.truetype(FONT_BOLD, 14)
-        small = ImageFont.truetype(FONT_PATH, 12)
-    except OSError:
-        body = bold = small = ImageFont.load_default()
-    return body, bold, small
+    fp = FontPack.mono(14, 14, 12)
+    return fp.body, fp.bold, fp.small
 
 
 def collect(model_dir: str) -> dict:
@@ -115,15 +100,7 @@ def collect(model_dir: str) -> dict:
 
 def _title_bar(draw, fonts, model_name: str):
     _, _, small = fonts
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text(
-        (12, 9),
-        f"rapid_llm  —  streaming reasoning parser  ({model_name})",
-        fill=TITLE_FG,
-        font=small,
-    )
-    for i, colour in enumerate([RED, YELLOW, GREEN]):
-        draw.ellipse([W - 78 + i * 18, 11, W - 68 + i * 18, 21], fill=colour)
+    draw_title_bar(draw, W, f"rapid_llm  —  streaming reasoning parser  ({model_name})", small=small)
 
 
 def _wrapped(draw, fonts, text: str, x: int, y: int, colour) -> int:
@@ -251,15 +228,7 @@ def main() -> int:
     frames, durations = build_frames(_fonts(), data, model_dir.name)
 
     out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    frames[0].save(
-        str(out),
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=0,
-        optimize=True,
-    )
+    save_gif(frames, out, duration=durations)
     print(f"GIF saved to {out} ({len(frames)} frames, {sum(durations) / 1000:.1f}s)")
     return 0
 

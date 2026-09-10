@@ -181,7 +181,7 @@ def main() -> None:
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from tests.distributed.tp_harness import run_on_tp_ranks
 
     lite = run_on_tp_ranks(_lite_payload, tp_size=2, timeout=600)[0]

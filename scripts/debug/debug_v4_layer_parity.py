@@ -6,7 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "models"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tests" / "models"))
 
 import torch
 from test_deepseek_v4 import _BODY, _loaded_pair

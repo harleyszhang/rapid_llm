@@ -48,7 +48,7 @@ def payload(rank: int) -> dict:
             h, r = layer(x, ai, 0, pos_emb, None)
             return skip_rmsnorm(h, r, model.norm_weight, model.config.rms_norm_eps)
 
-        def flat(t):
+        def clone_tensors(t):
             return tuple(x.clone() for x in t) if isinstance(t, (tuple, list)) else t.clone()
 
         def maxdiff(a, b):
@@ -62,7 +62,7 @@ def payload(rank: int) -> dict:
             return t.abs().mean().item()
 
         with torch.no_grad():
-            ref = flat(run(emb.clone()))
+            ref = clone_tensors(run(emb.clone()))
             torch.cuda.synchronize()
             for _ in range(3):
                 run(emb.clone())
@@ -82,7 +82,7 @@ def payload(rank: int) -> dict:
                     pass
                 g.replay()
                 torch.cuda.synchronize()
-                cur = flat(out)
+                cur = clone_tensors(out)
                 seq.append({"i": i, "mean": round(mean(cur), 6),
                             "vs_eager": round(maxdiff(cur, ref), 6)})
         return {"eager_mean": round(mean(ref), 6), "seq": seq}

@@ -33,26 +33,30 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, TEXT_FG,
+    GREEN, RED, YELLOW, GRID_LINE,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.batch_overlap.overlap import RegionRecord
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
-W = 1180
-TITLE_H, PAD, LINE_H = 36, 18, 25
-LANE_H, LANE_GAP = 84, 30
-LABEL_W = 132
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-DIM, TEXT_FG, AXIS_FG = (128, 136, 148), (222, 226, 232), (52, 58, 68)
-OVERLAP_FG = (245, 99, 72)
+# Map _viz_lib aliases for render use
+AXIS_FG = GRID_LINE
+OVERLAP_FG = RED
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 TIMELINE_ENV = "RAPID_LLM_OVERLAP_TIMELINE"
+
+W = 1180
+LANE_H, LANE_GAP = 84, 30
+LABEL_W = 132
 
 
 @dataclass(frozen=True)
@@ -312,11 +316,7 @@ def render(
     height = TITLE_H + PAD + LINE_H + len(lanes) * (LANE_H + LANE_GAP) + PAD + LINE_H
     canvas = Image.new("RGB", (W, height), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text((12, 9), title, fill=TITLE_FG, font=small)
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, title, small=small)
 
     lane_y: dict[int, int] = {}
     for index, lane in enumerate(lanes):
@@ -374,11 +374,11 @@ def build(level: str, model_dir: str, duration: int) -> Path:
     spec = LEVELS[level]
     records = spec["record"](model_dir) if level != "l4" else spec["record"]()
     if not records:
-        raise SystemExit(f"{level}: no timeline regions recorded")
+        sys.exit(f"{level}: no timeline regions recorded")
     lanes = spec["lanes"]()
     window_records, lo, hi = window(records, spec["regions"])
     if not window_records:
-        raise SystemExit(f"{level}: no overlapping regions to show")
+        sys.exit(f"{level}: no overlapping regions to show")
     # Present regions relative to the window, so a bar that started before it
     # visibly continues past the left edge instead of appearing to start at 0.
     window_records = [
@@ -391,23 +391,14 @@ def build(level: str, model_dir: str, duration: int) -> Path:
         f"{level}: {len(records)} regions recorded, window shows {len(window_records)} over {span:.1f} ms"
     )
 
-    fonts = (
-        ImageFont.truetype(BOLD_PATH, 16),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(16, 16, 15)
     frames = [
         render(window_records[:count], lanes, spec["title"], note, 0.0, scale, fonts)
         for count in range(1, len(window_records) + 1)
     ]
     frames += [frames[-1]] * 3
-    palette = [im.convert("P", palette=Image.ADAPTIVE, colors=64) for im in frames]
-
     out = REPO_ROOT / spec["out"]
-    out.parent.mkdir(parents=True, exist_ok=True)
-    palette[0].save(
-        out, save_all=True, append_images=palette[1:], duration=duration, loop=0, optimize=True
-    )
-    print(f"{level}: saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(palette)} frames)")
+    save_gif(frames, out, duration=duration)
     return out
 
 

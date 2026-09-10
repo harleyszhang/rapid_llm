@@ -21,9 +21,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from scripts._viz_lib import (
+    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
+    GREEN, RED, YELLOW, AMBER,
+    TITLE_H, PAD, LINE_H,
+    FontPack, draw_title_bar, save_gif,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from rapid_llm.engine.sampler import SamplingParams
@@ -33,9 +38,6 @@ from rapid_llm.engine.scheduler import (
     SchedulerConfig,
 )
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
 #: Four short requests already decoding when the long prompt lands.
 SHORT_PROMPT_LEN = 24
 NUM_SHORT = 4
@@ -43,10 +45,11 @@ NUM_SHORT = 4
 LONG_PROMPT_LEN = 2000
 
 W, H = 1180, 430
-TITLE_H, PAD, LINE_H = 36, 18, 25
-BG, TITLE_BG, TITLE_FG = (14, 16, 20), (32, 36, 44), (222, 226, 232)
-PROMPT_FG, DIM, TEXT_FG = (118, 214, 118), (128, 136, 148), (222, 226, 232)
-DECODE_OK, PREFILL, STALLED = (118, 214, 118), (226, 184, 92), (245, 99, 72)
+
+# Map _viz_lib aliases for render use
+DECODE_OK = GREEN
+PREFILL = AMBER
+STALLED = RED
 
 
 @dataclass
@@ -135,16 +138,7 @@ def render(frame: Frame, fonts, mode_label: str) -> Image.Image:
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-
-    draw.rectangle([0, 0, W, TITLE_H], fill=TITLE_BG)
-    draw.text(
-        (12, 9),
-        f"rapid-llm  —  chunked prefill  ({mode_label})",
-        fill=TITLE_FG,
-        font=small,
-    )
-    for index, colour in enumerate([(245, 99, 72), (253, 188, 64), (94, 193, 117)]):
-        draw.ellipse([W - 78 + index * 18, 11, W - 68 + index * 18, 21], fill=colour)
+    draw_title_bar(draw, W, f"rapid-llm  —  chunked prefill  ({mode_label})", small=fonts.small)
 
     y = TITLE_H + PAD
     flag = f"--max-chunk-size {frame.chunk_size}" if frame.chunk_size else "--max-chunk-size 0"
@@ -227,11 +221,7 @@ def main() -> int:
     print(f"chunk={args.chunk} -> {len(on)} steps, peak prefill tokens in one step: {on_peak}")
     print(f"worst-case per-step prefill work reduced {off_peak / on_peak:.1f}x")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 17),
-        ImageFont.truetype(BOLD_PATH, 17),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(17, 17, 15)
 
     # Show the blocking run first, then the chunked one, so the GIF reads as
     # a before/after rather than two unrelated clips.
@@ -242,17 +232,8 @@ def main() -> int:
         + [render(on[-1], fonts, f"chunking ON, chunk={args.chunk}")] * 3
     )
     images = [im.convert("P", palette=Image.ADAPTIVE, colors=64) for im in sequence]
-
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    images[0].save(
-        out,
-        save_all=True,
-        append_images=images[1:],
-        duration=args.duration,
-        loop=0,
-        optimize=True,
-    )
+    save_gif(images, out, duration=args.duration)
     print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(images)} frames)")
     return 0
 

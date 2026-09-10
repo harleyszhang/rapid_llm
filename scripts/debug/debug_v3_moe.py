@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 CKPT = "/data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16"
 HF_OVERRIDES = {"n_group": 2, "topk_group": 1, "num_experts_per_tok": 2}
