@@ -183,10 +183,9 @@ def _prefill_work(
       than the grid.
 
     ``chunked_min_rows`` is ``math.inf`` when the chunked kernel may not run
-    at all (an fp8 cache the kernel cannot decode, or the
-    ``RAPID_LLM_FUSED_CHUNK_PREFILL=0`` kill-switch), and the smallest value
-    that cannot replay a graph (one past the largest captured batch size, so
-    ``1`` with graphs off) otherwise.
+    at all (the ``RAPID_LLM_FUSED_CHUNK_PREFILL=0`` kill-switch), and the
+    smallest value that cannot replay a graph (one past the largest captured
+    batch size, so ``1`` with graphs off) otherwise.
     """
     pairs = list(zip(group, chunk_lens, strict=True))
     fresh = [pair for pair in pairs if pair[0].num_computed_tokens == pair[1]]
@@ -320,23 +319,9 @@ class ContinuousBatchingEngine:
         # remainder extends as rows that replay a decode graph, a longer one
         # runs through the chunked prefill kernel, whose tensor-core tiling
         # beats paying one decode-style row per token — the per-token cost
-        # that kept prefix-cache hits from lowering TTFT. An fp8 cache stores
-        # e4m3 bytes the chunk kernel cannot decode, so those keep extending.
-        # Read through ``getattr`` so a test double whose model_runner is a
-        # bare namespace (no model behind it, so no cache dtype either) keeps
-        # constructing the engine instead of mimicking runner internals.
-        runner_config = getattr(engine.model_runner, "config", None)
-        kv_fp8 = runner_config is not None and runner_config.kv_cache_torch_dtype == torch.uint8
-        fused = getenv(_FUSED_CHUNK_ENV, "1") != "0" and not kv_fp8
-        if kv_fp8 and config.enable_chunked_prefill:
-            # Say it once, the way vLLM announces a config it downgraded for
-            # you: chunked prefill still runs, only its resumed chunks take the
-            # slower route, so a TTFT that regressed against a bf16 cache has a
-            # line in the log to point at.
-            logger.info(
-                "fp8 KV cache: chunked prefill stays on, but resumed chunks run "
-                "through the extend pass -- the chunk kernel cannot read e4m3 bytes"
-            )
+        # that kept prefix-cache hits from lowering TTFT. An fp8 cache routes
+        # the same way: the chunk kernel dequantises the e4m3 rows it reads.
+        fused = getenv(_FUSED_CHUNK_ENV, "1") != "0"
 
         self._executor: Executor = executor or UniProcExecutor(
             engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
@@ -714,6 +699,15 @@ class ContinuousBatchingEngine:
             self.tracer.end_span(self._spans.pop(request.request_id, None), finish_reason="abort")
             self._retire(request)
         return request
+
+    @property
+    def num_kv_blocks(self) -> int:
+        """KV blocks the executor allocated; ``0`` when the backend has none.
+
+        Public because the engine core process handshakes this number back to
+        its parent (see :mod:`rapid_llm.engine.engine_core`).
+        """
+        return self._executor.num_kv_blocks
 
     def has_unfinished_requests(self) -> bool:
         """Whether anything is queued, in flight, or awaiting its harvest."""
