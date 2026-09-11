@@ -14,6 +14,7 @@ import logging
 import os
 import queue as queue_module
 import socket
+import subprocess
 import time
 import traceback
 from collections.abc import Callable
@@ -103,6 +104,97 @@ def _worker(
     acks.get()
 
 
+#: Slack above the pre-grid memory level the settle fence tolerates while it
+#: waits: driver and sibling-process noise, orders below a dead rank's claim.
+_SETTLE_MARGIN_MIB = 512
+
+#: How long the settle fence may wait for a slow driver to finish reclaiming.
+_SETTLE_TIMEOUT = 30.0
+
+
+def _device_memory_used() -> dict[int, int] | None:
+    """MiB in use per device, straight from nvidia-smi; ``None`` if it cannot answer.
+
+    A subprocess and not ``torch.cuda``: querying through torch would build a
+    CUDA context in the parent, whose memory would then pollute both the
+    baseline and every payload that assumes the parent holds no device.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        _log.debug("nvidia-smi cannot answer (%s); skipping the settle fence", error)
+        return None
+    used: dict[int, int] = {}
+    for line in out.strip().splitlines():
+        index, mib = line.split(",")
+        used[int(index.strip())] = int(mib.strip())
+    return used
+
+
+def _reap_workers(workers: list[mp.Process]) -> None:
+    """Join every worker, escalating polite join -> SIGTERM -> SIGKILL.
+
+    A worker stuck in a driver call does not process SIGTERM (the signal is
+    handled at the next Python bytecode, not inside the ioctl), so a terminate
+    that times out with no escalation leaves the process alive and holding its
+    whole device claim -- the leak that poisons the next grid. SIGKILL cannot
+    be caught: the process dies at the kernel's next chance and the driver
+    starts releasing its memory.
+    """
+    for worker in workers:
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=10)
+        if worker.is_alive():
+            worker.kill()
+            worker.join(timeout=10)
+        if worker.is_alive():
+            _log.warning(
+                "worker pid %s survived SIGKILL; its device memory stays claimed", worker.pid
+            )
+
+
+def _wait_for_devices_to_settle(
+    baseline: dict[int, int], *, timeout: float = _SETTLE_TIMEOUT
+) -> None:
+    """Block until every device is back near the level seen before the grid.
+
+    The release of a killed worker's memory is the driver's job, and it is
+    asynchronous: a grid launched inside the teardown window asks for a fresh
+    checkpoint on a device still holding the dead rank's gigabytes, and dies
+    of OOM where nothing in the traceback looks like its cause. Bounded and
+    best-effort -- the numbers also move for reasons that are not ours on a
+    shared machine, so a straggler is warned about, never fatal.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        used = _device_memory_used()
+        if used is None:
+            return
+        stragglers = {
+            index: (used.get(index, 0), floor)
+            for index, floor in baseline.items()
+            if used.get(index, 0) > floor + _SETTLE_MARGIN_MIB
+        }
+        if not stragglers:
+            return
+        if time.monotonic() >= deadline:
+            _log.warning(
+                "devices still above their pre-grid memory after %.0fs (used, pre-grid, MiB): %s",
+                timeout,
+                stragglers,
+            )
+            return
+        time.sleep(0.5)
+
+
 def _attempt(
     payload: Callable[[int], Any],
     tp_size: int,
@@ -115,12 +207,17 @@ def _attempt(
     """One grid on one freshly picked rendezvous port.
 
     The whole of :func:`run_on_tp_ranks` except the retry, so a lost port can
-    be answered with a fresh one cleanly: the ``finally`` reaps every worker
-    before this returns, and every other failure propagates untouched.
+    be answered with a fresh one cleanly: the ``finally`` reaps every worker --
+    up to SIGKILL -- and waits out the driver's memory release before this
+    returns, and every other failure propagates untouched.
     """
     world_size = tp_size * dp_size
     if backend == "nccl" and torch.cuda.device_count() < world_size:
         raise RuntimeError(f"{world_size} ranks need {world_size} devices, one each")
+
+    # The memory levels this grid starts from; the fence at the bottom waits
+    # for the devices to come back down to them.
+    baseline = _device_memory_used() if backend == "nccl" else None
 
     context = mp.get_context("spawn")
     results: mp.Queue = context.Queue()
@@ -168,11 +265,9 @@ def _attempt(
         # lives, so every get() must have finished unwrapping first.
         for _ in range(world_size):
             acks.put(True)
-        for worker in workers:
-            worker.join(timeout=10)
-            if worker.is_alive():
-                worker.terminate()
-                worker.join(timeout=10)
+        _reap_workers(workers)
+        if baseline is not None:
+            _wait_for_devices_to_settle(baseline)
     return [collected[rank] for rank in range(world_size)]
 
 
