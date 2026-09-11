@@ -520,6 +520,15 @@ class ServeCommand(CliCommand):
                     "help": "Send /v1/chat/completions messages verbatim (base models)",
                 },
             ),
+            CliOption(
+                "--engine-backend",
+                {
+                    "choices": ["thread", "process"],
+                    "default": "thread",
+                    "help": "Run scheduling in-process or in a separate engine core "
+                    "process over ZMQ (needs pyzmq and msgpack)",
+                },
+            ),
         ):
             option.register(sub)
 
@@ -547,6 +556,7 @@ class ServeCommand(CliCommand):
             # so a Base checkpoint is served verbatim instead of templated just
             # because its tokenizer happens to ship a template.
             chat_template=False if args.no_chat_template else None,
+            engine_backend=args.engine_backend,
         )
         print(f"Serving {config.model_name} on http://{args.host}:{args.port}")
         run_server(config, host=args.host, port=args.port)

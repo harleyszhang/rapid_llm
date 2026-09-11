@@ -15,7 +15,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
@@ -50,6 +50,14 @@ from .protocol import (
     UsageInfo,
     _request_id,
 )
+
+if TYPE_CHECKING:
+    from ..engine.engine_core_client import EngineCoreClient
+
+    #: What a server run may sit on: the in-process async engine (one replica),
+    #: the data-parallel coordinator over several, or a separate engine core
+    #: process. All three answer the same generate/metrics/tokenizer calls.
+    EngineBackend = AsyncLLMEngine | AsyncDataParallelEngine | EngineCoreClient
 
 logger = get_logger(__name__)
 
@@ -142,6 +150,12 @@ class ServerConfig:
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
+        engine_backend: Where scheduling runs. ``"thread"`` runs the
+            continuous-batching engine inside this process; ``"process"``
+            spawns a separate engine core process and talks to it over ZMQ
+            (needs the ``serve`` extra's ``pyzmq``/``msgpack``), which keeps
+            the event loop out of the GPU step path. HTTP behaviour is the
+            same either way.
     """
 
     model_dir: str
@@ -164,6 +178,7 @@ class ServerConfig:
     data_parallel_size: int = 1
     load_balancer: str = "round_robin"
     chat_template: bool = True
+    engine_backend: str = "thread"
 
     @property
     def model_name(self) -> str:
@@ -264,7 +279,7 @@ class OpenAIServer:
 
     def __init__(
         self,
-        engine: AsyncLLMEngine | AsyncDataParallelEngine,
+        engine: EngineBackend,
         model_name: str,
         *,
         chat_template: bool = True,
@@ -527,21 +542,23 @@ class OpenAIServer:
         )
 
 
-def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEngine | None = None):
+def build_app(config: ServerConfig, engine: EngineBackend | None = None):
     """Assemble the FastAPI application.
 
     Args:
         config: Engine and serving options.
         engine: Pre-built engine; when omitted one is loaded on startup — one
-            replica's async engine, or the data-parallel front end when
-            ``config.data_parallel_size`` is above 1. Injecting a fake here is
-            what lets the protocol layer be tested without a GPU or a checkpoint.
+            replica's async engine, the data-parallel front end when
+            ``config.data_parallel_size`` is above 1, or a separate engine
+            core process when ``config.engine_backend == "process"``.
+            Injecting a fake here is what lets the protocol layer be tested
+            without a GPU or a checkpoint.
     """
     fastapi = _require_fastapi()
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     owns_engine = engine is None
-    state: dict[str, AsyncLLMEngine | AsyncDataParallelEngine | OpenAIServer | None] = {
+    state: dict[str, EngineBackend | OpenAIServer | None] = {
         "engine": engine,
         "server": None,
     }
@@ -550,6 +567,11 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
     async def lifespan(_app):
         if state["engine"] is None:
             if config.data_parallel_size > 1:
+                if config.engine_backend == "process":
+                    raise RuntimeError(
+                        "engine_backend='process' serves one replica; lower "
+                        "data_parallel_size to 1 to use it"
+                    )
                 # ``device`` is deliberately absent: a replica's device is its
                 # position in the grid, and the coordinator loads no model.
                 logger.info(
@@ -578,26 +600,38 @@ def build_app(config: ServerConfig, engine: AsyncLLMEngine | AsyncDataParallelEn
                     enable_preemption=config.enable_preemption,
                 )
             else:
-                logger.info("loading %s for serving", config.model_dir)
-                state["engine"] = AsyncLLMEngine.from_pretrained(
-                    config.model_dir,
-                    max_seq_len=config.max_seq_len,
-                    max_num_seqs=config.max_num_seqs,
-                    max_num_batched_tokens=config.max_num_batched_tokens,
-                    enable_chunked_prefill=config.enable_chunked_prefill,
-                    max_chunk_size=config.max_chunk_size,
-                    max_gpu_num_blocks=config.max_gpu_num_blocks,
-                    device=config.device,
-                    use_cuda_graph=config.use_cuda_graph,
-                    quantization=config.quantization,
-                    tensor_parallel_size=config.tensor_parallel_size,
-                    enable_expert_parallel=config.enable_expert_parallel,
-                    kv_cache_dtype=config.kv_cache_dtype,
-                    enable_prefix_cache=config.enable_prefix_cache,
-                    prefix_cache_blocks=config.prefix_cache_blocks,
-                    enable_preemption=config.enable_preemption,
-                )
-        active: AsyncLLMEngine | AsyncDataParallelEngine = state["engine"]
+                engine_kwargs: dict[str, Any] = {
+                    "max_seq_len": config.max_seq_len,
+                    "max_num_seqs": config.max_num_seqs,
+                    "max_num_batched_tokens": config.max_num_batched_tokens,
+                    "enable_chunked_prefill": config.enable_chunked_prefill,
+                    "max_chunk_size": config.max_chunk_size,
+                    "max_gpu_num_blocks": config.max_gpu_num_blocks,
+                    "device": config.device,
+                    "use_cuda_graph": config.use_cuda_graph,
+                    "quantization": config.quantization,
+                    "tensor_parallel_size": config.tensor_parallel_size,
+                    "enable_expert_parallel": config.enable_expert_parallel,
+                    "kv_cache_dtype": config.kv_cache_dtype,
+                    "enable_prefix_cache": config.enable_prefix_cache,
+                    "prefix_cache_blocks": config.prefix_cache_blocks,
+                    "enable_preemption": config.enable_preemption,
+                }
+                if config.engine_backend == "process":
+                    logger.info("loading %s in a separate engine core process", config.model_dir)
+                    # Imported here, not at module scope: ZMQ is an optional
+                    # dependency the thread backend never needs.
+                    from ..engine.engine_core_client import EngineCoreClient
+
+                    state["engine"] = EngineCoreClient.from_pretrained(
+                        config.model_dir, **engine_kwargs
+                    )
+                else:
+                    logger.info("loading %s for serving", config.model_dir)
+                    state["engine"] = AsyncLLMEngine.from_pretrained(
+                        config.model_dir, **engine_kwargs
+                    )
+        active: EngineBackend = state["engine"]
         active.start()
         state["server"] = OpenAIServer(
             active, config.model_name, chat_template=config.chat_template
