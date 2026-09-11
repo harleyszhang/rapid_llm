@@ -260,7 +260,11 @@ class CPUPrimaryTierOffloadingManager(OffloadingManager):
         """
         events: list[OffloadEvent] = []
         pending: list[_Transfer] = []
-        for transfer in self._pending:
+        # Iterate a snapshot: completing a transfer pops it from
+        # ``self._pending`` (via ``_pop_pending``), and mutating the list
+        # under the loop would skip -- and then silently drop -- every
+        # transfer that lands in the same drain.
+        for transfer in list(self._pending):
             if not self._is_done(transfer):
                 pending.append(transfer)
                 continue

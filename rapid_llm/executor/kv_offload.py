@@ -13,9 +13,12 @@ Stream discipline, which is the whole correctness argument:
   is still in flight is about to be overwritten by the next request, and
   compute must wait on :meth:`CPUPrimaryTierOffloadingManager.pending_store_events`
   before writing it;
-* a **load** writes a freshly allocated GPU block that nobody is reading, so
-  it needs no wait going in — the engine's guarantee that the request is not
-  scheduled until the load's event fires provides the wait going out.
+* a **load** writes a freshly allocated GPU block — but "freshly allocated"
+  means recycled, and the pool can hand out a block whose previous contents a
+  store is still reading. So the load stream waits on the store stream: every
+  store submitted before this load has landed before its first write. The
+  reverse window cannot occur — a store only reads blocks the pool still
+  references, which cannot be allocated out again;
 
 One batch, one stream, one event: moves handed to one :meth:`submit` call run
 in order on that stream, and the single event fires when the last has landed.
@@ -89,6 +92,11 @@ class KVCopyEngine:
         # already-issued kernel that wrote these blocks is visible to the copy.
         if is_store:
             stream.wait_stream(torch.cuda.current_stream())
+        else:
+            # A load's destination is newly allocated, but that means recycled:
+            # the block could be one whose previous contents a store is still
+            # reading. Ordering the directions closes that window.
+            stream.wait_stream(self._store_stream)
         with torch.cuda.stream(stream):
             for move in moves:
                 gpu_start = move.gpu_block * block_size

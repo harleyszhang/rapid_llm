@@ -17,7 +17,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache
+from .kv_offload import LookupResult, OffloadingManager
+from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache, PrefixMatch
 from .sampler import PositionLogprobs, SamplingParams
 
 
@@ -265,6 +266,27 @@ class SchedulerOutput:
         return not self.prefill and not self.decode
 
 
+@dataclass(slots=True)
+class _Promotion:
+    """A request parked while a CPU-tier prefix is copied up to the GPU.
+
+    The GPU blocks are already allocated and the copy is in flight; until its
+    event lands the request sits in neither queue — re-admitting it would
+    double-allocate, and a step cannot read rows whose copy has not landed.
+    ``num_tokens`` is the block-aligned length the promotion covers, and it
+    is what the request's ``num_computed_tokens`` becomes once readable.
+
+    Attributes:
+        request: The parked request.
+        gpu_blocks: Blocks the copy lands in; the handle its event matches on.
+        num_tokens: Tokens the promotion covers, CPU hit plus GPU prefix.
+    """
+
+    request: Request
+    gpu_blocks: tuple[int, ...]
+    num_tokens: int
+
+
 class Scheduler:
     """FCFS admission with chunked prefill and preemption support.
 
@@ -287,10 +309,24 @@ class Scheduler:
             included. ``None`` derives a bound from the slot geometry (see
             :meth:`_default_num_blocks`), which is what a scheduler driven
             without an executor gets.
+        offloading: An iteration behind the GPU prefix cache — a CPU tier
+            whose blocks promote into freshly allocated GPU blocks at
+            admission. ``None`` (the default) keeps admission GPU-only.
+
+    Raises:
+        ValueError: Offloading was configured for a KV cache layout that
+            cannot be mirrored (see
+            :attr:`~rapid_llm.engine.prefix_cache.PrefixCache.offloadable_group`),
+            or with prefix caching off — the tier's keys are the cache's block
+            hashes.
     """
 
     def __init__(
-        self, config: SchedulerConfig, num_slots: int, num_blocks: int | None = None
+        self,
+        config: SchedulerConfig,
+        num_slots: int,
+        num_blocks: int | None = None,
+        offloading: OffloadingManager | None = None,
     ) -> None:
         if num_slots < 1:
             raise ValueError(f"need at least one cache slot, got {num_slots}")
@@ -330,6 +366,26 @@ class Scheduler:
         # Pure-decode steps deferred since the first request started waiting
         # (O9 decode window): the wait is bounded by ``decode_window_steps``.
         self._deferred_steps: int = 0
+
+        # Offloading state. A promotion is a request whose CPU-tier prefix is
+        # being copied into freshly allocated GPU blocks: in neither queue
+        # until the copy's event lands, then slot-gated (`_ready_promotes`),
+        # or freed late if the request died in flight (`_dying_promotes`).
+        if offloading is not None:
+            if self._prefix_cache.offloadable_group is None:
+                raise ValueError(
+                    "offloading needs a homogeneous, non-windowed KV cache layout; "
+                    "this model's groups cannot be mirrored by the CPU tier"
+                )
+            if not config.enable_prefix_cache:
+                raise ValueError(
+                    "offloading keys blocks by their content hash, so it needs "
+                    "enable_prefix_cache=True"
+                )
+        self._offloading = offloading
+        self._pending_promotes: dict[str, _Promotion] = {}
+        self._ready_promotes: list[Request] = []
+        self._dying_promotes: dict[str, _Promotion] = {}
 
     def _default_num_blocks(self, num_slots: int) -> int:
         """Pool size to use when the executor did not report its cache size.
@@ -393,7 +449,8 @@ class Scheduler:
             request.status = RequestStatus.FINISHED
             request.finish_reason = "abort"
             request.finish_time = time.monotonic()
-            self._prefix_cache.free(request_id)
+            if not self._retire_promotion(request):
+                self._prefix_cache.free(request_id)
             self._requests.pop(request_id, None)
         else:
             self.finish(request, "abort")
@@ -412,6 +469,12 @@ class Scheduler:
         prefill: list[Request] = []
         chunk_lens: list[int] = []
         preempted: list[Request] = []
+
+        # Offload plumbing comes first: events that landed since the last step
+        # become readable blocks, and promotions with capacity free join the
+        # running set in time for Stage 1 to resume their chunk.
+        self._drain_offload_events()
+        self._promote_ready()
 
         # Stage 0: last step's passes have executed by now, so the blocks they
         # filled really hold their K/V and may be offered to other requests.
@@ -520,6 +583,8 @@ class Scheduler:
         at ``max_chunk_size``; short prompts therefore finish prefill in this
         very step, while long ones re-enter through Stage 1 on later steps.
 
+        Every candidate is first offered a CPU-tier promotion, which consumes
+        no seat, slot or batch width and therefore precedes those gates.
         Preempted victims are appended to *preempted*, for reporting.
         """
         longest = max(chunk_lens, default=0)
@@ -530,10 +595,35 @@ class Scheduler:
         self._deferred_steps = 0
 
         while self._waiting:
-            if len(self._running) >= self.max_num_seqs:
-                break
             candidate = next(iter(self._waiting.values()))
 
+            # Prefix cache: find the longest prefix already sitting in physical
+            # blocks, then take a *reference* on those very blocks — reuse is a
+            # shared block, not a copy of its rows. Never the whole prompt: at
+            # least one token must run to produce the first logits, exactly as
+            # vLLM keeps the last block uncached.
+            rid = candidate.request_id
+            hashes = self._prefix_cache.track(rid, candidate.prompt_token_ids)
+            match = self._prefix_cache.lookup(hashes, candidate.prompt_len)
+            if self._offloading is not None and match.num_tokens:
+                # The blocks a GPU hit serves sit on the CPU as well: bump their
+                # recency without pinning, so the tier still holds them if the
+                # pool evicts them and a later request promotes them back.
+                self._offloading.touch(hashes[: match.num_tokens // PREFIX_CACHE_BLOCK_SIZE])
+            if self._try_start_promotion(candidate, hashes, match):
+                # The CPU tier extends the prefix past what the pool holds. The
+                # copy runs on its own stream while the request consumes no
+                # seat, slot or token budget — so this offer precedes the gates
+                # below, which exist because a *chunk* consumes the step. The
+                # request waits on the copy's event; nothing about it runs this
+                # step.
+                self._waiting.pop(rid)
+                if preempted:
+                    break
+                continue
+
+            if len(self._running) >= self.max_num_seqs:
+                break
             chunk = self._chunk_of(candidate, computed=0)
             padded = max(longest, chunk) * (len(prefill) + 1)
             if prefill and padded > self.config.max_num_batched_tokens:
@@ -545,14 +635,6 @@ class Scheduler:
                     break
                 preempted.append(victim)
 
-            # Prefix cache: find the longest prefix already sitting in physical
-            # blocks, then take a *reference* on those very blocks — reuse is a
-            # shared block, not a copy of its rows. Never the whole prompt: at
-            # least one token must run to produce the first logits, exactly as
-            # vLLM keeps the last block uncached.
-            rid = candidate.request_id
-            hashes = self._prefix_cache.track(rid, candidate.prompt_token_ids)
-            match = self._prefix_cache.lookup(hashes, candidate.prompt_len)
             chunk = self._chunk_of(candidate, computed=match.num_tokens)
             if not self._prefix_cache.allocate(rid, match.num_tokens + chunk, match):
                 # Nothing was allocated, so admission simply waits for the pool
@@ -612,6 +694,148 @@ class Scheduler:
         # vLLM's chunked prefill consumes at most the iteration token budget.
         # Without this cap, one long request violates the advertised ceiling.
         return min(remaining, size, self.config.max_num_batched_tokens)
+
+    # ------------------------------------------------------------ offloading #
+    def _try_start_promotion(
+        self, candidate: Request, hashes: list[int], match: PrefixMatch
+    ) -> bool:
+        """Park *candidate* while its CPU-tier prefix is copied into fresh blocks.
+
+        The GPU pool and the CPU tier hold overlapping but not equal prefixes:
+        the pool evicts, the tier mirrors every commit. So once the pool's
+        lookup stops, the tier may still extend the run — those blocks sit on
+        the CPU and would be prefilled, and promoting them copies the prefix
+        back instead. Returns whether a promotion started; when it did, the
+        request has left the waiting queue and nothing about it runs this step.
+        Every failure degrades to the plain GPU path — the pool cannot hold the
+        promoted prefix, or the tier lost a block between the probe and the pin
+        — so an offer that cannot be taken costs only the probe.
+
+        Args:
+            candidate: The request being admitted.
+            hashes: Its tracked block-hash chain.
+            match: The longest prefix the GPU pool can already serve.
+        """
+        if self._offloading is None:
+            return False
+        block_size = PREFIX_CACHE_BLOCK_SIZE
+        start = match.num_tokens // block_size
+        # At least one token must still run: it produces the first logits, and
+        # the GPU lookup caps its hit the same way, one block short.
+        limit = (candidate.prompt_len - 1) // block_size
+        keys: list[int] = []
+        for index in range(start, limit):
+            key = hashes[index]
+            if self._offloading.lookup(key) is not LookupResult.HIT:
+                break
+            keys.append(key)
+        if not keys:
+            return False
+
+        num_tokens = (start + len(keys)) * block_size
+        rid = candidate.request_id
+        if not self._prefix_cache.allocate(rid, num_tokens, match):
+            return False
+        resident = self._prefix_cache.block_ids(rid)[0]
+        gpu_blocks = tuple(resident[start : start + len(keys)])
+        if self._offloading.prepare_load(keys, gpu_blocks) is None:
+            # A block was evicted between the probe and the pin. Undo the
+            # allocation and hand the request back to the plain path; free()
+            # drops the tracked chain with the blocks, so re-track — the plain
+            # path reports its table writes off that chain.
+            self._prefix_cache.free(rid)
+            self._prefix_cache.track(rid, candidate.prompt_token_ids)
+            return False
+        self._pending_promotes[rid] = _Promotion(
+            request=candidate,
+            gpu_blocks=gpu_blocks,
+            num_tokens=num_tokens,
+        )
+        return True
+
+    def _drain_offload_events(self) -> None:
+        """Land offloaded copies that completed since the last step.
+
+        The manager resolves its events lazily, so polling once per step is the
+        whole protocol. A ``load`` event means a promotion's prefix is readable:
+        index its blocks so the pool serves them to later requests too, and
+        queue the request for a slot. A ``load`` for a request that died in
+        flight is that request's deferred free. ``store`` events need nothing
+        here — the manager already made their keys loadable.
+        """
+        if self._offloading is None:
+            return
+        for event in self._offloading.take_events():
+            if event.kind != "load":
+                continue
+            promotion = self._take_promotion(event.gpu_blocks)
+            if promotion is None:
+                continue
+            request = promotion.request
+            if request.status is RequestStatus.FINISHED:
+                # Died mid-copy: its blocks were held back exactly so this
+                # free could wait for the landing.
+                self._prefix_cache.free(request.request_id)
+                continue
+            # The copy landed, so the rows are readable: index the blocks now
+            # and the pool serves this prefix to later requests directly.
+            self._prefix_cache.commit(request.request_id, promotion.num_tokens)
+            request.num_computed_tokens = promotion.num_tokens
+            request.num_cached_tokens = promotion.num_tokens
+            self._ready_promotes.append(request)
+
+    def _take_promotion(self, gpu_blocks: tuple[int, ...]) -> _Promotion | None:
+        """Pop the promotion a load event belongs to, by its destination blocks.
+
+        Block ids are unique while a promotion holds them — the pool cannot
+        hand out a block that is still referenced — so the match is exact.
+        """
+        if not gpu_blocks:
+            return None
+        for bank in (self._pending_promotes, self._dying_promotes):
+            for rid, promotion in bank.items():
+                if promotion.gpu_blocks == gpu_blocks:
+                    del bank[rid]
+                    return promotion
+        return None
+
+    def _promote_ready(self) -> None:
+        """Seat landed promotions as capacity frees up, oldest first.
+
+        A promotion needs both a slot and a seat under ``max_num_seqs``; until
+        both exist it waits here rather than back in the queue, because
+        re-admission would allocate a second set of blocks for the same prefix.
+        Seating is all it takes: Stage 1 resumes the request's next chunk in
+        this very step. Its ``scheduled_time`` is set here, not when the copy
+        started, so queue-wait accounting includes the promotion itself.
+        """
+        while self._ready_promotes and self._free_slots:
+            if len(self._running) >= self.max_num_seqs:
+                break
+            request = self._ready_promotes.pop(0)
+            request.slot = self._free_slots.pop()
+            request.status = RequestStatus.RUNNING
+            request.scheduled_time = time.monotonic()
+            self._running.append(request)
+
+    def _retire_promotion(self, request: Request) -> bool:
+        """Detach a dying request from its promotion; True if its free must wait.
+
+        A pending promotion's copy is still in flight into blocks the request
+        holds, so freeing them now would let the pool hand them out while the
+        DMA lands. Its descriptor moves to ``_dying_promotes`` and the free
+        runs from the event drain. A ready promotion has no copy in flight:
+        it is simply unseated, and the caller frees it now.
+        """
+        rid = request.request_id
+        promotion = self._pending_promotes.pop(rid, None)
+        if promotion is not None:
+            self._dying_promotes[rid] = promotion
+            return True
+        self._ready_promotes = [
+            candidate for candidate in self._ready_promotes if candidate is not request
+        ]
+        return False
 
     # ---------------------------------------------------------------- blocks #
     def _reserve(
@@ -673,14 +897,18 @@ class Scheduler:
         self._pending_blocks.clear()
 
     def _commit(self, request: Request, upto: int) -> None:
-        """Hash and index whatever full blocks of this request are now computed."""
+        """Hash, index, and mirror down whatever full blocks are now computed."""
         rid = request.request_id
         if upto // PREFIX_CACHE_BLOCK_SIZE > len(self._prefix_cache.block_hashes(rid)):
             # Generated tokens completed a block: extend the chain over them.
             # Skipped fifteen steps out of sixteen, which is what keeps decode
             # caching close to free.
             self._prefix_cache.observe(rid, request.prompt_token_ids + request.output_token_ids)
-        self._prefix_cache.commit(rid, upto)
+        fresh = self._prefix_cache.commit(rid, upto)
+        if fresh and self._offloading is not None:
+            # The blocks are committed, which is as durable as their rows get;
+            # mirror them down while a store can still read the live cache.
+            self._offloading.prepare_store(fresh)
 
     def _track_pending(self, request: Request, upto: int) -> None:
         """Queue a registration for the rows the step just planned will write.
@@ -798,7 +1026,8 @@ class Scheduler:
         # A shared prefix survives as long as another live request references it;
         # a queued request may still hold the hash chain of an admission the pool
         # refused, and freeing by id leaves nothing behind either way.
-        self._prefix_cache.free(request.request_id)
+        if not self._retire_promotion(request):
+            self._prefix_cache.free(request.request_id)
         if self._requests.get(request.request_id) is request:
             self._requests.pop(request.request_id)
 
@@ -842,9 +1071,20 @@ class Scheduler:
         return len(self._running)
 
     @property
+    def num_promoting(self) -> int:
+        """Requests whose CPU promotion is in flight or waiting for a slot."""
+        return len(self._pending_promotes) + len(self._ready_promotes)
+
+    @property
     def num_free_slots(self) -> int:
         return len(self._free_slots)
 
     def has_unfinished_requests(self) -> bool:
-        """Whether anything is queued or in flight."""
-        return bool(self._waiting or self._running)
+        """Whether anything is queued, running, or still holds offloaded state."""
+        return bool(
+            self._waiting
+            or self._running
+            or self._pending_promotes
+            or self._ready_promotes
+            or self._dying_promotes
+        )
