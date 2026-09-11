@@ -31,6 +31,9 @@ from collections.abc import Sequence
 import torch
 
 from ..engine.kv_offload.base import CopyRun
+from ..engine.kv_offload.cpu import CPUPrimaryTierOffloadingManager
+from ..engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
+from .kv_cache_manager import KVCacheManager, get_dtype_size
 
 
 def alloc_cpu_kv_buffers(
@@ -113,3 +116,45 @@ class KVCopyEngine:
         event = torch.cuda.Event()
         event.record(stream)
         return event
+
+
+def build_cpu_tier(
+    kv_cache_manager: KVCacheManager,
+    num_blocks: int,
+    block_size: int = PREFIX_CACHE_BLOCK_SIZE,
+) -> CPUPrimaryTierOffloadingManager:
+    """Build the whole CPU tier around a runner's cache geometry.
+
+    The three objects only make sense together — the host region is sized by
+    the device cache's geometry, the copier pairs the two, and the manager
+    drives the copier by block key — so the one construction path lives here
+    rather than in every caller (benchmarks, integration tests, a serving
+    front end), each of which would otherwise re-derive the geometry.
+
+    Args:
+        kv_cache_manager: The executor's cache manager; supplies the device
+            buffer list and the per-layer geometry the host mirrors must match.
+        num_blocks: CPU pool capacity in blocks, null block included, in the
+            same blocks the scheduler hands out.
+        block_size: Tokens per block; must be the scheduler's block size,
+            because a block is one row range on each side of a move.
+
+    Returns:
+        A manager whose loads and stores move blocks between its own host
+        pool and ``kv_cache_manager.gpu_kv_buffer``.
+
+    Raises:
+        ValueError: ``num_blocks`` is below 2 — one slot is the null block.
+    """
+    kv_row, num_layers, dtype = (
+        kv_cache_manager.kv_row,
+        kv_cache_manager.num_layers,
+        kv_cache_manager.dtype,
+    )
+    cpu_buffers = alloc_cpu_kv_buffers(num_blocks, block_size, kv_row, num_layers, dtype)
+    copier = KVCopyEngine(kv_cache_manager.gpu_kv_buffer, cpu_buffers, block_size)
+    rows, dim = kv_row
+    bytes_per_block = block_size * rows * dim * num_layers * get_dtype_size(dtype)
+    return CPUPrimaryTierOffloadingManager(
+        num_blocks, block_size, copier, bytes_per_block=bytes_per_block
+    )

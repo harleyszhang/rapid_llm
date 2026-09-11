@@ -1,0 +1,86 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-0.6B",
+    "version": "0.11.0",
+    "matter": "CPU tier acceptance \u2014 accuracy parity, TPOT tax, overflow reuse",
+    "arm": "accuracy",
+    "parity_batch": 16,
+    "parity_gen_len": 256,
+    "tpot_tolerance": 0.05,
+    "waves": 2,
+    "groups": 4,
+    "per_group": 2,
+    "prefix_sentences": 32,
+    "overflow_gen_len": 16,
+    "overflow_gpu_blocks": 128,
+    "max_seq_len": 1024,
+    "max_num_seqs": 16,
+    "tier_blocks": 1024,
+    "use_cuda_graph": true,
+    "sampling": "greedy",
+    "offline": true,
+    "reproduce": "python benchmarks/engine/run.py kv-transfer --model-dir my_weight/Qwen3-0.6B --arm accuracy --parity-batch 16 --parity-gen-len 256 --waves 2 --groups 4 --per-group 2 --prefix-sentences 32 --overflow-gpu-blocks 128 --tier-blocks 1024 --max-num-seqs 16",
+    "timestamp": "2026-09-11T21:06:42",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 1,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "accuracy": {
+      "arms": {
+        "tier_off": {
+          "label": "tier off",
+          "tier": false,
+          "total_s": 1.3856288641691208,
+          "steps": 256,
+          "gen_tokens": 4096,
+          "ttft_ms": 107.6451875269413,
+          "tpot_ms": 5.01057336965174,
+          "tier_stats": null,
+          "tps": 2956.058513154695
+        },
+        "tier_on": {
+          "label": "tier on",
+          "tier": true,
+          "total_s": 1.426877684891224,
+          "steps": 256,
+          "gen_tokens": 4096,
+          "ttft_ms": 107.65696689486504,
+          "tpot_ms": 5.172306947483151,
+          "tier_stats": {
+            "lookups": 4,
+            "hits": 0,
+            "stores": 132,
+            "loads": 0,
+            "store_bytes": 242221056,
+            "load_bytes": 0,
+            "evictions": 0,
+            "misses": 4,
+            "hit_rate": 0.0,
+            "medium": "CPU"
+          },
+          "tps": 2870.6034465121325
+        }
+      },
+      "criteria": {
+        "criterion": "tier-on token ids match AND TPOT regression <= 5%",
+        "tokens_equal": true,
+        "tpot_delta": 0.03227845715442589,
+        "accepted": true
+      }
+    }
+  }
+}
