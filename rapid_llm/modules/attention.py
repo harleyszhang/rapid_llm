@@ -79,15 +79,21 @@ class PagedAttention(nn.Module):
             self._chunked = cpu.flash_attention2_chunked
             self._decode = cpu.flash_decoding
         else:
+            # One scheme for both cache readers: the chunked prefill and decode
+            # kernels dequantise the same e4m3 rows, so a row that serves one
+            # and not the other would be a dispatch that disagrees with itself.
+            scheme = "fp8_kv" if self.kv_cache_dtype == torch.uint8 else "unquantized"
             self._kv_write = dispatch(
                 "kv_write", dtype=self.kv_cache_dtype, layout=PAGED_KV_TAGS
             ).load()
             self._prefill = dispatch("attention.prefill", dtype=self.params_dtype).load()
-            self._chunked = dispatch("attention.chunked_prefill", dtype=self.params_dtype).load()
+            self._chunked = dispatch(
+                "attention.chunked_prefill", dtype=self.params_dtype, scheme=scheme
+            ).load()
             self._decode = dispatch(
                 "attention.decode",
                 dtype=self.params_dtype,
-                scheme="fp8_kv" if self.kv_cache_dtype == torch.uint8 else "unquantized",
+                scheme=scheme,
                 layout=PAGED_KV_TAGS,
             ).load()
         self._bound_device = device_type
@@ -139,6 +145,8 @@ class PagedAttention(nn.Module):
         alone would drop the prefix — so its queries run through the chunked kernel, whose
         keys/values are the slot's cache rows (prefix plus this chunk, contiguous from
         ``b_kv_base``) at tensor-core prefill prices, not the one-row-per-token extend path.
+        An fp8 cache takes that same route: the strategy's scales travel with the call, and
+        the kernel widens the e4m3 rows on load.
 
         Returns:
             ``[tokens, num_heads, head_dim]``.
@@ -156,6 +164,8 @@ class PagedAttention(nn.Module):
                 atten_info.b_prefix_len,
                 atten_info.b_seq_len,
                 atten_info.max_chunk_len,
+                k_scale=self.k_scale,
+                v_scale=self.v_scale,
             )
         return self._prefill(
             xq,

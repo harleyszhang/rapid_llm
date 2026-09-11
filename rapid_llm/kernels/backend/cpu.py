@@ -111,7 +111,17 @@ def flash_attention2_no_pad(q, k, v, sm_scale, b_start_loc, b_seq_len, max_seq_l
 
 
 def flash_attention2_chunked(
-    q, k_cache, v_cache, sm_scale, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, max_chunk_len
+    q,
+    k_cache,
+    v_cache,
+    sm_scale,
+    b_start_loc,
+    b_kv_base,
+    b_prefix_len,
+    b_seq_len,
+    max_chunk_len,
+    k_scale=1.0,
+    v_scale=1.0,
 ):
     out = torch.zeros_like(q)
     for start, base, prefix, length in zip(
@@ -124,9 +134,11 @@ def flash_attention2_chunked(
         if length > prefix:
             rows = slice(start, start + length - prefix)
             cached = slice(base, base + length)
-            out[rows] = _attention(q[rows], k_cache[cached], v_cache[cached], sm_scale, prefix).to(
-                q.dtype
-            )
+            k, v = k_cache[cached], v_cache[cached]
+            if k.dtype == torch.uint8:
+                k = k.view(torch.float8_e4m3fn).float() * k_scale
+                v = v.view(torch.float8_e4m3fn).float() * v_scale
+            out[rows] = _attention(q[rows], k, v, sm_scale, prefix).to(q.dtype)
     return out
 
 

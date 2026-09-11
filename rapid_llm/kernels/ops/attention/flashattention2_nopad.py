@@ -7,7 +7,8 @@ a ragged batch needs no tensor padding at all.
 The sibling :func:`flash_attention2_chunked` answers the same question for
 a chunk resuming on cached K/V: queries are the chunk's rows, keys and
 values come from the paged cache, and the causal mask is expressed in
-absolute positions.
+absolute positions. That cache may hold fp8-e4m3 bytes, which the chunked
+kernel dequantises on load the way flash-decoding does.
 
 Usage:
     from rapid_llm.kernels import flash_attention2_no_pad
@@ -17,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 from torch.amp import custom_fwd
+
+from ..quantization.w8a16 import FP8_E4M3_BIT_TRICK_SCALE, dequant_fp8e4m3
 
 #: ``exp(x) == exp2(x * log2(e))`` — the kernel takes the exp2 route.
 _LOG2E = 1.4426950408889634
@@ -256,6 +259,8 @@ def flash_attention2_chunked_kernel(
     B_Prefix_Len,  # [batch] 前缀长度: KV 中先于本 chunk 落地的行数
     B_Seqlen,  # [batch] 总长 = prefix + chunk
     sm_scale,
+    k_scale,  # fp8 KV cache 反量化标量: 与 qk 同为线性因子, 折在 sm_scale 上
+    v_scale,  # 同, 折在输出归一化一步
     heads,
     num_kv_groups,
     stride_q_bs,
@@ -273,6 +278,7 @@ def flash_attention2_chunked_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_M_SIZE: tl.constexpr,
     BLOCK_N_SIZE: tl.constexpr,
+    KV_FP8: tl.constexpr,  # cache 以 e4m3 字节存储(uint8 容器)
 ):
     """Causal attention for chunk queries against the paged KV cache.
 
@@ -282,6 +288,10 @@ def flash_attention2_chunked_kernel(
     每个 slot 的 cache 行连续, 所以一次基址加法就完成寻址, 无逐 token 表
     间接——这是它比逐行 decode kernel 快一个量级的关键。因果按绝对位置
     判定: query ``prefix + m`` 只看 KV 行 ``<= prefix + m``。
+
+    ``KV_FP8`` 时 cache 行是 e4m3 字节: 每块 K/V 在进 ``tl.dot`` 前先升到
+    q 的 dtype(e4m3 的 3 bit 尾数在 fp16/bf16 下精确), 逐张量的反量化标量
+    是常数, 从内层循环提到 qk 与输出两步上。
     """
     block_m_idx = tl.program_id(0)  # chunk 内 query 块索引
     cur_bh = tl.program_id(1)
@@ -339,11 +349,16 @@ def flash_attention2_chunked_kernel(
         kv_shift = (cur_kv_base + start_n) * stride_k_bs
         k = tl.load(k_ptrs + kv_shift, mask=n_mask[None, :], other=0.0)
 
+        if KV_FP8:
+            # 屏蔽列的字节为 0 -> 0.0, 与 fp16 路径的 other=0.0 语义一致;
+            # bit-trick 输出欠 2**8, 已由调用方折入 k_scale。
+            k = dequant_fp8e4m3(k).to(q.dtype)
+
         qk = tl.dot(q, k)
 
         # 因果遮罩: query 的绝对位置是 prefix + m, KV 的绝对位置是 n。
         casual_mask = (cur_prefix + offs_m[:, None]) >= (start_n + offs_n[None, :])
-        qk = tl.where(casual_mask, qk * sm_scale, -1.0e8)
+        qk = tl.where(casual_mask, qk * (sm_scale * k_scale), -1.0e8)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -356,12 +371,14 @@ def flash_attention2_chunked_kernel(
         acc = acc * alpha[:, None]
 
         v = tl.load(v_ptrs + (cur_kv_base + start_n) * stride_v_bs, mask=n_mask[:, None], other=0.0)
+        if KV_FP8:
+            v = dequant_fp8e4m3(v).to(q.dtype)
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
 
         m_i = m_ij
 
-    acc = acc / d_i[:, None]
+    acc = acc * v_scale / d_i[:, None]
     off_o = (
         (cur_q_start + offs_m[:, None]) * stride_o_bs
         + cur_head_idx * stride_o_heads
@@ -403,6 +420,8 @@ def flash_attention2_chunked(
     b_prefix_len,
     b_seq_len,
     max_chunk_len,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ):
     """Causal prefill for chunks resuming on K/V that is already cached.
 
@@ -414,12 +433,17 @@ def flash_attention2_chunked(
     row per token, which the extend path charges and which costs roughly an
     order of magnitude more per token.
 
+    An fp8 cache is served by the same kernel: ``uint8`` rows are e4m3 bytes
+    that widen to ``q``'s dtype on load, so a quantised cache no longer costs
+    a resumed chunk its grid pass.
+
     Args:
         q: ``[total_rows, num_heads, head_dim]`` packed query rows of the
             chunk grid, padding columns included (their rows are masked out).
         k_cache: ``[max_tokens, num_kv_heads, head_dim]`` the K half of the
             paged buffer; ``v_cache`` the same for V. Must hold this pass's
             rows already: the KV write precedes attention on the same stream.
+            ``uint8`` rows are read as fp8-e4m3.
         sm_scale: Plain softmax scale, ``1 / sqrt(head_dim)``.
         b_start_loc: ``[batch]`` first packed query row of each sequence
             (``i * grid_width`` — the padded layout prefill uses).
@@ -427,15 +451,22 @@ def flash_attention2_chunked(
         b_prefix_len: ``[batch]`` cached rows preceding this chunk.
         b_seq_len: ``[batch]`` total length once the chunk lands.
         max_chunk_len: Widest chunk, sizing the query-block grid.
+        k_scale: Dequantisation scale of an fp8 key cache; ignored for fp16.
+        v_scale: Same for the value cache.
 
     Returns:
         ``[total_rows, num_heads, head_dim]`` attention output; rows past a
         sequence's chunk length carry garbage and are never read.
     """
-    assert k_cache.dtype != torch.uint8, "the chunked kernel reads the cache verbatim"
     output = torch.empty_like(q)
     batchs = b_seq_len.shape[0]
     n_heads, HEAD_DIM = q.shape[1], q.shape[2]
+
+    kv_fp8 = k_cache.dtype == torch.uint8
+    if kv_fp8:
+        # dequant_fp8e4m3 的 bit-trick 输出欠 2**8; 折进 scale, kernel 内免补偿
+        k_scale = k_scale * FP8_E4M3_BIT_TRICK_SCALE
+        v_scale = v_scale * FP8_E4M3_BIT_TRICK_SCALE
 
     BLOCK_M, BLOCK_N, num_warps, num_stages = _nopad_blocks(max_chunk_len, HEAD_DIM, q.dtype)
     num_kv_groups = q.shape[1] // k_cache.shape[1]  # num_q_heads // num_k_heads
@@ -451,6 +482,8 @@ def flash_attention2_chunked(
         b_prefix_len,
         b_seq_len,
         sm_scale * _LOG2E,
+        k_scale,
+        v_scale,
         n_heads,
         num_kv_groups,
         q.stride(0),
@@ -468,6 +501,7 @@ def flash_attention2_chunked(
         HEAD_DIM=HEAD_DIM,
         BLOCK_M_SIZE=BLOCK_M,
         BLOCK_N_SIZE=BLOCK_N,
+        KV_FP8=kv_fp8,
         num_warps=num_warps,
         num_stages=num_stages,
     )

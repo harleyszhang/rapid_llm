@@ -45,9 +45,9 @@ class BaseKVCacheMethod(QuantizeMethodBase, ABC):
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """fp8-e4m3 KV cache: per-tensor scale, uint8 storage.
 
-    The bit-trick dequant in the flash-decoding kernel under-estimates by 2**8;
-    the caller-side wrapper pre-multiplies that factor into the scale for zero
-    host-side overhead in the hot path.
+    The bit-trick dequant in the flash-decoding and chunked prefill kernels
+    under-estimates by 2**8; the caller-side wrappers pre-multiply that factor
+    into the scale for zero host-side overhead in the hot path.
 
     Args:
         k_scale: Per-tensor scale for key quantisation (default 1.0).

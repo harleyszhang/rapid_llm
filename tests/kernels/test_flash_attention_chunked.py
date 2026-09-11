@@ -3,8 +3,8 @@
 Queries are a chunk's rows at absolute positions ``[prefix, prefix + chunk)``
 while keys and values live in the paged cache — prefix rows written by earlier
 chunks or a prefix-cache copy, fresh rows by this pass's KV write. Ragged
-(prefix, chunk) mixes, GQA ratios and slot isolation are parametrised against
-a pure-torch reference.
+(prefix, chunk) mixes, GQA ratios, slot isolation and an fp8-e4m3 cache are
+parametrised against a pure-torch reference.
 
 Usage:
     pytest tests/kernels/test_flash_attention_chunked.py
@@ -247,3 +247,123 @@ def test_cache_segments_do_not_leak_into_each_other():
         rtol=_RTOL,
         atol=_ATOL,
     )
+
+
+# --------------------------------------------------------------------------- #
+# fp8 KV cache (e4m3 bytes in a uint8 container)
+#
+# The resumed chunk of a prompt reads the same cache decode does, so an fp8
+# cache must not cost it the grid pass. These pin the dequant on load.
+# --------------------------------------------------------------------------- #
+def _quantize_kv(k_cache, v_cache, k_scale=1.0, v_scale=1.0):
+    from rapid_llm.modules.quantization.utils import quantize_fp8_per_tensor
+
+    return (
+        quantize_fp8_per_tensor(k_cache, k_scale),
+        quantize_fp8_per_tensor(v_cache, v_scale),
+    )
+
+
+def test_fp8_cache_dequantises_exactly():
+    """The uint8 cache must widen to exactly what torch's cast gives.
+
+    Run twice over the same history — once as e4m3 bytes, once as their fp16
+    widening — so a disagreement is the kernel's dequant rather than fp8
+    rounding. The bit-trick's 2**8 under-scale has to be folded into the
+    caller-side scale, or this fails by exactly 256x.
+    """
+    spans = [(64, 128), (16, 80)]
+    head_dim = 64
+    batch = _chunked_batch(spans, 4, 2, head_dim)
+    q, k_cache, v_cache, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width, _ = batch
+    scale = 1.0 / math.sqrt(head_dim)
+
+    k8, v8 = _quantize_kv(k_cache, v_cache)
+    assert k8.dtype == torch.uint8 and k8.shape == k_cache.shape
+
+    args = (scale, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width)
+    out = flash_attention2_chunked(q, k8, v8, *args)
+    widened = flash_attention2_chunked(
+        q,
+        k8.view(torch.float8_e4m3fn).to(torch.float16),
+        v8.view(torch.float8_e4m3fn).to(torch.float16),
+        *args,
+    )
+    torch.testing.assert_close(
+        _real_rows(spans, width, out.float()),
+        _real_rows(spans, width, widened.float()),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+def test_fp8_cache_applies_kv_scales():
+    """A scale folded in on write must be undone by the matching read scale."""
+    spans = [(96, 160)]
+    head_dim = 64
+    batch = _chunked_batch(spans, 4, 4, head_dim)
+    q, k_cache, v_cache, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width, _ = batch
+    scale = 1.0 / math.sqrt(head_dim)
+    args = (scale, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width)
+
+    k8, v8 = _quantize_kv(k_cache, v_cache, k_scale=0.5, v_scale=2.0)
+    out = flash_attention2_chunked(q, k8, v8, *args, k_scale=0.5, v_scale=2.0)
+    ref = flash_attention2_chunked(
+        q,
+        k8.view(torch.float8_e4m3fn).to(torch.float16) * 0.5,
+        v8.view(torch.float8_e4m3fn).to(torch.float16) * 2.0,
+        *args,
+    )
+    torch.testing.assert_close(
+        _real_rows(spans, width, out.float()),
+        _real_rows(spans, width, ref.float()),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+def test_fp8_cache_stays_within_e4m3_rounding_of_fp16():
+    """Against the fp16 cache, the drift may not exceed the format's rounding.
+
+    e4m3 carries 3 mantissa bits (~6% worst case per element) and the softmax
+    mix averages most of that away, so the chunk's output stays within ~10% of
+    the fp16 cache — the same budget the decode kernel's fp8 test holds to.
+    """
+    spans = [(128, 192), (32, 96)]
+    head_dim = 64
+    batch = _chunked_batch(spans, 4, 2, head_dim)
+    q, k_cache, v_cache, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width, _ = batch
+    scale = 1.0 / math.sqrt(head_dim)
+    args = (scale, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width)
+
+    ref = _real_rows(spans, width, flash_attention2_chunked(q, k_cache, v_cache, *args).float())
+    k8, v8 = _quantize_kv(k_cache, v_cache)
+    out = _real_rows(spans, width, flash_attention2_chunked(q, k8, v8, *args).float())
+
+    err = (out - ref).abs().max()
+    assert err < 0.1 * ref.abs().max(), f"fp8 cache drifted {err} from fp16"
+
+
+def test_fp8_prefix_is_attended_not_dropped():
+    """The chunk's first row must still see the whole prefix through the bytes.
+
+    Dropping the prefix is the corruption the old fp8 fallback existed to
+    avoid, so it is pinned directly against a torch reference over the widened
+    cache instead of leaning on another kernel call.
+    """
+    prefix, chunk, head_dim = 96, 32, 64
+    batch = _chunked_batch([(prefix, prefix + chunk)], 4, 4, head_dim)
+    q, k_cache, v_cache, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width, _ = batch
+    scale = 1.0 / math.sqrt(head_dim)
+
+    k8, v8 = _quantize_kv(k_cache, v_cache)
+    out = flash_attention2_chunked(
+        q, k8, v8, scale, b_start_loc, b_kv_base, b_prefix_len, b_seq_len, width
+    )
+
+    # Row 0 sits at absolute position ``prefix``: softmax over cache rows [0, prefix].
+    k = k8[: prefix + 1].view(torch.float8_e4m3fn).float()
+    v = v8[: prefix + 1].view(torch.float8_e4m3fn).float()
+    scores = torch.einsum("hd,thd->ht", q[0].float(), k) * scale
+    expected = torch.einsum("ht,thd->hd", torch.softmax(scores, dim=-1), v)
+    torch.testing.assert_close(out[0].float(), expected, rtol=_RTOL, atol=_ATOL)

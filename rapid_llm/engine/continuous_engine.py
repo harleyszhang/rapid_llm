@@ -285,6 +285,7 @@ class ContinuousBatchingEngine:
         executor: Executor | None = None,
         *,
         pipeline: bool | None = None,
+        pipeline_depth: int = 1,
         async_tokenize: bool = False,
         offloading: OffloadingManager | None = None,
     ) -> None:
@@ -308,6 +309,7 @@ class ContinuousBatchingEngine:
         self.config = config
 
         self._pipeline = pipeline_enabled() if pipeline is None else pipeline
+        self._pipeline_depth = max(1, pipeline_depth) if self._pipeline else 1
         if self._pipeline and config.enable_preemption:
             raise ValueError(
                 "the launch/harvest pipeline cannot plan one token ahead for a "
@@ -361,9 +363,10 @@ class ContinuousBatchingEngine:
         self._async_tokenize = async_tokenize
         self._tokenize_pool: ThreadPoolExecutor | None = None
         self._tokenizing: dict[str, _TokenizeJob] = {}
-        # One step's launched-but-unharvested passes, when pipelined: each entry
-        # is the launched list of (work, host tokens, event, records). Depth is
-        # one by construction — every step harvests before it schedules.
+        # Launched-but-unharvested passes, when pipelined: each entry is the
+        # launched list of (work, host tokens, event, records).  Depth is
+        # ``self._pipeline_depth`` — every step harvests the oldest entry when
+        # enough are in flight, so the D2H copy of step N-*depth* has landed.
         self._inflight: deque[
             list[tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]]
         ] = deque()
@@ -400,6 +403,7 @@ class ContinuousBatchingEngine:
         cuda_graph_lazy: bool = False,
         async_tokenize: bool = False,
         pipeline: bool | None = None,
+        pipeline_depth: int = 1,
         hf_overrides: dict[str, object] | None = None,
     ) -> ContinuousBatchingEngine:
         """Load a checkpoint and wrap it in a continuous-batching engine.
@@ -461,12 +465,19 @@ class ContinuousBatchingEngine:
                 serialising against the engine loop and every step it would
                 have delayed. ``add_request`` returns immediately; the request
                 joins the scheduler once its tokens are ready.
-            pipeline: Run the launch/harvest engine loop (O2): launches run one
-                step ahead of harvests so the host's bookkeeping overlaps
-                compute, and decode inputs stay on the device. ``None`` reads
+            pipeline: Run the launch/harvest engine loop (O2): launches run
+                ``pipeline_depth`` steps ahead of harvests so the host's
+                bookkeeping overlaps compute, and decode inputs stay on the
+                device. ``None`` reads
                 :data:`~rapid_llm.executor.worker.PIPELINE_ENV`. Stop handling
-                runs one token late, and a request asking for logprobs pays
-                its synchronisation inside the pass as usual.
+                runs ``pipeline_depth`` tokens late, and a request asking for
+                logprobs pays its synchronisation inside the pass as usual.
+            pipeline_depth: How many steps the launch/harvest loop keeps in
+                flight.  At depth N the D2H copy of step M has landed by the
+                time step M+N is harvested, so ``event.synchronize()`` in the
+                harvest path returns with zero wait in steady state.  The
+                overhead is stop handling delayed by N tokens instead of 1,
+                and ``pending_tokens`` on each request ``N-1`` higher.
             hf_overrides: Fields applied over the checkpoint's ``config.json``
                 (vLLM ``--hf-overrides`` semantics), e.g.
                 ``{"num_hidden_layers": 1}`` to run a trimmed stack — the
@@ -558,7 +569,12 @@ class ContinuousBatchingEngine:
                     pipeline=resolved_pipeline,
                 )
             return cls(
-                engine, config, executor, pipeline=resolved_pipeline, async_tokenize=async_tokenize
+                engine,
+                config,
+                executor,
+                pipeline=resolved_pipeline,
+                pipeline_depth=pipeline_depth,
+                async_tokenize=async_tokenize,
             )
         except BaseException:
             if followers:
@@ -751,29 +767,30 @@ class ContinuousBatchingEngine:
 
     @torch.inference_mode()
     def _step_pipelined(self) -> list[Request]:
-        """Launch step N, then harvest step N-1 — the O2 engine loop.
+        """Launch step N, harvest step N-*depth* — the O2 engine loop.
 
-        The order is the whole point. Scheduling and launching happen while
-        the previous step's forward is still on the GPU, and the host stops
-        only to harvest the *previous* step's tokens — by then their readback
-        has landed under the current forward, so the wait is zero and the
-        detokenise/stop work overlaps compute instead of serialising against
-        it.
+        Scheduling and launching happen while an earlier step's forward is
+        still on the GPU, and the host stops only to harvest the oldest
+        in-flight step's tokens — by depth ``N`` their readback has landed
+        under the forwards that completed after them, so the wait is zero
+        and the detokenise/stop work overlaps compute instead of serialising
+        against it.
 
         What that costs, explicitly:
 
-        * Stop handling runs one token late: a request that samples eos is
-          retired one step after the synchronous engine would retire it, and
-          the extra pass it rides is wasted compute whose token is discarded
-          here. Late, not wrong — the stream hears the same finish reason,
-          one step later.
+        * Stop handling runs ``pipeline_depth`` tokens late: a request that
+          samples eos is retired ``pipeline_depth`` steps after the
+          synchronous engine would retire it, and the extra passes it rides
+          are wasted compute whose tokens are discarded here. Late, not wrong
+          — the stream hears the same finish reason, ``pipeline_depth`` steps
+          later.
         * The host's request ledger is optimistic: between launch and
-          harvest, ``pending_tokens`` says the device is one token ahead, and
-          the next decode plan adds exactly that back to write the right
-          cache row.
+          harvest, ``pending_tokens`` says the device is ``pipeline_depth``
+          tokens ahead, and the next decode plan adds exactly that back to
+          write the right cache row.
         * A pass whose requests asked for logprob records already paid a host
           synchronisation inside execute (records are host objects), so it
-          simply rides the same one-step-late harvest without extra cost.
+          simply rides the same depth-late harvest without extra cost.
         """
         scheduled = self.scheduler.schedule()
         if scheduled.is_empty and not self._inflight:
@@ -792,11 +809,13 @@ class ContinuousBatchingEngine:
         if scheduled.decode:
             work.append(_decode_work(scheduled.decode, from_device=True))
 
-        # Detach the previous step's passes before this step's launches join
-        # the queue: taking the harvest set first is what pins the depth at
-        # one — a step never harvests what it just launched, so the tokens it
-        # reads are always one forward old.
-        previous = self._inflight.popleft() if self._inflight else None
+        # Detach the oldest in-flight step before this step's launches join
+        # the queue.  At depth ``D`` we harvest when ``D`` entries are in
+        # flight or when no new work remains (drain).  The oldest entry's
+        # D2H copy landed under the ``D-1`` forwards launched since, so its
+        # event has completed by now in the steady state.
+        can_pop = len(self._inflight) >= self._pipeline_depth or scheduled.is_empty
+        previous = self._inflight.popleft() if can_pop else None
 
         # Launch only: no token is read back here. The readback rides the
         # executor's copy stream behind the pass that produced it, and its
@@ -807,11 +826,11 @@ class ContinuousBatchingEngine:
             staged.append((work_item, tokens, logprobs))
 
         advanced: list[Request] = []
-        # Harvest the previous step's tokens *before* this step's readbacks
+        # Harvest the oldest in-flight tokens *before* this step's readbacks
         # are issued. A readback recycles whichever pinned buffer's copy
-        # event has completed, and the previous step's completed long ago —
-        # read after the new readback, its view would already hold this
-        # step's tokens (the pool's "harvest N-1 strictly before launch N's
+        # event has completed, and the oldest in-flight's completed long ago
+        # — read after the new readback, its view would already hold this
+        # step's tokens (the pool's "harvest N-d strictly before launch N's
         # readback" contract). The executes above queued this step's
         # kernels, so the host still harvests while the GPU runs.
         if previous is not None:
@@ -824,8 +843,9 @@ class ContinuousBatchingEngine:
                     else (None,) * len(work_item.requests)
                 )
                 if event is not None:
-                    # Zero wait in the steady state: this copy landed one
-                    # forward ago. Only a drained queue's final harvest pays.
+                    # Zero wait in the steady state: this copy landed
+                    # under the forwards launched since.  Only a drained
+                    # queue's final harvest pays.
                     event.synchronize()
                 values = host.tolist()
                 # The buffer goes back only now. This step's launches already

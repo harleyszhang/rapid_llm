@@ -162,7 +162,8 @@ class SlotBatch:
         ``seq_lens[i]`` is the total cached length after this chunk and bounds
         attention; padding positions write junk K/V but are never read. A pass
         with any ``seq_starts[i] > 0`` arms the chunked metadata
-        (``b_prefix_len``/``b_kv_base``); a first-chunk pass clears it.
+        (``b_prefix_len``/``b_kv_base``); a first-chunk pass clears it. The cache
+        dtype does not enter into it: the chunked kernel dequantises fp8 rows.
 
         Args:
             slots: Slot id per sequence.
@@ -170,8 +171,7 @@ class SlotBatch:
             seq_lens: Total cached length per sequence once the chunk lands.
 
         Raises:
-            ValueError: A resumed chunk on a quantised KV cache (the chunk kernel
-                cannot read its bytes; routing should use the extend path).
+            ValueError: A chunk is wider than ``max_seq_len``.
         """
         # Grid width is the widest chunk (rows start at their own positions, so
         # the grid must match the widest chunk for cur_select_index to align).
@@ -196,11 +196,6 @@ class SlotBatch:
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
 
         if any(start > 0 for start in seq_starts):
-            if self._runner.config.kv_cache_torch_dtype == torch.uint8:
-                raise ValueError(
-                    "a chunked prefill grid cannot resume on an fp8 KV cache; "
-                    "route resumed chunks through the extend pass instead"
-                )
             # KV row 0 of each slot: the base its history hangs off.
             self._atten.b_prefix_len = starts
             self._atten.b_kv_base = table[b_req_idx, 0]

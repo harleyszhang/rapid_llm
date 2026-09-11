@@ -41,10 +41,10 @@ register(
         op="attention.chunked_prefill",
         backend="native",
         target="rapid_llm.kernels.ops.attention.flashattention2_nopad:flash_attention2_chunked",
-        # Reads the paged buffer verbatim, so it cannot serve an fp8 cache
-        # (uint8 rows) — those chunk passes fall back to extend.
+        # fp8_kv rides the same kernel as the unquantised cache: uint8 rows are
+        # e4m3 bytes dequantised on load, so no separate row is warranted.
         dtypes=("bf16", "fp16"),
-        schemes=("unquantized",),
+        schemes=("unquantized", "fp8_kv"),
         golden=NATIVE_BASELINE,
     )
 )

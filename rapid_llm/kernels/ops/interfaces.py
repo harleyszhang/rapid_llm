@@ -83,6 +83,8 @@ class AttentionChunkedPrefillOp(LogicalOp):
         b_prefix_len: torch.Tensor,
         b_seq_len: torch.Tensor,
         max_chunk_len: int,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
     ) -> torch.Tensor:
         """Attend over the paged cache for a resumed chunk.
 
@@ -97,6 +99,8 @@ class AttentionChunkedPrefillOp(LogicalOp):
             b_prefix_len: ``[batch]`` cached rows preceding this chunk.
             b_seq_len: ``[batch]`` total length once the chunk lands.
             max_chunk_len: Widest chunk, sizing the query-block grid.
+            k_scale: Dequantisation scale of an fp8 key cache (1.0 otherwise).
+            v_scale: Same for the value cache.
 
         Returns:
             ``[total_rows, num_heads, head_dim]`` attention output.
