@@ -199,7 +199,7 @@ vs tp2（greedy，6 prompt × 24 tok，tie-gap 0.5 nat）：tp1、ep2、ep2_grap
 
 前两帧是原理：TP 把每个专家切片、每层 MoE all-reduce 全 hidden 向量；EP 把整专家发牌、每层两次 a2a 只送被路由的行，第二帧讲容量交换为何 graph-safe（split 静态、形状固定）。之后是真实 EP2 引擎逐步录制的运行：右上热力图是 128 个专家的逐步路由（左块绿 = rank 0 拥有的 0–63，右块蓝 = rank 1 的 64–127，亮度 = 命中数——右块亮起来意味着那些行真的跨了线）；右下是 rank 0 的 collective ledger，每步的 a2a/all-reduce 字节旁边放着同一 workload 实测的 "tp2 all-reduce per step" 对比行。
 
-录制刻意用 eager decode：a2a 在生产路径上被捕获进 CUDA Graph，replay 会绕过 Python 记账和路由 hook，帧上什么都看不到。GIF 由 `scripts/gen_expert_parallel_gif.py` 生成，每个字节都是量出来的。
+录制刻意用 eager decode：a2a 在生产路径上被捕获进 CUDA Graph，replay 会绕过 Python 记账和路由 hook，帧上什么都看不到。GIF 由 `python -m scripts.visualize.gen_expert_parallel_gif` 生成，每个字节都是量出来的。
 
 ## 相关文档
 

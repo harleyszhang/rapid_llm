@@ -97,13 +97,13 @@ CUDA graph 不受影响：replay 的输入本来就是静态 buffer，把 device
 
 **预期收益**：batch=1 TPOT -20~25%（~7.5ms → ~6ms）；并发下收益更大，CPU 组批时间随 batch 涨、GPU 时间不涨。这条也把 ROADMAP P9 的第一落点从「独立进程 + ZMQ」降级为同进程重叠，成本 10% 拿到 90% 收益，且不再与 F2（单进程 pdb 直达）冲突。
 
-**落地记录（dev-v0.10）**：已按本节设计实现，开关 `RAPID_LLM_PIPELINE`（默认关；显式 `1`/`true`/`on` 打开，`from_pretrained(pipeline=True)` 亦可，TP follower 由 driver 经环境变量教会）。循环形态是 `_step_pipelined`：schedule → launch(N) → harvest(N-1)，`_inflight` 深度恒 1。与设计的差异如下：
+**落地记录（dev-v0.10；dev-v0.12 起在飞深度可配）**：已按本节设计实现，开关 `RAPID_LLM_PIPELINE`（默认关；显式 `1`/`true`/`on` 打开，`from_pretrained(pipeline=True)` 亦可，TP follower 由 driver 经环境变量教会）。循环形态是 `_step_pipelined`：schedule → launch → harvest，在飞深度由 `pipeline_depth` 给出（默认 1，`from_pretrained(..., pipeline_depth=N)` 可调），`len(_inflight) >= pipeline_depth` 或无新工作时才 harvest 最老一步。深度 D 时读到的是 D 步前发射的 token——它的 D2H 拷贝已被中间 D-1 个 forward 藏住，稳态下 `event.synchronize()` 零等待；输出 token 与深度无关，停止处理晚 D 个 token、`pending_tokens` 高 D-1。与设计的差异如下：
 
-- 多吐一个 token 的对策不是 admit 时预扣 `max_gen_len`，而是 harvest 时检查 `request.is_finished`：晚停那步的 pass 照常发射，token 读回后丢弃不追加。占槽一步的代价相同，但停止语义与同步版逐位一致，admit 逻辑不用动。
+- 多吐一个 token 的对策不是 admit 时预扣 `max_gen_len`，而是 harvest 时检查 `request.is_finished`：晚停那步的 pass 照常发射，token 读回后丢弃不追加。占槽代价与设计一致（深度 D 时晚停 D 步、多占槽 D 步），停止语义与同步版逐位一致，admit 逻辑不用动。
 - 乐观账目落在 `Request.pending_tokens`：launch +1、harvest -1（丢弃的也减，账目闭合归零）；decode 计划的长度加上它，token 用 `-1` 占位（非法 id，若泄漏到 embedding 会直接报错），真值由 worker 的 `_next_tokens` device 网格 gather 接力。
-- 与 recompute preemption 互斥（构造时 ValueError）：领先一步的账目无法为回滚重算服务，开 pipeline 必须关 `enable_preemption`。
+- 与 recompute preemption 互斥（构造时 ValueError）：领先 `pipeline_depth` 步的账目无法为回滚重算服务，开 pipeline 必须关 `enable_preemption`。
 - `StreamPool` 扩了 readback 方向（`_spill` ring，与 upload 的 `_staging` 对称、独立复用）。落地测试抓出并修掉一个真 bug：D2H 的源 tensor 未 `record_stream(copy_stream)`，调用方释放后 block 被 caching allocator 复用，readback 读到的是下一个 pass 覆写的值。upload 路径一直有对称的保护，readback 起步时漏了。
-- 契约测试：`tests/engine/test_pipeline_engine.py`（9 例：token 流与同步版一致但晚一步、账目归零、晚停丢弃、互斥拒绝、混合 step）与 `tests/executor/test_overlap.py` 的 readback 三例（含 ring 不覆写）。
+- 契约测试：`tests/engine/test_pipeline_engine.py`（9 例：token 流与同步版一致但晚一步、账目归零、晚停丢弃、互斥拒绝、混合 step）与 `tests/executor/test_overlap.py` 的 readback 三例（含 ring 不覆写）；深度 2 与同步版逐 token 一致、drain 不挂起见 `tests/engine/test_pipeline_depth.py`（GPU + 权重）。
 
 ### O10 tokenize 移出关键路径
 

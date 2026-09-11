@@ -70,7 +70,7 @@ The v0.7 scheduler trace used one 2000-token prompt alongside four decode reques
 | 512 | 4 | 512 | 4 |
 | 256 | 8 | 256 | 4 |
 
-At a 512-token chunk, worst-case prefill work per step fell by 3.9×. Reproduce the scheduler trace with `python scripts/gen_chunked_prefill_gif.py`; configuration and raw data are in [release v0.7.0](release-v0.7.0.md).
+At a 512-token chunk, worst-case prefill work per step fell by 3.9×. Reproduce the scheduler trace with `python -m scripts.visualize.gen_chunked_prefill_gif`; configuration and raw data are in [release v0.7.0](release-v0.7.0.md).
 
 ## Prefix Caching
 
@@ -78,7 +78,7 @@ Prefix caching hashes 16-token blocks as a chain, so a block key identifies the 
 
 ![prefix caching](images/prefix_cache.gif)
 
-In the v0.7 trace, four requests shared a 768-token prefix and each added a 32-token tail. The cold request prefilled 800 tokens; each later request prefilled 32, a 25× reduction. The cumulative hit rate reached 72%. Reproduce it with `python scripts/gen_prefix_cache_gif.py`; lifecycle and raw scheduler output are in [release v0.7.0](release-v0.7.0.md).
+In the v0.7 trace, four requests shared a 768-token prefix and each added a 32-token tail. The cold request prefilled 800 tokens; each later request prefilled 32, a 25× reduction. The cumulative hit rate reached 72%. Reproduce it with `python -m scripts.visualize.gen_prefix_cache_gif`; lifecycle and raw scheduler output are in [release v0.7.0](release-v0.7.0.md).
 
 ## Recompute Preemption
 
@@ -86,7 +86,7 @@ With `enable_preemption=True`, the scheduler can admit more requests than availa
 
 ![recompute preemption](images/preemption.gif)
 
-The recorded case runs three requests on two slots. Each step advances one decoding request while the evicted request re-enters the queue; the trace verifies progress without starvation. Reproduce it with `python scripts/gen_preemption_gif.py`; the five-step schedule is in [release v0.7.0](release-v0.7.0.md).
+The recorded case runs three requests on two slots. Each step advances one decoding request while the evicted request re-enters the queue; the trace verifies progress without starvation. Reproduce it with `python -m scripts.visualize.gen_preemption_gif`; the five-step schedule is in [release v0.7.0](release-v0.7.0.md).
 
 ## Tensor Parallelism
 
@@ -119,7 +119,7 @@ with CollectiveStats.collect() as stats:
 print(stats.report())          # per-op calls and bytes, split data / control plane
 ```
 
-Recording is windowed, so the default path costs one `if`; windows nest, so a per-step window inside a whole-run window comes out of a single pass. Regenerate the GIF above with `python scripts/gen_collective_gif.py` — it drives a real `tp=2` engine and every byte in it is a measurement.
+Recording is windowed, so the default path costs one `if`; windows nest, so a per-step window inside a whole-run window comes out of a single pass. Regenerate the GIF above with `python -m scripts.visualize.gen_collective_gif` — it drives a real `tp=2` engine and every byte in it is a measurement.
 
 See [tensor_parallel.md](tensor_parallel.md) for the design, the sharding rules (including why QKV is split per segment under GQA), and what byte-exact parity between `tp=1` and `tp=2` can and cannot assert under fp16.
 
@@ -159,7 +159,7 @@ A continuous-batching step can hold up to three passes — prefill, extend, deco
 
 ![L1 cross-stream overlap](images/overlap_l1.gif)
 
-The GIF is rendered from the engine's own CUDA-event timeline (`RAPID_LLM_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection records the overlap on a shared device clock. Measure both sides with `python -m benchmarks.overlap.levels --level l1 --timeline`; regenerate the picture with `python scripts/gen_overlap_l1_gif.py`.
+The GIF is rendered from the engine's own CUDA-event timeline (`RAPID_LLM_OVERLAP_TIMELINE=1`): the extend forward fills the window on the compute stream while the next pass's upload lands inside it on the copy stream — the intersection records the overlap on a shared device clock. Measure both sides with `python -m benchmarks.overlap.levels --level l1 --timeline`; regenerate the picture with `python -m scripts.visualize.gen_overlap_l1_gif`.
 
 ## Decode Host-Overhead Cuts (v0.11.1)
 
@@ -175,7 +175,7 @@ The same release fixed a TP=2 + captured-graph shutdown deadlock: `ncclCommAbort
 
 ![TP teardown timeline](images/v0111_teardown_timeline.png)
 
-All three figures are generated from the shipped benchmark logs — `python scripts/gen_v0111_release_figs.py` re-renders them; numbers and method in [release-v0.11.1.md](release-v0.11.1.md).
+All three figures are generated from the shipped benchmark logs — `python -m scripts.visualize.gen_v0111_release_figs` re-renders them; numbers and method in [release-v0.11.1.md](release-v0.11.1.md).
 
 ## Compute–Communication Overlap (L2 / L3 / L4)
 
@@ -207,7 +207,7 @@ L2 and L3 aim at the same all-reduce, so only one can own it: `row_parallel_forw
 
 ![overlap combination matrix](images/overlap_combination_matrix.png)
 
-Full tables, the nsys kernel-level evidence, and the negative results sit in [release-v0.11.5.md](release-v0.11.5.md); `python scripts/gen_overlap_gifs.py` regenerates the three timelines above straight from a live engine.
+Full tables, the nsys kernel-level evidence, and the negative results sit in [release-v0.11.5.md](release-v0.11.5.md); `python -m scripts.visualize.gen_overlap_gifs` regenerates the three timelines above straight from a live engine.
 
 ## Kernel Dispatch and Autotune
 
@@ -395,7 +395,7 @@ The consequence: requests sharing a system prompt prefill it once; later request
 
 fp8 KV cache (e4m3 + uint8 container + per-tensor scale) halves KV memory — but the quantisation error must be bounded. `tests/kernels/test_fp8_kv_accuracy.py` is the gate: 8 test scenarios covering decode/prefill shapes, heavy-tailed distributions, near-zero values, independent K/V quantisation, and scale sensitivity. The gate requires rel_err < 5% (normal) / < 10% (heavy-tailed) and cosine_sim > 0.999 — all 8 pass.
 
-End-to-end benchmark (`benchmarks/bench_fp8_kv.py`): fp16 0.784s vs fp8 0.812s — **3.6% throughput cost for 2× KV capacity**. Evidence in `docs/benchmark_logs/quantization/fp8_kv_o14_*.json`.
+End-to-end benchmark (`python benchmarks/engine/run.py quant --kv-cache-dtype auto fp8_e4m3`): fp16 0.784s vs fp8 0.812s — **3.6% throughput cost for 2× KV capacity**. Evidence in `docs/benchmark_logs/quantization/fp8_kv_o14_*.json`.
 
 ## Ngram Speculative Decoding (v0.12)
 
@@ -415,7 +415,7 @@ A sampled token on its own tells you what the model said, not how close the call
 
 ![logprobs and prompt_logprobs](images/logprobs.gif)
 
-The GIF is a real Qwen3-0.6B run (`python scripts/gen_logprobs_gif.py`): position 1 of the prompt shows `' capital'` at -12.8, and the last generated token is a near tie — `' Italy'` at -1.74 beat `' France'` at -1.86, exactly the case a mean-logprob filter is there to catch.
+The GIF is a real Qwen3-0.6B run (`python -m scripts.visualize.gen_logprobs_gif`): position 1 of the prompt shows `' capital'` at -12.8, and the last generated token is a near tie — `' Italy'` at -1.74 beat `' France'` at -1.86, exactly the case a mean-logprob filter is there to catch.
 
 ```python
 from rapid_llm import LLM, SamplingParams
@@ -464,14 +464,14 @@ The single-layer harness isolates numerical and dispatch defects before a whole-
 
 ```bash
 # timing + which kernel each op dispatched to, random weights
-python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B --layer 0
+python -m scripts.verify.layer_harness --model-dir my_weight/Qwen3-0.6B --layer 0
 
 # numerical parity against transformers' own layer, as a gate
-python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
+python -m scripts.verify.layer_harness --model-dir my_weight/Qwen3-0.6B \
     --layer 3 --weights mirror --tolerance 2e-2
 
 # real weights under a decode-shaped load
-python scripts/layer_harness.py --model-dir my_weight/Qwen3-0.6B \
+python -m scripts.verify.layer_harness --model-dir my_weight/Qwen3-0.6B \
     --layer 3 --weights checkpoint --batch 4 --seq-len 512 --decode-steps 32
 ```
 
@@ -483,7 +483,7 @@ Reasoning and tool-call parsing are declared **per request**, not per deployment
 
 ![streaming reasoning parser](images/reasoning.gif)
 
-The GIF is a real Qwen3-1.7B run (`python scripts/gen_reasoning_gif.py`): the prompt opens the think tag itself, so the splitter is born inside a thinking section (`starts_inside=True`) and has to catch the closing tag mid-stream — every delta lands in its channel and the tags never leak through.
+The GIF is a real Qwen3-1.7B run (`python -m scripts.visualize.gen_reasoning_gif`): the prompt opens the think tag itself, so the splitter is born inside a thinking section (`starts_inside=True`) and has to catch the closing tag mid-stream — every delta lands in its channel and the tags never leak through.
 
 ```bash
 curl localhost:8000/v1/chat/completions -d '{

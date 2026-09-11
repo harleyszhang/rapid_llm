@@ -147,7 +147,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 
 两条 kernel 路径都接受 fp16 或 bf16 激活（checkpoint 的 `torch_dtype: bfloat16` 走 bf16）：反量化后的操作数统一对齐激活 dtype 再进 tensor core。TP2 下每卡存半个副本（权重 14.53 GB + KV 各半）；连续批处理引擎的 TP-safe graph 捕获让 TP2 的 decode 同样走 graph（设计见 [tensor_parallel.md](tensor_parallel.md)）——早期"NCCL 集合通信不能进 CUDA graph 捕获"的 eager 限制属于旧引擎路径，已被推翻。
 
-2×H100 80GB (sm90)，batch 4，max_gen_len=64，greedy，max_seq_len 1024。golden 基线为本 checkpoint 的 eager/TP1/KV-auto 配置（`scripts/golden_tokens.py` 录制，control row 复现 1.000）：
+2×H100 80GB (sm90)，batch 4，max_gen_len=64，greedy，max_seq_len 1024。golden 基线为本 checkpoint 的 eager/TP1/KV-auto 配置（`scripts/verify/golden_tokens.py` 录制，control row 复现 1.000）：
 
 | Config | Model Mem | KV Capacity | TTFT (ms) | TPOT (ms) | TPS | golden prefix |
 |--------|-----------|-------------|-----------|-----------|-----|---------------|
@@ -171,7 +171,7 @@ method = quant.get_quant_method(layer, prefix)  # Fp8LinearMethod / ...
 - 同 checkpoint 在 A10×2（22 GiB、TP2 eager 旧口径）TPOT 82.77 ms / TPS 48.3——H100 单卡 graph 是它的 5.9×。
 
 > Model Mem 为全 replica 权重总量（rank 0 分片 × TP）；KV Capacity 为每卡容量（KV 按 TP 切分后同一数字即 replica 的 token 容量）。
-> 复现：`python benchmarks/engine/run.py quant --model-dir <Qwen3-30B-A3B-Instruct-2507-FP8> --schemes fp16 --kv-cache-dtype auto fp8 --tp 1 2 --cuda-graph --no-cuda-graph --skip-hf --json docs/benchmark_logs/quantization/quant_Qwen3-30B-A3B-FP8_20260901.json`；DP 行另跑 `--tp 1 --dp 2 --cuda-graph`；golden 基线：`python scripts/golden_tokens.py --save tests/golden/data/Qwen3-30B-A3B-Instruct-2507-FP8.json --model-dir <...>`。
+> 复现：`python benchmarks/engine/run.py quant --model-dir <Qwen3-30B-A3B-Instruct-2507-FP8> --schemes fp16 --kv-cache-dtype auto fp8 --tp 1 2 --cuda-graph --no-cuda-graph --skip-hf --json docs/benchmark_logs/quantization/quant_Qwen3-30B-A3B-FP8_20260901.json`；DP 行另跑 `--tp 1 --dp 2 --cuda-graph`；golden 基线：`python -m scripts.verify.golden_tokens --save tests/golden/data/Qwen3-30B-A3B-Instruct-2507-FP8.json --model-dir <...>`。
 > e2e 指标见 [`benchmark_models.md`](benchmark_models.md)；量化 kernel 精度回归：`python -m pytest tests/kernels/test_fused_moe.py -k fp8`（fp16 与 bf16 激活各一例，对 fp32 反量化参考）
 
 ### 未覆盖的 FP8 checkpoint
@@ -428,7 +428,7 @@ Qwen3-0.6B 的 token 级精度对比（A10，greedy decode，与[性能基准测
 
 ## FP8 KV Cache：为什么 `k_scale = v_scale = 1.0`
 
-`Fp8KVCacheMethod` 附带固定为 1 的 scale。这看起来像遗漏，但我们用测量代替争论：`scripts/quant_kv_error.py` 在 Qwen3-4B-Thinking-2507（36 层；NVIDIA H100 80GB HBM3，torch 2.13.0+cu130 / python 3.14.7）上运行，完整日志见 [`kv_fp8_error_qwen3-4b_20260901.json`](benchmark_logs/quantization/kv_fp8_error_qwen3-4b_20260901.json)。
+`Fp8KVCacheMethod` 附带固定为 1 的 scale。这看起来像遗漏，但我们用测量代替争论：`scripts/debug/quant_kv_error.py` 在 Qwen3-4B-Thinking-2507（36 层；NVIDIA H100 80GB HBM3，torch 2.13.0+cu130 / python 3.14.7）上运行，完整日志见 [`kv_fp8_error_qwen3-4b_20260901.json`](benchmark_logs/quantization/kv_fp8_error_qwen3-4b_20260901.json)。
 
 | 测量项 | 结果 | 解读 |
 |---|---|---|
@@ -456,7 +456,7 @@ Qwen3-0.6B 的 token 级精度对比（A10，greedy decode，与[性能基准测
 复现：
 
 ```bash
-python scripts/quant_kv_error.py --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
+python -m scripts.debug.quant_kv_error --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --max-gen-len 128 --gsm8k 500 --json docs/benchmark_logs/quantization/kv_fp8_error.json
 ```
 

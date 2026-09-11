@@ -54,6 +54,16 @@ scheduled = scheduler.schedule()
 
 `max_gpu_num_blocks` 按 token 行设置物理缓存容量；`prefix_cache_blocks` 则按前缀块计数，不要混用单位。
 
+## KV offload：CPU 二级缓存
+
+GPU 块池之上可以再挂一层 CPU 块池，让被驱逐的前缀从“重算一遍”变成“搬回来”。布局对齐 vLLM v1 的 `kv_offload`：`Medium`（CPU / 存储）× `Locality`（本地 / 远端）词汇、content-hash 键、**store on commit / promote on admit** 状态机。v0.12.0 只落地 CPU primary tier，disk / remote 只是协议预留。
+
+一个块的生命周期：新前缀块提交（hash 入索引）时 `prepare_store` 分配 CPU 块并发起 D2H 拷贝，落地后即可命中、可被 LRU 驱逐（驱逐只丢命中，请求退回重算，不伤正确性）。后来请求的 hash 链里有一段 GPU 池已查不到、CPU 池还留着，调度器便为这段分配 GPU 块并 `prepare_load` 钉住、发起 H2D——**promote 期间请求 park**：状态是 WAITING 但不在任一对列里、slot 为 `None`，本步不进 batch；拷贝落地后这段以同一组 hash 在 GPU 侧重新索引，请求等槽位归队。探测与钉住之间块被驱逐（pin 被拒）则整体回退：撤销分配、恢复 hash 链，本步退回普通 prefill——失败的 offer 只损失一次探测。
+
+构造期两道校验（`Scheduler.__init__` 抛 `ValueError`）：`enable_prefix_cache=True`（offload 的键就是前缀块哈希）；KV 布局必须同构、非滑窗（否则模型的组无法被 CPU tier 镜像）。入口是引擎的 `offloading=` 参数，接的是调用方围绕 executor cache 构建的 manager（`CPUPrimaryTierOffloadingManager` + `alloc_cpu_kv_buffers` / `KVCopyEngine`）。
+
+数据路径在 executor 侧 [`rapid_llm/executor/kv_offload.py`](../rapid_llm/executor/kv_offload.py)：store / load 各一条 CUDA stream，pinned 主机镜像按层一一对应，一批 move 一个 event。流序纪律是正确性论证的核心——store 先等 compute 流（看到已写入的 K/V），load 先等 store 流（新分配的块是回收的，可能仍有未落地的旧拷贝在读它）；引擎每步在覆写复用块之前等 `pending_store_events()`。
+
 ## 稳态 decode 元数据
 
 `b_req_idx` 与 `b_seq_len` 只在**请求集合发生变化**时才从 host 重建。集合不变时：
@@ -141,11 +151,15 @@ python benchmarks/engine/run.py scheduler continuous --model-dir my_weight/Qwen2
 | `tests/engine/test_continuous_batching.py` | 15 | GPU + 权重 |
 | `tests/engine/test_continuous_perf.py` | 4 | GPU + 权重，`slow` |
 | `tests/kernels/test_flash_decoding.py` | +2 | GPU |
+| `tests/engine/kv_offload/test_offloading_manager.py` | 19 | CPU |
+| `tests/engine/kv_offload/test_scheduler_integration.py` | 6 | CPU |
+| `tests/executor/test_kv_offload.py` | 5 | GPU |
 
 ## 当前边界
 
 - **仅文本模型。** 视觉 prefill 需要逐请求的 processor 输出，padded prefill 网格放不下；多模态 checkpoint 在构造时就报 `NotImplementedError`。
 - **前缀复用与抢占默认关闭。** 分块预填充默认启用，`max_chunk_size=0` 可关闭。
+- **KV offload 默认不装配，v0.12.0 只有 CPU primary tier。** 挂上 `offloading=` 后需要 `enable_prefix_cache=True`；disk / remote tier 只有协议预留。
 - **功能组合有限制。** 抢占不能搭配 launch/harvest pipeline。
 - **`n > 1` 采样未实现**，HTTP 层显式拒绝而不是静默返回一条。
 - **每步一次同步。** 读回采样 token 用于 detokenize 与停止判定。这换来精确的停止语义（EOS 的下一步就离开 batch），也正因为如此才划得来：腾出的槽位立刻给排队请求。
