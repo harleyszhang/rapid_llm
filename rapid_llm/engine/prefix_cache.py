@@ -382,11 +382,16 @@ class PrefixCache:
             state.num_mapped_blocks = [0] * len(groups)
         writes: list[tuple[int, int, tuple[int, ...]]] = []
         mapped = state.num_mapped_blocks
-        held = self.block_ids(request_id)
+        # The live per-group block lists, not a materialized tuple of ids: a
+        # steady step only compares each list's length against its cursor, and
+        # a boundary-crossing one converts ids for the single new block.
+        held = self.coordinator.held_blocks(request_id)
         for index, (group, blocks) in enumerate(zip(groups, held, strict=True)):
             start = mapped[index]
             if len(blocks) > start:
-                writes.append((group.group_id, start, blocks[start:]))
+                writes.append(
+                    (group.group_id, start, tuple(block.block_id for block in blocks[start:]))
+                )
                 mapped[index] = len(blocks)
         return tuple(writes)
 
