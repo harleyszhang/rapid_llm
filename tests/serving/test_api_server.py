@@ -5,7 +5,7 @@ health, metrics, completions, streaming SSE — so the HTTP contract is
 checked without a model or a port.
 
 Usage:
-    pytest tests/entrypoints/test_api_server.py
+    pytest tests/serving/test_api_server.py
 """
 
 from __future__ import annotations
@@ -17,19 +17,19 @@ pytest.importorskip("fastapi", reason="needs the `serve` extra")
 from fastapi.testclient import TestClient
 
 from rapid_llm.engine.async_engine import StreamedOutput
-from rapid_llm.engine.reasoning import _CLOSE as _THINK_CLOSE
 from rapid_llm.engine.sampler import PositionLogprobs
-from rapid_llm.engine.tool_parser import (
+from rapid_llm.serving.api_server import (
+    ServerConfig,
+    build_app,
+    parse_sse,
+)
+from rapid_llm.serving.reasoning import _CLOSE as _THINK_CLOSE
+from rapid_llm.serving.tool_parser import (
     _DS_ARGS_END,
     _DS_CALLS_BEGIN,
     _DS_CALLS_END,
     _DS_FENCE,
     _DS_HEADER,
-)
-from rapid_llm.entrypoints.api_server import (
-    ServerConfig,
-    build_app,
-    parse_sse,
 )
 from rapid_llm.tools.observability.metrics import EngineMetrics
 
@@ -415,7 +415,7 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
     rather than a couple of spot checks. And ``device`` must be absent: a
     replica's device is its position in the grid.
     """
-    from rapid_llm.entrypoints import api_server
+    from rapid_llm.serving import api_server
 
     captured: dict = {}
 
@@ -454,7 +454,7 @@ def test_one_replica_still_builds_the_single_process_engine(monkeypatch):
     A data-parallel coordinator of one replica is a whole extra process hop for
     nothing; the default has to stay byte-for-byte the engine it was.
     """
-    from rapid_llm.entrypoints import api_server
+    from rapid_llm.serving import api_server
 
     def fake_from_pretrained(model, **kwargs):
         assert "data_parallel_size" not in kwargs

@@ -22,7 +22,7 @@ targets.
 | Weights | `weights` | a checkpoint | `make test-weights MODEL_DIR=...` |
 | Golden | `tests/golden/` | CUDA + checkpoint | `make test-golden` |
 | Eval | `tests/evals/` | checkpoint named by each config | `make test-eval` |
-| Serving | engine + entrypoints | nothing (fake/stub engines on CPU) | `make test-serving` |
+| Serving | engine + serving | nothing (fake/stub engines on CPU) | `make test-serving` |
 
 `make test-fast` drops `slow`; CI runs the CPU tier with
 `--cov-fail-under=48` as a darkness check, and the self-hosted GPU job

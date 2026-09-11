@@ -115,7 +115,7 @@ rapid_llm/
 │   └── dispatcher/  # 选择策略、配置缓存、自动调优
 ├── distributed/     # 进程组和集合通信
 ├── batch_overlap/   # CUDA 流调度及重叠策略
-├── entrypoints/     # HTTP 协议和服务
+├── serving/         # HTTP 协议、解析与 SSE 流式
 └── tools/           # 检查、评测、观测工具
 ```
 
