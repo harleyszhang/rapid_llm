@@ -69,9 +69,7 @@ def test_depth_1_matches_depth_2_token_for_token(model_dir):
     # Depth 2 may produce one extra token (the depth-late stop penalty), so
     # the depth-1 (sync) output must be a prefix of depth-2's output.
     assert text_d2.startswith(text_sync) or text_sync.startswith(text_d2), (
-        f"depth-2 output differs from synchronous:\n"
-        f"  sync: {text_sync!r}\n"
-        f"  d=2:  {text_d2!r}"
+        f"depth-2 output differs from synchronous:\n  sync: {text_sync!r}\n  d=2:  {text_d2!r}"
     )
 
 
