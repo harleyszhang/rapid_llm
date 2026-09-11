@@ -2,18 +2,18 @@
 
 精度有两条独立验证路径，本文是两条的单一事实来源：
 
-- **`benchmarks/eval/`**：多数据集双臂基准，sglang `benchmark/` 的布局——每个数据集一个目录，`bench_rapid_vllm.py`（rapid_llm 引擎臂，CUDA graph 默认开启，即优化模式）和 `bench_hf.py`（transformers baseline 臂）跑**同一套提示词与判分**，两臂准确率之差只能来自引擎；
+- **`benchmarks/eval/`**：多数据集对比基准，sglang `benchmark/` 的布局——每个数据集一个目录，`bench_rapid_vllm.py`（rapid_llm 引擎侧，CUDA graph 默认开启，即优化模式）和 `bench_hf.py`（transformers baseline 侧）跑**同一套提示词与判分**，rapid 与 HF 准确率之差只能来自引擎；
 - **`tests/evals/`**：GSM8K 回归套件（`make test-eval`），按 `configs/*.yaml` 声明的阈值判定通过/失败，外加 golden token parity 这类逐 token 证据，是 CI 语义的"门"；基准只出数不判定。
 
-## benchmarks/eval/：多数据集双臂基准
+## benchmarks/eval/：多数据集对比基准
 
 ```
 benchmarks/eval/
-├── _common.py            # 共享层：checkpoint 解析、HF 装载/生成、双臂的续写似然打分、证据落盘
+├── _common.py            # 共享层：checkpoint 解析、HF 装载/生成、rapid 与 HF 的续写似然打分、证据落盘
 ├── gsm8k/                # 5-shot 数学链，最后一个整数精确匹配
 │   ├── bench_rapid_vllm.py   # 委托 tests.evals.gsm8k.evaluate_gsm8k，与回归套件永不漂移
 │   ├── bench_hf.py           # HF baseline，同一 build_prompts/score
-│   ├── bench_vllm.py         # vLLM 对照臂（需另装 vllm 的环境）
+│   ├── bench_vllm.py         # vLLM 对照（需另装 vllm 的环境）
 │   ├── common.py → 覆盖在 tests/evals/gsm8k.py 里
 │   └── README.md
 ├── boolq/                # 5-shot 是非阅读理解，True/False 精确匹配
@@ -22,11 +22,11 @@ benchmarks/eval/
     ├── bench_rapid_vllm.py / bench_hf.py / common.py / README.md
 ```
 
-每个数据集的口径（few-shot 格式、解码预算、判分规则、与 sglang 的差异及理由）定义在各自的 `common.py` / README 里，两臂共享——这是"分差只能来自引擎"的结构保证。
+每个数据集的口径（few-shot 格式、解码预算、判分规则、与 sglang 的差异及理由）定义在各自的 `common.py` / README 里，rapid 与 HF 共享——这是"分差只能来自引擎"的结构保证。
 
 ### 实测环境与共同口径（2026-09-10）
 
-NVIDIA A10（23 GB）× 1（GPU1），torch 2.13.0+cu129 / triton 3.7.1 / transformers 5.15 / Python 3.13（rapid_llm venv，两臂同一环境）。greedy；rapid 臂 CUDA graph 开启（引擎默认 = 优化模式，`--eager` 仅调试用）；HF 臂 `torch_dtype="auto"`，与引擎同 dtype——对比是 engine-vs-engine，不是 fp16-vs-bf16。题数一律 200（各验证集前 N 条，固定前缀）。checkpoint：Qwen2.5-0.5B 取 HF hub 缓存快照，其余取 `/data/shared/llm_weights`。
+NVIDIA A10（23 GB）× 1（GPU1），torch 2.13.0+cu129 / triton 3.7.1 / transformers 5.15 / Python 3.13（rapid_llm venv，rapid 与 HF 同一环境）。greedy；rapid 侧 CUDA graph 开启（引擎默认 = 优化模式，`--eager` 仅调试用）；HF 侧 `torch_dtype="auto"`，与引擎同 dtype——对比是 engine-vs-engine，不是 fp16-vs-bf16。题数一律 200（各验证集前 N 条，固定前缀）。checkpoint：Qwen2.5-0.5B 取 HF hub 缓存快照，其余取 `/data/shared/llm_weights`。
 
 每行数字都有对应 JSON：`docs/benchmark_logs/accuracy/accuracy_{gsm8k,boolq,hellaswag}_{rapid,hf}_20260910_*.json`（26 个文件）。
 
@@ -39,7 +39,7 @@ NVIDIA A10（23 GB）× 1（GPU1），torch 2.13.0+cu129 / triton 3.7.1 / transf
 | Qwen2.5-1.5B-Instruct | 是 | **64.50%** | 56.00% | +8.5pp | 816 / 499 |
 | Qwen3-1.7B | 否 | 61.00% | 61.00% | 0 | 1047 / 347 |
 
-两臂无效率全部为 0。吞吐对比有个必须说明的口径差：HF `generate` 没有停止串，模型不吐 EOS 就跑满 256 token（0.5B 臂 200 题共生成 51200 token，rapid 臂靠停止串只生成 30667），延迟口径对 HF 不公平，所以表里用每秒 token 数——该口径下引擎全面领先 1.6×~5.1×。
+rapid 与 HF 无效率全部为 0。吞吐对比有个必须说明的口径差：HF `generate` 没有停止串，模型不吐 EOS 就跑满 256 token（0.5B 侧 200 题共生成 51200 token，rapid 侧靠停止串只生成 30667），延迟口径对 HF 不公平，所以表里用每秒 token 数——该口径下引擎全面领先 1.6×~5.1×。
 
 四组准确率 rapid 赢一平一输二，分差与生成长度的关系见「跨数据集结论」：±8.5pp 不是"谁对谁错"，是贪心长链对 bf16 kernel 数值差的敏感度。
 
@@ -52,13 +52,13 @@ NVIDIA A10（23 GB）× 1（GPU1），torch 2.13.0+cu129 / triton 3.7.1 / transf
 | Qwen2.5-1.5B-Instruct | **69.50%** | 0% | 66.00% | 1.5% | +3.5pp | 19.8 / 12.5 |
 | Qwen3-1.7B | 68.00% | 0% | 68.00% | 0% | 0 | 16.9 / 10.1 |
 
-BoolQ 每题只生成约 6 个 token 且带 `\n` 停止，两臂生成 token 数几乎一致，q/s 是公平口径。1.5B 与 1.7B 两组里 rapid/HF 各有一组逐题一致，1.5B 的 3.5pp 全部来自 5 道题翻面——生成长度短，分歧量级与 HellaSwag 的打分类接近。
+BoolQ 每题只生成约 6 个 token 且带 `\n` 停止，rapid 与 HF 生成 token 数几乎一致，q/s 是公平口径。1.5B 与 1.7B 两组里 rapid/HF 各有一组逐题一致，1.5B 的 3.5pp 全部来自 5 道题翻面——生成长度短，分歧量级与 HellaSwag 的打分类接近。
 
-**口径教训：BoolQ 不对 instruct 模型开 chat 模板。** 初版曾对 1.5B-Instruct 两臂都包 chat 模板：rapid 59.50%（无效 2%），HF 48.00%（无效 **26.5%**）。26.5% 不是引擎 bug：chat 模板把 few-shot 示例包进 user turn，与模型的微调格式相冲，True/False 首 token 的 logit 差被压到边缘，两引擎的 bf16 数值差足以让选择翻面（HF fp32 单条与批量仲裁结果一致，翻面是真实输出而非 padding 伪影）。sglang 的原生口径本就不带 chat，按它对齐后无效归零、两臂回到 1.5pp 内。GSM8K 上 chat 模板是实打实的 +8.5pp 增益（回归套件一节有对照表），但那是把裸指令包成模型认识的格式；BoolQ 的 few-shot 格式自己就是提示工程，再包 chat 属于双重包装，两头不讨好。
+**口径教训：BoolQ 不对 instruct 模型开 chat 模板。** 初版曾对 1.5B-Instruct rapid 与 HF 都包 chat 模板：rapid 59.50%（无效 2%），HF 48.00%（无效 **26.5%**）。26.5% 不是引擎 bug：chat 模板把 few-shot 示例包进 user turn，与模型的微调格式相冲，True/False 首 token 的 logit 差被压到边缘，两引擎的 bf16 数值差足以让选择翻面（HF fp32 单条与批量仲裁结果一致，翻面是真实输出而非 padding 伪影）。sglang 的原生口径本就不带 chat，按它对齐后无效归零、rapid 与 HF 回到 1.5pp 内。GSM8K 上 chat 模板是实打实的 +8.5pp 增益（回归套件一节有对照表），但那是把裸指令包成模型认识的格式；BoolQ 的 few-shot 格式自己就是提示工程，再包 chat 属于双重包装，两头不讨好。
 
 ### HellaSwag（20-shot，四选一续写似然打分）
 
-每个选项单独 tokenize 后拼接（lm-eval-harness 的做法），两臂对每个选项打分的 token 序列逐位相同。两种判分都报：`acc` 是选项总 log-prob 取 argmax（lm-eval 口径），`acc_len` 是平均 log-prob 取 argmax（sglang `sgl.select` 默认的 token_length_normalized 口径）。
+每个选项单独 tokenize 后拼接（lm-eval-harness 的做法），rapid 与 HF 对每个选项打分的 token 序列逐位相同。两种判分都报：`acc` 是选项总 log-prob 取 argmax（lm-eval 口径），`acc_len` 是平均 log-prob 取 argmax（sglang `sgl.select` 默认的 token_length_normalized 口径）。
 
 | 模型 | rapid acc / acc_len | HF acc / acc_len | Δacc | 延迟 rapid / HF |
 | --- | ---: | ---: | ---: | ---: |
@@ -67,31 +67,31 @@ BoolQ 每题只生成约 6 个 token 且带 `\n` 停止，两臂生成 token 数
 | Qwen2.5-1.5B-Instruct | **52.00% / 58.00%** | 52.00% / 58.00% | 0 | 44.0s / 46.8s |
 | Qwen3-1.7B | 46.50% / 51.00% | 45.50% / 51.00% | +1.0pp | 50.3s / 58.4s |
 
-8 组判分（4 模型 × 2 口径）里 5 组两臂完全一致，其余差 1~2 题。两引擎的 per-token logprob 有真实的 bf16 级数值差（Qwen3-0.6B 冒烟实测：|Δ| 均值 0.039、最大 0.21，8 题里 7 题选项选择一致），但 argmax 判分对此不敏感。
+8 组判分（4 模型 × 2 口径）里 5 组 rapid 与 HF 完全一致，其余差 1~2 题。两引擎的 per-token logprob 有真实的 bf16 级数值差（Qwen3-0.6B 冒烟实测：|Δ| 均值 0.039、最大 0.21，8 题里 7 题选项选择一致），但 argmax 判分对此不敏感。
 
-性能上两臂接近（0.86×~1.16×）：这类负载没有 decode，每题就是 4 次大 prefill，引擎的优势项（连续批处理、CUDA graph 重放 decode 步）用不上，prompt logprobs 的 top-k 物化还多一块开销。0.5B/0.6B 在 batch 16 下触发过一次显存分配器重试警告（4.3 GB 的 logits 网格，非致命），1.5B/1.7B 用 batch 8——README 里 `--batch-size` 的默认值就是这么定的。
+性能上 rapid 与 HF 接近（0.86×~1.16×）：这类负载没有 decode，每题就是 4 次大 prefill，引擎的优势项（连续批处理、CUDA graph 重放 decode 步）用不上，prompt logprobs 的 top-k 物化还多一块开销。0.5B/0.6B 在 batch 16 下触发过一次显存分配器重试警告（4.3 GB 的 logits 网格，非致命），1.5B/1.7B 用 batch 8——README 里 `--batch-size` 的默认值就是这么定的。
 
 ### 跨数据集结论
 
-三个数据集把"每题的生成/打分链条长度"拉开成三档，两臂分差随之单调放大：
+三个数据集把"每题的生成/打分链条长度"拉开成三档，rapid 与 HF 分差随之单调放大：
 
-| 数据集 | 每题链条 | 两臂分差 | rapid 吞吐优势 |
+| 数据集 | 每题链条 | rapid 与 HF 分差 | rapid 吞吐优势 |
 | --- | --- | --- | --- |
 | HellaSwag | 0 token（纯 prefill 打分） | 0 ~ 1pp | 无（0.86×~1.16×） |
 | BoolQ | ≤6 token | 0 ~ 3.5pp | 1.6×~2.3×（q/s） |
 | GSM8K | ≤256 token | 0 ~ 8.5pp | 1.6×~5.1×（tok/s） |
 
-机制：greedy 长链是路径依赖的——某一步 top-1 与 top-2 的 logprob 差小于两引擎的 bf16 数值差时选择翻面，此后整条链走向不同。单步分歧概率很小，链条越长累积越多；似然打分把整条链压缩成一个 argmax，对数值差几乎免疫。所以 GSM8K 上的 ±8.5pp 不构成对任一引擎的裁决，判引擎对错要靠逐 token 证据（回归套件的 golden token parity、HellaSwag 的 per-token logprob 对照）。性能结论同样清晰：decode 占比越高引擎优势越大——这正是连续批处理加 CUDA graph 的作用面，也是双臂基准坚持用优化模式跑的原因。
+机制：greedy 长链是路径依赖的——某一步 top-1 与 top-2 的 logprob 差小于两引擎的 bf16 数值差时选择翻面，此后整条链走向不同。单步分歧概率很小，链条越长累积越多；似然打分把整条链压缩成一个 argmax，对数值差几乎免疫。所以 GSM8K 上的 ±8.5pp 不构成对任一引擎的裁决，判引擎对错要靠逐 token 证据（回归套件的 golden token parity、HellaSwag 的 per-token logprob 对照）。性能结论同样清晰：decode 占比越高引擎优势越大——这正是连续批处理加 CUDA graph 的作用面，也是对比基准坚持用优化模式跑的原因。
 
 ### 跑法
 
 ```bash
-# rapid_llm 臂（CUDA graph 默认开启 = 优化模式；--eager 关闭仅用于调试）
+# rapid_llm 侧（CUDA graph 默认开启 = 优化模式；--eager 关闭仅用于调试）
 python -m benchmarks.eval.gsm8k.bench_rapid_vllm --model-dir Qwen2.5-1.5B-Instruct --chat-template
 python -m benchmarks.eval.boolq.bench_rapid_vllm --model-dir Qwen2.5-0.5B
 python -m benchmarks.eval.hellaswag.bench_rapid_vllm --model-dir Qwen3-1.7B --batch-size 8
 
-# HF baseline 臂（参数同构）
+# HF baseline 侧（参数同构）
 python -m benchmarks.eval.gsm8k.bench_hf --model-dir Qwen2.5-1.5B-Instruct --chat-template
 python -m benchmarks.eval.boolq.bench_hf --model-dir Qwen2.5-0.5B
 python -m benchmarks.eval.hellaswag.bench_hf --model-dir Qwen3-1.7B --batch-size 8
@@ -101,7 +101,7 @@ python -m benchmarks.eval.hellaswag.bench_hf --model-dir Qwen3-1.7B --batch-size
 
 ## tests/evals/：GSM8K 回归套件
 
-对齐 vLLM `tests/evals/` 的口径：train split 前 5 条作示例，统一 `Question: ...\nAnswer:` 格式；greedy，关 `repetition_penalty` 与 `stop_on_repeat`；截断到下一个 `Question`；取 completion 最后一个整数与参考答案 `####` 后的数字精确匹配。`benchmarks/eval/gsm8k/bench_rapid_vllm.py` 的引擎臂直接调 `tests.evals.gsm8k.evaluate_gsm8k`，所以回归套件与双臂基准的引擎侧数字永不漂移。
+对齐 vLLM `tests/evals/` 的口径：train split 前 5 条作示例，统一 `Question: ...\nAnswer:` 格式；greedy，关 `repetition_penalty` 与 `stop_on_repeat`；截断到下一个 `Question`；取 completion 最后一个整数与参考答案 `####` 后的数字精确匹配。`benchmarks/eval/gsm8k/bench_rapid_vllm.py` 的引擎侧直接调 `tests.evals.gsm8k.evaluate_gsm8k`，所以回归套件与对比基准的引擎侧数字永不漂移。
 
 套件的设计与扩展方式见 [`tests/evals/README.md`](../tests/evals/README.md)。
 
@@ -118,7 +118,7 @@ torch 2.13.0+cu129 / triton 3.7.1 / Python 3.13，fp16 权重，CUDA graph 开�
 
 200 题子集与全量的差都在 1 个点以内（35.00 vs 35.94、63.00 vs 63.76），200 题足以当日常回归信号，全量留给需要参考数值的场合。无效率全程为 0：每条 completion 都能解析出数字——这一列是判断"模型答错了"还是"评测根本没看到答案"的分界。
 
-同一协议今天的双臂矩阵（上一节）里 0.5B 引擎臂跑出 33.50%：与 35.00% 的 1.5pp 差在 200 题子集 ±3.4pp 的统计噪声内（历史数字测于 `my_weight` 副本，今天用 HF hub 缓存快照）。
+同一协议今天的对比矩阵（上一节）里 0.5B 引擎侧跑出 33.50%：与 35.00% 的 1.5pp 差在 200 题子集 ±3.4pp 的统计噪声内（历史数字测于 `my_weight` 副本，今天用 HF hub 缓存快照）。
 
 ### 复测记录：v0.9 kernels 三层重构（2026-08）
 
@@ -188,7 +188,7 @@ chat 模板对 instruct 模型的影响单列（Qwen2.5-1.5B-Instruct / 200 题�
 
 `my_weight/` 下其余 checkpoint 没有纳入回归套件：
 
-- **Qwen3-0.6B**：`my_weight` 目录里只有 `config.json`，没有 `*.safetensors`（`/data/shared/llm_weights` 的完整副本已在双臂基准里跑过）；
+- **Qwen3-0.6B**：`my_weight` 目录里只有 `config.json`，没有 `*.safetensors`（`/data/shared/llm_weights` 的完整副本已在对比基准里跑过）；
 - **llava-1.5-7b-hf / Qwen3-VL-4B-Instruct**：多模态，GSM8K 是纯文本任务，需要另配视觉基准；
 - **Qwen3-30B-A3B-Instruct-2507-FP8**：A10 的 23 GB 装不下。
 
@@ -196,7 +196,7 @@ chat 模板对 instruct 模型的影响单列（Qwen2.5-1.5B-Instruct / 200 题�
 
 ## HotpotQA（examples/eval_accuracy.py）
 
-HellaSwag 已由 `benchmarks/eval/hellaswag/` 承接（双臂、固定口径、证据落盘）。[`examples/eval_accuracy.py`](../examples/eval_accuracy.py) 仍服务于 HotpotQA：出 exact match / F1。数据集类型从文件名识别（`hotpot*`），原始文件需自备——仓库不打包该数据集，也没有提交阈值，所以它是**只出数的脚本**，不参与回归判定。
+HellaSwag 已由 `benchmarks/eval/hellaswag/` 承接（rapid 与 HF、固定口径、证据落盘）。[`examples/eval_accuracy.py`](../examples/eval_accuracy.py) 仍服务于 HotpotQA：出 exact match / F1。数据集类型从文件名识别（`hotpot*`），原始文件需自备——仓库不打包该数据集，也没有提交阈值，所以它是**只出数的脚本**，不参与回归判定。
 
 ```bash
 python examples/eval_accuracy.py \

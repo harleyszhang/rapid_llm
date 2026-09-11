@@ -298,7 +298,7 @@ rapid_llm 流式输出实录（Qwen2.5-3B，仅演示效果，非并排对比录
 
 #### 2×H100 80GB 复测（2026-09-08，short 128 / medium 4k / long 32k × 三方）
 
-新基准框架（sglang 式重构后的 `benchmarks/`）首次全模型套件：`bench_models.py` 预检/计划/编排，`bench_offline_throughput.py` 三方引擎臂（rapid_llm / transformers / vllm 0.28 跨 venv），RandomDataset 精确 token 长度（vLLM 同款 decode→re-encode 校正，三档零漂移），greedy、batch 8、iters 2。rapid_llm 按生产默认开三件套（CUDA graph + prefix cache + chunked prefill），完整 engine args 落 JSON。TTFT/TPOT 列为逐请求 p50/p99（transformers 为 batch 级均值，标 `*`）；TPS 两端口径一致可直接比。逐臂原始 JSON 与扩展点明细见 [benchmark_logs/models/models_suite_h100_20260908_125429.md](benchmark_logs/models/models_suite_h100_20260908_125429.md)。
+新基准框架（sglang 式重构后的 `benchmarks/`）首次全模型套件：`bench_models.py` 预检/计划/编排，`bench_offline_throughput.py` 三方引擎对比（rapid_llm / transformers / vllm 0.28 跨 venv），RandomDataset 精确 token 长度（vLLM 同款 decode→re-encode 校正，三档零漂移），greedy、batch 8、iters 2。rapid_llm 按生产默认开三件套（CUDA graph + prefix cache + chunked prefill），完整 engine args 落 JSON。TTFT/TPOT 列为逐请求 p50/p99（transformers 为 batch 级均值，标 `*`）；TPS 两端口径一致可直接比。各引擎原始 JSON 与扩展点明细见 [benchmark_logs/models/models_suite_h100_20260908_125429.md](benchmark_logs/models/models_suite_h100_20260908_125429.md)。
 
 **Qwen2.5-0.5B-Instruct（bf16，TP1；long 档因 max_position_embeddings=32768 收缩为 31744 输入）**
 
@@ -330,7 +330,7 @@ DP2 扩展点（medium, 64 请求）：TP1 1342.1 / TP2 863.6（0.64×）/ DP2 2
 | long | transformers | 10344.0* | 80.87* | 66.1 |
 | long | vllm | 35.9/39.1 | 16.29/16.50 | 435.6 |
 
-DP2 扩展点：TP1 580.7 / TP2 487.3（0.84×）/ DP2 1039.6（1.79×）。4B long 的 transformers 臂套件内因 caching-allocator 碎片 OOM，以 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 补跑成功（表内即补跑值，arm JSON `retried` 字段有标注）。
+DP2 扩展点：TP1 580.7 / TP2 487.3（0.84×）/ DP2 1039.6（1.79×）。4B long 的 transformers 侧在套件内因 caching-allocator 碎片 OOM，以 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 补跑成功（表内即补跑值，原始 JSON 的 `retried` 字段有标注）。
 
 **Qwen3-30B-A3B-Instruct-2507（bf16，61.1GB；long 档 KV+权重超单卡切 TP2，其余 TP1）**
 
@@ -367,7 +367,7 @@ DP2 扩展点：TP1 245.9 / TP2 254.6（1.04×）/ DP2 518.5（2.11×）。
 - **medium/long 档 rapid_llm TPOT 恶化 3–8×，根因是 decode graph 按 `seq_len_buckets=(…,4096)` 封顶**：context 超 4096 即回退 eager（medium 档仅 replay 2 次、long 档 0 次），0.5B medium TPOT 15.19 ms 是 launch 开销主导的 eager decode——vllm 同负载 1.91 ms。这是本轮套件发现的首要引擎优化点（扩大/解耦 seq_len buckets 或 decode-only graph），本次按约定不改引擎仅记录。TPOT p99/p50 比值同源：rapid_llm long 档 1.6–3.3×，vllm 仅 1.02–1.24×。
 - **TTFT 不可跨引擎直比**：vllm 逐请求 TTFT 在 chunked prefill 下是首 chunk 延迟（故 long 档 vllm "TTFT" 反而低于 short 档），rapid_llm 表内为全 prefill 完成的 1-token 轮批量口径；TPS/TPOT p50/p99 可比。
 - **DP2 干净扩展 1.79×–2.11×；TP2 在单卡放得下的模型上全负收益（0.64×/0.84×/1.04×）**——TP 只当显存开关，与计划决策一致；30B bf16 long 切 TP2 后 rapid_llm/vllm 均可跑（KV 25.9GB 超单卡预算），transformers 则本质 OOM（权重/TP+KV/TP+MoE permute ≈ 75GB+ > 79GB，reserved-unallocated 仅 564MB，非碎片）。
-- skip 清单（qwen3_5(_moe) 不支持、顶层 30B 不完整分片、compressed-tensors 无 loader、DeepSeek-V4 超预算、Wan2.2 非 LLM）与运行注记（臂间显存排空、accelerate、expandable_segments）见汇总 md。
+- skip 清单（qwen3_5(_moe) 不支持、顶层 30B 不完整分片、compressed-tensors 无 loader、DeepSeek-V4 超预算、Wan2.2 非 LLM）与运行注记（引擎间显存排空、accelerate、expandable_segments）见汇总 md。
 
 复现：
 
@@ -461,7 +461,7 @@ for eng in rapid_llm transformers vllm; do
 done
 # 可选：rapid_llm 一次运行前加 RAPID_LLM_PIPELINE=1 启用 O2 launch/harvest 管线
 # （稳态 24.6ms/step phase 口径；它会延迟一步处理 stop，是部署选项而非默认）。
-# V3 四层三方（双 venv 分臂，单卡）：rapid_llm + transformers 在 rapid_llm venv：
+# V3 四层三方（双 venv 分跑，单卡）：rapid_llm + transformers 在 rapid_llm venv：
 for eng in rapid_llm transformers; do
   PYTHONPATH=. /home/honggao/projects/rapid_llm/.venv/bin/python examples/benchmark.py \
     --model /data/shared/llm_weights/DeepSeek-V3-4layers-MTP-BF16 \
@@ -487,9 +487,9 @@ DeepSeek-V4-Flash 官方剪裁的真实权重 checkpoint（22 GB，DSpark 推理
 - `vllm/platforms/cuda.py::support_deep_gemm` 白名单只有 SM90 / SM100 家族 / SM120 家族，DeepGEMM 的 cmake 架构集合（9.0a / 10.0x / 12.0x）与 SM86 交集为空——这是 kernel 支持矩阵限制，不是层数或配置问题（剪到 4 层、改 `num_hidden_layers` 都绕不开 indexer）；
 - 源码仓 vendored 的 `deep_gemm._C` 扩展还是旧 torch ABI 编译（引用 torch 2.13 已删除的 `materialize_cow_storage` 符号），pypi `deep_gemm` 1.0.0 sdist 本机构建亦失败（缺 cutlass 子模块）。
 
-V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能对比因此是 rapid_llm + transformers 两方：transformers 臂先把 DSpark checkpoint 离线反量化成 bf16、按 transformers 模块树重命名后落盘（`tests/layer/convert_v4_hf.py`，自包含键映射 + fp8/MXFP4 dequant + 逐专家 w1/w3 fuse 成 `gate_up_proj`，探针断言 / meta 扫描 / 重开核对三重自验证；产物 `/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2`，12 分片 75.6 GiB），GPU 上即以 bf16 原生跑；内存里逐 key 转换 + fp32 CPU 的组合只保留给精度 oracle（下节），性能数字不再依赖它。转换有一个 transformers 5.15 的默认行为要显式绕开：`save_pretrained` 默认 `save_original_format=True`，会把 state_dict 反向转换回 checkpoint 原始键（DSpark 形态），必须传 `save_original_format=False` 才能落出 transformers 原生键的产物。精度对比的参考实现同用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
+V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能对比因此是 rapid_llm + transformers 两方：transformers 侧先把 DSpark checkpoint 离线反量化成 bf16、按 transformers 模块树重命名后落盘（`tests/layer/convert_v4_hf.py`，自包含键映射 + fp8/MXFP4 dequant + 逐专家 w1/w3 fuse 成 `gate_up_proj`，探针断言 / meta 扫描 / 重开核对三重自验证；产物 `/data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2`，12 分片 75.6 GiB），GPU 上即以 bf16 原生跑；内存里逐 key 转换 + fp32 CPU 的组合只保留给精度 oracle（下节），性能数字不再依赖它。转换有一个 transformers 5.15 的默认行为要显式绕开：`save_pretrained` 默认 `save_original_format=True`，会把 state_dict 反向转换回 checkpoint 原始键（DSpark 形态），必须传 `save_original_format=False` 才能落出 transformers 原生键的产物。精度对比的参考实现同用 transformers 5.15 的 eager `DeepseekV4ForCausalLM`（下节）。
 
-环境与负载（两臂同口径，均在 rapid_llm venv：torch 2.13.0+cu129 / transformers 5.15.1 / Python 3.13 / CUDA 12.9；2×A10 22 GiB，sm86，PCIe host bridge 互联；64 核 CPU / 369 GB 内存）：batch=8、gen_len=128、iters=2、bf16 激活、贪心解码、`torch.cuda.synchronize` 计时、取中位数；两臂 decode 都走 eager（lite 臂 `--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效；transformers 臂本身就是 eager）。**两臂执行模型不同，数字不构成纯 kernel 对照**：
+环境与负载（两侧同口径，均在 rapid_llm venv：torch 2.13.0+cu129 / transformers 5.15.1 / Python 3.13 / CUDA 12.9；2×A10 22 GiB，sm86，PCIe host bridge 互联；64 核 CPU / 369 GB 内存）：batch=8、gen_len=128、iters=2、bf16 激活、贪心解码、`torch.cuda.synchronize` 计时、取中位数；两侧 decode 都走 eager（lite 侧 `--no-cuda-graph`：V4 每层滑窗/压缩器状态是 Python 侧张量重绑定，CUDA graph 只重放 kernel 不重放属性绑定，捕获即失效；transformers 侧本身就是 eager）。**两侧执行模型不同，数字不构成纯 kernel 对照**：
 
 - **rapid_llm**：全 GPU TP2，fp8/MXFP4 weight-only kernel 内 dequant，每卡 13.74 GiB；
 - **transformers**：bf16 全量反量化权重；attention / hyper-connection / 路由 / 共享专家在单卡（cuda:0），routed experts 走 CPU 异构——每层 routed 专家 ~26 GB bf16（`gate_up_proj` [256,8192,4096] + `down_proj` [256,4096,2048]），22 GiB 卡放不下单层，且层内 hyper-connection 融合（attn 输出、hc 参数、mlp 输出在单表达式混合）不容 layer 内跨卡切分，故 monkeypatch `DeepseekV4SparseMoeBlock.forward` 让 routed 激活（每 token 只有 top-6 行）过 PCIe 到 CPU 算完搬回；加载走 `--hf-direct-load`（meta-init + safetensors assign，绕过 from_pretrained 的 DSpark 转换路径）。
@@ -499,11 +499,11 @@ V3 不受影响（MLA 有 Triton 路径，不依赖 DeepGEMM）。V4 的性能�
 | rapid_llm | 2×A10 TP2 全 GPU，fp8/MXFP4 kernel 内 dequant，eager | 0.1333 | 52.520 | 19.0 | 150.59 | 75.3 | 29.8× | 29.5× |
 | transformers | 1×A10 + CPU：attn/路由/共享专家 GPU，routed experts bf16 CPU 异构，eager | 2.0281 | 1565.764 | 0.64 | 5.10 | 5.10 | — | — |
 
-（TPS = 1000/TPOT 每请求口径；TGS = 总输出 token / latency 聚合口径；每卡 TGS：TP2 行按 TGS/2 折算，transformers 臂实际只有 1 张 GPU 参与算力，5.10 即每卡值。加速比 = transformers 指标 / rapid_llm 指标，含 CPU offload 代价（TTFT 加速比 15.2×、TPOT 29.8×、TGS 29.5×），不反映纯 kernel 差距。）
+（TPS = 1000/TPOT 每请求口径；TGS = 总输出 token / latency 聚合口径；每卡 TGS：TP2 行按 TGS/2 折算，transformers 侧实际只有 1 张 GPU 参与算力，5.10 即每卡值。加速比 = transformers 指标 / rapid_llm 指标，含 CPU offload 代价（TTFT 加速比 15.2×、TPOT 29.8×、TGS 29.5×），不反映纯 kernel 差距。）
 
-V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层。rapid_llm eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护；这是 V4 在 rapid_llm 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。transformers 臂的 TPOT 1565.8 ms 主要耗在每个 decode 步把 routed 激活搬去 CPU、在 CPU 上做 bf16 专家 GEMM（256 选 6 的 grouped GEMM 无 GPU 加速）再搬回，PCIe 往返 + CPU 算力共同拉长步时；TTFT 2.03 s 同构成（prefill 每 token 同样过 CPU 专家栈）。
+V4-Flash 每层都是 256 专家 top-6 路由的 MoE（moe_intermediate 2048、hidden 4096），且 CSA/HCA 层每步还要维护 indexer（index_topk 512）与 compressor 的前缀状态——单层算子密度远高于 V2/V3 的 MoE 层。rapid_llm eager decode 下 6 层的逐层 Python 开销叠加，TPOT 52.5 ms 与 V2-Lite 27 层 eager 时期的 61.9 ms 同量级，主要构成是每层的路由、专家 GEMM（fp8/MXFP4 weight-only dequant）与滑窗状态维护；这是 V4 在 rapid_llm 的首次端到端吞吐记录，优化（graph 兼容的滑窗状态重构）留待后续。transformers 侧的 TPOT 1565.8 ms 主要耗在每个 decode 步把 routed 激活搬去 CPU、在 CPU 上做 bf16 专家 GEMM（256 选 6 的 grouped GEMM 无 GPU 加速）再搬回，PCIe 往返 + CPU 算力共同拉长步时；TTFT 2.03 s 同构成（prefill 每 token 同样过 CPU 专家栈）。
 
-复现（日志：lite 臂 `docs/benchmark_logs/models/DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`，transformers 臂 `models/DeepSeek-V4-Flash-6layers-hf-bf16-v2_b8_g128_tp2_20260904_162952.json`，均含完整 config 与指标）：
+复现（日志：lite 侧 `docs/benchmark_logs/models/DeepSeek-V4-Flash-6layers_b8_g128_tp2_20260904_045910.json`，transformers 侧 `models/DeepSeek-V4-Flash-6layers-hf-bf16-v2_b8_g128_tp2_20260904_162952.json`，均含完整 config 与指标）：
 
 ```bash
 cd /home/honggao/projects/rapid_llm
@@ -520,7 +520,7 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
   --batch-size 8 --gen-len 128 --iters 2 --engine rapid_llm \
   --tensor-parallel-size 2 --hf-dtype bf16 --no-cuda-graph
 
-# 2) transformers 臂（--hf-direct-load：键已匹配模块树，meta-init + safetensors
+# 2) transformers 侧（--hf-direct-load：键已匹配模块树，meta-init + safetensors
 #    assign，跳过 from_pretrained 的 DSpark 转换路径）：
 PYTHONPATH=. .venv/bin/python examples/benchmark.py \
   --model /data/shared/llm_weights/DeepSeek-V4-Flash-6layers-hf-bf16-v2 \
@@ -554,7 +554,7 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 | 256 | 32/32 全对 | 0.981 | 0.486 |
 | 1024 | 12/32（首分歧 @12） | 0.406 | 4.568 |
 
-逐步 margin 核对（compare 落盘的两臂 per-step top5 JSON）：96 步里真正独立的分歧只有 2 处，其余全部是首分歧后上下文分叉的雪崩——
+逐步 margin 核对（compare 落盘的两侧 per-step top5 JSON）：96 步里真正独立的分歧只有 2 处，其余全部是首分歧后上下文分叉的雪崩——
 
 - seq 1024 step 12：rapid_llm 的 top1/top2 logprob 完全相等（margin 0.0000，argmax tie-break 取了索引小的 token），HF 侧 margin 仅 0.0709，且 HF 选的 token 就是 rapid_llm 分布的 rank-1；
 - seq 64 step 30：双方 margin 0.125 / 0.037，互相落在对方 top-2，logprob 差 0.04；
@@ -565,7 +565,7 @@ PYTHONPATH=. .venv/bin/python examples/benchmark.py \
 复现：
 
 ```bash
-# V3 三方（前两臂 rapid_llm venv 单卡；vLLM 臂在 vllm 源码仓 venv）：
+# V3 三方（前两者在 rapid_llm venv 单卡；vLLM 在 vllm 源码仓 venv）：
 python -m tests.layer.deepseek v3 parity
 /home/honggao/projects/open_source/vllm/.venv/bin/python -m tests.layer.deepseek v3 vllm
 python -m tests.layer.deepseek v3 three-way \
@@ -575,7 +575,7 @@ python -m tests.layer.deepseek v4 lite
 python -m tests.layer.deepseek v4 hf
 python -m tests.layer.deepseek v4 compare \
     docs/benchmark_logs/accuracy/accuracy_v4_lite_<ts>.json docs/benchmark_logs/accuracy/accuracy_v4_hf_<ts>.json
-# 同两臂的 pytest 精度门（单文件直跑；需要双卡 + ~200 GB 空闲内存）：
+# 同两侧共用的 pytest 精度门（单文件直跑；需要双卡 + ~200 GB 空闲内存）：
 pytest tests/golden/test_deepseek_v4_flash_parity.py
 ```
 
