@@ -80,9 +80,9 @@ CUDA Graph、SBO、TBO 和性能结论仍需在目标 GPU、驱动与互联上�
 
 ## 实测数据
 
-Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768），2× H100 80GB（NV18 NVLink），greedy，**离线批处理**（所有 prompt 一次性提交，无服务队列）。五条臂各在独立进程里跑同一引擎，只差三个开关；五组场景扫 batch（1/16/64）× prompt 长度（短/2k/32k），生成均 128 tok，prompt 实测长度随表披露：
+Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768），2× H100 80GB（NV18 NVLink），greedy，**离线批处理**（所有 prompt 一次性提交，无服务队列）。五组配置各在独立进程里跑同一引擎，只差三个开关；五组场景扫 batch（1/16/64）× prompt 长度（短/2k/32k），生成均 128 tok，prompt 实测长度随表披露：
 
-| 臂 | 含义 |
+| 配置 | 含义 |
 | --- | --- |
 | tp1 | 单卡 + CUDA Graph：无通信的参照上限 |
 | tp2 / ep2 | 两卡 TP / EP，均 eager |
@@ -104,7 +104,7 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 
 这台机器、这个模型上，EP 的三个理论收益一个都不兑现，成本却全数到位：
 
-- **权重没有省**。TP 是每专家切半宽 × 128 个，EP 是 64 个整专家——每 rank 字节数完全相同（两卡臂峰值显存都在 16-19 GiB）。EP 的内存收益出现在专家权重单卡放不下、要更多 rank 分摊时；2 rank 纯 EP 对纯 TP 没有这一项。
+- **权重没有省**。TP 是每专家切半宽 × 128 个，EP 是 64 个整专家——每 rank 字节数完全相同（两卡配置峰值显存都在 16-19 GiB）。EP 的内存收益出现在专家权重单卡放不下、要更多 rank 分摊时；2 rank 纯 EP 对纯 TP 没有这一项。
 - **小专家没有 GEMM 效率差**。专家宽 768 的 grouped GEMM 在 decode 时是权重带宽瓶颈：TP 半宽与 EP 全宽每 rank 读的总字节数相同，切与不切都不改变带宽利用。EP 的 GEMM 收益需要大专家、大 batch（每专家分到足够多的行）。
 - **NVLink 上没有通信字节优势**。a2a 每字节只跨一次，all-reduce 环形近似跨两次——这是 EP 在慢互联上的经典卖点；900 GB/s 的 NV18 上两边都是延迟主导，省一半字节不省时间。
 - **成本是结构性的**：每层 2 次 a2a（TP 的 MoE all-reduce 是 1 次），容量预留使线上字节约为 all-reduce 的 top_k 倍——bs16-short 实测 13940 MiB vs 915 MiB（15×），bs4-32k 772 GiB vs 49 GiB（16×）；再加 dispatch 的 sort/searchsorted/scatter 排列 kernel。graph 把 launch 开销消掉了，剩下的通信与排列时间就是 TPOT 16.76 vs 12.12ms 的差。
@@ -114,7 +114,7 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 
 ### 跨框架对照：vLLM 也是 EP < TP
 
-为排除"是不是 rapid_llm 实现有缺陷"，在同一台机器、同一份 Qwen3-30B-A3B-Instruct-2507-FP8 上用 **vLLM 0.28**（成熟框架）跑同样的对照：`tensor_parallel_size=2` 固定，只翻 `enable_expert_parallel`，两臂都开 CUDA Graph（`enforce_eager=False`），短 prompt + `ignore_eos` 让计时窗口以 decode 为主。一进程一臂，互不污染。
+为排除"是不是 rapid_llm 实现有缺陷"，在同一台机器、同一份 Qwen3-30B-A3B-Instruct-2507-FP8 上用 **vLLM 0.28**（成熟框架）跑同样的对照：`tensor_parallel_size=2` 固定，只翻 `enable_expert_parallel`，两组都开 CUDA Graph（`enforce_eager=False`），短 prompt + `ignore_eos` 让计时窗口以 decode 为主。一进程一组，互不污染。
 
 | 场景 | batch | out tok | vLLM tp2 | vLLM ep2 | ep2/tp2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -174,11 +174,11 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 | bs16-short | 915 MiB / 12416 次 | 13940 MiB / 18432 次 a2a + 444 MiB / 6272 次 |
 | bs4-32k | 49857 MiB / 18527 次 | 790251 MiB / 27504 次 a2a + 25185 MiB / 9359 次 |
 
-all-reduce 次数减半（只剩 attention 的那一半），代价是字节 ~16× 的 a2a。字节数是 driver rank 记账；graph replay 绕过 Python 记账，graph 臂的字节只含 eager prefill，上表因此用 eager 臂保证可比。
+all-reduce 次数减半（只剩 attention 的那一半），代价是字节 ~16× 的 a2a。字节数是 driver rank 记账；graph replay 绕过 Python 记账，graph 组的字节只含 eager prefill，上表因此用 eager 组保证可比。
 
 ### 长上下文的 graph 边界
 
-CUDA Graph 按 (batch, seq bucket) 捕获，bucket 最大 4096；KV 长度超过最大 bucket 的 decode 自动回落 eager——bs4-32k 的 graph 臂 replays=0、TPOT≈eager 臂（tp2_graph 25.3 ≈ tp2 25.5 tok/s）即由此来。所以 32k 场景的"graph"行实际测的是 eager；两卡在此场景赢单卡靠的是 prefill 计算分半（TTFT 10.0s vs 18.3s），不是 decode。
+CUDA Graph 按 (batch, seq bucket) 捕获，bucket 最大 4096；KV 长度超过最大 bucket 的 decode 自动回落 eager——bs4-32k 的 graph 组 replays=0、TPOT≈eager 组（tp2_graph 25.3 ≈ tp2 25.5 tok/s）即由此来。所以 32k 场景的"graph"行实际测的是 eager；两卡在此场景赢单卡靠的是 prefill 计算分半（TTFT 10.0s vs 18.3s），不是 decode。
 
 ### 一致性
 
@@ -191,7 +191,7 @@ vs tp2（greedy，6 prompt × 24 tok，tie-gap 0.5 nat）：tp1、ep2、ep2_grap
     --model /mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8
 ```
 
-指标口径：per-request（TTFT 取每条请求自身首 token 时刻，TPOT 取 (完成−首 token)/(token 数−1)）——32k prompt 按 512-token chunk 预填充，按 step 间隔算会把首个 chunk 的结束误报成 TTFT。原始数据（环境、五场景全部指标、流量、parity 明细）在 `docs/benchmark_logs/parallel/expert_parallel_Qwen3-30B-A3B-Instruct-2507-FP8_20260908_090311.json`；早期单点版本（含 TBO 臂）保留在 `parallel/..._20260908_061411.json`。
+指标口径：per-request（TTFT 取每条请求自身首 token 时刻，TPOT 取 (完成−首 token)/(token 数−1)）——32k prompt 按 512-token chunk 预填充，按 step 间隔算会把首个 chunk 的结束误报成 TTFT。原始数据（环境、五场景全部指标、流量、parity 明细）在 `docs/benchmark_logs/parallel/expert_parallel_Qwen3-30B-A3B-Instruct-2507-FP8_20260908_090311.json`；早期单点版本（含 TBO 组）保留在 `parallel/..._20260908_061411.json`。
 
 ## 可视化
 
