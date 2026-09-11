@@ -203,7 +203,8 @@ class TestEngineCoreGeneration:
     new boundary: stream shape, parameter fidelity, and concurrency."""
 
     @pytest.fixture(scope="class")
-    def client(self, model_dir):
+    @classmethod
+    def client(cls, model_dir):
         from rapid_llm.engine.engine_core_client import EngineCoreClient
 
         engine = EngineCoreClient.from_pretrained(

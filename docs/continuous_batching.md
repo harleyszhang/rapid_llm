@@ -146,7 +146,7 @@ python benchmarks/engine/run.py scheduler continuous --model-dir my_weight/Qwen2
 
 - **仅文本模型。** 视觉 prefill 需要逐请求的 processor 输出，padded prefill 网格放不下；多模态 checkpoint 在构造时就报 `NotImplementedError`。
 - **前缀复用与抢占默认关闭。** 分块预填充默认启用，`max_chunk_size=0` 可关闭。
-- **功能组合有限制。** 抢占不能搭配 launch/harvest pipeline；FP8 KV 的续块采用能够解码量化缓存的路径。
+- **功能组合有限制。** 抢占不能搭配 launch/harvest pipeline。
 - **`n > 1` 采样未实现**，HTTP 层显式拒绝而不是静默返回一条。
 - **每步一次同步。** 读回采样 token 用于 detokenize 与停止判定。这换来精确的停止语义（EOS 的下一步就离开 batch），也正因为如此才划得来：腾出的槽位立刻给排队请求。
 
