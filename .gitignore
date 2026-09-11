@@ -1,6 +1,7 @@
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]
+.debug/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
