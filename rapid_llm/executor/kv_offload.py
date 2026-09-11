@@ -46,9 +46,7 @@ def alloc_cpu_kv_buffers(
     NIC can DMA straight out of host RAM when a remote tier lands.
     """
     rows = num_blocks * block_size
-    return [
-        torch.empty((rows, *kv_row), dtype=dtype, pin_memory=True) for _ in range(num_layers)
-    ]
+    return [torch.empty((rows, *kv_row), dtype=dtype, pin_memory=True) for _ in range(num_layers)]
 
 
 class KVCopyEngine:
