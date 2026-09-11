@@ -61,6 +61,16 @@ class Counter:
         with self._lock:
             self._values[key] = self._values.get(key, 0.0) + amount
 
+    def value(self, **labels: str) -> float:
+        """The current total, ``0.0`` when never incremented.
+
+        For callers that act on a counter rather than only render it — a
+        benchmark comparing two arms reads one arm's total directly.
+        """
+        key = tuple(labels[name] for name in self.label_names)
+        with self._lock:
+            return self._values.get(key, 0.0)
+
     def render(self) -> str:
         lines = [f"# HELP {self.name} {self.documentation}", f"# TYPE {self.name} counter"]
         for key, value in sorted(self._values.items()):
@@ -143,6 +153,9 @@ class _NullInstrument:
 
     def inc(self, amount: float = 1.0, **labels: str) -> None:
         pass
+
+    def value(self, **labels: str) -> float:
+        return 0.0
 
     def set(self, value: float) -> None:
         pass
@@ -227,6 +240,12 @@ class EngineMetrics:
             f"{_NAMESPACE}:generation_tokens_total", "Tokens generated."
         )
     )
+    kv_pipeline_sync_wait: Counter | _NullInstrument = field(
+        default_factory=lambda: Counter(
+            f"{_NAMESPACE}:kv_pipeline_sync_wait_seconds_total",
+            "Host seconds blocked on the launch/harvest pipeline's readback events.",
+        )
+    )
 
     @classmethod
     def from_env(cls) -> EngineMetrics:
@@ -245,6 +264,7 @@ class EngineMetrics:
                 "finished",
                 "prompt_tokens_total",
                 "generation_tokens_total",
+                "kv_pipeline_sync_wait",
             ):
                 setattr(metrics, name, _NULL)
         return metrics
@@ -296,6 +316,7 @@ class EngineMetrics:
                 self.finished,
                 self.prompt_tokens_total,
                 self.generation_tokens_total,
+                self.kv_pipeline_sync_wait,
             )
         ]
         return "\n".join(block for block in blocks if block) + "\n"

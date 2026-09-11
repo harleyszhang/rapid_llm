@@ -845,8 +845,12 @@ class ContinuousBatchingEngine:
                 if event is not None:
                     # Zero wait in the steady state: this copy landed
                     # under the forwards launched since.  Only a drained
-                    # queue's final harvest pays.
+                    # queue's final harvest pays.  The wait is measured —
+                    # its share of the wall clock is the acceptance number
+                    # for the pipeline depth (see EngineMetrics).
+                    wait_started = time.perf_counter()
                     event.synchronize()
+                    self.metrics.kv_pipeline_sync_wait.inc(time.perf_counter() - wait_started)
                 values = host.tolist()
                 # The buffer goes back only now. This step's launches already
                 # ran above, so releasing earlier would have let their copies

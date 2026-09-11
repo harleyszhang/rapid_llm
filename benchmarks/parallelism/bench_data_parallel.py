@@ -173,6 +173,13 @@ _MODE_DEFAULTS = {
         "max_seq_len": 1024,
         "max_gpu_num_blocks": None,
     },
+    "skew": {
+        "gen_len": 0,
+        "iters": 1,
+        "max_num_seqs": 0,
+        "max_seq_len": 0,
+        "max_gpu_num_blocks": None,
+    },
 }
 
 # --------------------------------------------------------------------------- #
@@ -706,14 +713,110 @@ def run_graph(args) -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# skew mode
+# --------------------------------------------------------------------------- #
+
+
+def run_skew(args) -> None:
+    """DP skew arm: four balancers x skewed lengths -> per-replica imbalance.
+
+    ROADMAP v0.12.0 acceptance: load-aware policies (total_tokens, cache_aware)
+    keep per-replica token skew under ``args.skew_threshold``.  No GPU needed:
+    routing is replayed on the tokenizer's output.
+    """
+    from transformers import AutoTokenizer
+
+    dp = args.dp
+    n_short, n_long = args.skew_short_count, args.skew_long_count
+    # Short prompts cycle through 1-3 sentences so the baseline is uneven
+    _SHORT_CYCLE = (1, 2, 3)
+    short = [
+        f"Quick request {i}: answer concisely. " * _SHORT_CYCLE[i % len(_SHORT_CYCLE)]
+        for i in range(n_short)
+    ]
+    # Vary long prompt sizes so load-aware policies can distinguish them
+    _LONG_CYCLE = (80, 50, 30, 70, 100)
+    long = [
+        "You are an expert. "
+        + _FILLER * _LONG_CYCLE[i % len(_LONG_CYCLE)]
+        + f" Question {i}: provide a detailed analysis."
+        for i in range(n_long)
+    ]
+    prompts = short + long
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    token_ids_list = tokenizer(prompts)["input_ids"]
+
+    tok_per_prompt = [len(ids) for ids in token_ids_list]
+    total_tok = sum(tok_per_prompt)
+    short_toks = tok_per_prompt[:n_short]
+    long_toks = tok_per_prompt[n_short:]
+
+    print(f"skew workload: {len(prompts)} requests ({n_short} short, {n_long} long)  dp={dp}")
+    print(
+        f"  short {min(short_toks)}-{max(short_toks)} tok x {n_short} = {sum(short_toks)}  "
+        f"long {min(long_toks)}-{max(long_toks)} tok x {n_long} = {sum(long_toks)}  "
+        f"total {total_tok} tok"
+    )
+
+    results = []
+    for policy in LOAD_BALANCERS:
+        balancer = make_load_balancer(policy, dp)
+        per_replica = [0] * dp
+        for ids in token_ids_list:
+            replica = balancer.select(estimated_tokens=len(ids), token_ids=ids)
+            per_replica[replica] += len(ids)
+
+        mean = total_tok / dp
+        skew = (max(per_replica) - min(per_replica)) / mean if mean else 0.0
+        is_load_aware = policy in ("total_tokens", "cache_aware")
+        accepted = skew < args.skew_threshold
+        msg = "ACCEPTED" if (not is_load_aware or accepted) else "REJECTED"
+        line = f"  {policy:18} tokens per replica {per_replica}, skew {skew:6.1%} -> {msg}"
+        if is_load_aware:
+            line += f"  (threshold {args.skew_threshold:.0%})"
+        print(line)
+        results.append(
+            {
+                "policy": policy,
+                "per_replica": per_replica,
+                "skew": skew,
+                "load_aware": is_load_aware,
+                "accepted": accepted if is_load_aware else None,
+            }
+        )
+
+    load_aware_ok = all(r["accepted"] for r in results if r["accepted"] is not None)
+    print(f"\n-> load-aware skew criteria: {'ALL ACCEPTED' if load_aware_ok else 'REJECTED'}")
+
+    if args.log_dir:
+        from rapid_llm.benchmark import timestamped_log_path, write_json_log
+
+        path = timestamped_log_path(args.log_dir, f"bench_dp_skew_{Path(args.model).name}")
+        write_json_log(
+            path,
+            {
+                "model": args.model,
+                "mode": "skew",
+                "dp": dp,
+                "short_count": n_short,
+                "short_sentences": args.skew_short_sentences,
+                "long_count": n_long,
+                "long_sentences": args.skew_long_sentences,
+                "threshold": args.skew_threshold,
+            },
+            results,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument(
         "--mode",
         default="scaling",
-        choices=["scaling", "prefix", "graph"],
+        choices=["scaling", "prefix", "graph", "skew"],
         help="scaling: replica-count throughput; prefix: prefix-cache routing quality; "
-        "graph: CUDA graphs under DP",
+        "graph: CUDA graphs under DP; skew: length-imbalance vs policy",
     )
     # The five knobs below default to None so each mode can fill its own fallback
     # without mistaking an explicit value for "not passed".
@@ -766,6 +869,36 @@ def main() -> None:
         default=80,
         help="[prefix] Filler sentences in the shared prefix",
     )
+    parser.add_argument(
+        "--skew-short-count",
+        type=int,
+        default=10,
+        help="[skew] How many short prompts in the workload",
+    )
+    parser.add_argument(
+        "--skew-short-sentences",
+        type=int,
+        default=2,
+        help="[skew] Filler sentences per short prompt",
+    )
+    parser.add_argument(
+        "--skew-long-count",
+        type=int,
+        default=3,
+        help="[skew] How many long prompts in the workload",
+    )
+    parser.add_argument(
+        "--skew-long-sentences",
+        type=int,
+        default=60,
+        help="[skew] Filler sentences per long prompt",
+    )
+    parser.add_argument(
+        "--skew-threshold",
+        type=float,
+        default=0.10,
+        help="[skew] Acceptable skew for load-aware policies",
+    )
     args = parser.parse_args()
 
     for name, value in _MODE_DEFAULTS[args.mode].items():
@@ -776,6 +909,8 @@ def main() -> None:
         run_prefix(args)
     elif args.mode == "graph":
         run_graph(args)
+    elif args.mode == "skew":
+        run_skew(args)
     else:
         run_scaling(args)
 

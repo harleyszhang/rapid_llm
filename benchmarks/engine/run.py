@@ -11,7 +11,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from benchmarks.engine import continuous, cpu, optimizations, quant, scheduler
+from benchmarks.engine import (
+    bench_kv_transfer,
+    bench_pipeline,
+    continuous,
+    cpu,
+    optimizations,
+    quant,
+    scheduler,
+)
 
 
 def _add_command(
@@ -74,6 +82,20 @@ def main(argv: list[str] | None = None) -> int:
         "CPU model-forward latency",
         cpu.configure,
         cpu.run,
+    )
+    _add_command(
+        subparsers,
+        "pipeline",
+        "launch/harvest pipeline depth A/B (host sync wait share)",
+        bench_pipeline.configure,
+        bench_pipeline.run,
+    )
+    _add_command(
+        subparsers,
+        "kv-transfer",
+        "CPU KV tier acceptance: parity, TPOT tax, overflow reuse",
+        bench_kv_transfer.configure,
+        bench_kv_transfer.run,
     )
 
     args = parser.parse_args(argv)

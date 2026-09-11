@@ -1,0 +1,74 @@
+{
+  "config": {
+    "model": "my_weight/Qwen3-0.6B",
+    "version": "0.11.0",
+    "matter": "pipeline depth A/B \u2014 host sync wait share",
+    "batch": 128,
+    "max_gen_len": 128,
+    "max_seq_len": 512,
+    "max_num_seqs": 128,
+    "kv_blocks": null,
+    "depths": [
+      1,
+      2
+    ],
+    "pipeline": true,
+    "use_cuda_graph": true,
+    "sampling": "greedy",
+    "offline": true,
+    "reproduce": "python benchmarks/engine/run.py pipeline --model-dir my_weight/Qwen3-0.6B --batch 128 --max-gen-len 128 --max-seq-len 512 --max-num-seqs 128 --depths 1 2",
+    "timestamp": "2026-09-11T20:58:40",
+    "environment": {
+      "gpu_model": "NVIDIA A10",
+      "gpu_count": 1,
+      "gpu_memory_gib": 22.0,
+      "sm_count": 72,
+      "compute_capability": "sm_86",
+      "driver_version": "550.135",
+      "interconnect_topology": "GPU0\t X \tPHB\t0-63\t0\t\tN/A; GPU1\tPHB\t X \t0-63\t0\t\tN/A",
+      "cuda_version": "12.9",
+      "torch_version": "2.13.0+cu129",
+      "triton_version": "3.7.1",
+      "transformers_version": "5.15.1",
+      "python_version": "3.13.13",
+      "cpu_cores": 64,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": {
+    "arms": {
+      "depth_1": {
+        "label": "depth 1",
+        "depth": 1,
+        "total_s": 1.3995261527597904,
+        "steps": 130,
+        "gen_tokens": 16384,
+        "ttft_ms": 346.2532050907612,
+        "tpot_ms": 8.229888848892568,
+        "sync_wait_s": 0.30710896104574203,
+        "tps": 11706.819460066274,
+        "wait_share": 0.2194378150348528
+      },
+      "depth_2": {
+        "label": "depth 2",
+        "depth": 2,
+        "total_s": 1.4063460417091846,
+        "steps": 132,
+        "gen_tokens": 16384,
+        "ttft_ms": 348.66686165332794,
+        "tpot_ms": 8.216733263262848,
+        "sync_wait_s": 0.07770894840359688,
+        "tps": 11650.048788908252,
+        "wait_share": 0.05525592286600693
+      }
+    },
+    "acceptance": {
+      "criterion": "depth-2 host sync wait share < 50% of depth-1",
+      "wait_share_depth_1": 0.2194378150348528,
+      "wait_share_depth_2": 0.05525592286600693,
+      "ratio": 0.2518067492479852,
+      "tokens_agree": true,
+      "accepted": true
+    }
+  }
+}
