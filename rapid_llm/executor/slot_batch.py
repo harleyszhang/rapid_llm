@@ -295,12 +295,21 @@ class SlotBatch:
         if padded_slots == self._host_slots and padded_lens == [
             length + 1 for length in self._host_lens
         ]:
-            # Same requests, one token further: advance the device lengths in
-            # place (steady state, nothing crosses the PCIe bus).
+            # Same requests, one token further: advance the lengths in place,
+            # device rows and host mirror alike -- a steady decode step neither
+            # allocates nor copies on the host side.
             self._b_seq_len += 1
+            if self._atten.b_seq_len_cpu is not None:
+                self._atten.b_seq_len_cpu += 1
+            else:
+                self._atten.b_seq_len_cpu = torch.tensor(padded_lens, dtype=torch.long)
         else:
             self._b_req_idx = self._to_device(padded_slots)
             self._b_seq_len = self._to_device(padded_lens)
+            # Host mirror of the padded lens: same numbers the device lengths
+            # hold, so the runner's per-step prepare hook plans without a
+            # device sync.
+            self._atten.b_seq_len_cpu = torch.tensor(padded_lens, dtype=torch.long)
         self._host_slots, self._host_lens = padded_slots, padded_lens
 
         table = self._atten.b_req_tokens_table
@@ -308,10 +317,6 @@ class SlotBatch:
         self._atten.b_seq_len = self._b_seq_len
         self._atten.max_actual_seq_len = max(seq_lens)
         self._atten.is_prefill = False
-        # Host mirror of the padded lens: same numbers the device lengths
-        # hold (steady steps grew both by one), so the runner's per-step
-        # prepare hook plans without a device sync.
-        self._atten.b_seq_len_cpu = torch.tensor(padded_lens, dtype=torch.long)
         # Row `seq_len - 1` of each slot: where this step's K/V goes.
         self._atten.cur_select_index = table[self._b_req_idx, self._b_seq_len - 1]
         self._atten.b_start_loc = None
