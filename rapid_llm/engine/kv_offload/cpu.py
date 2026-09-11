@@ -211,9 +211,7 @@ class CPUPrimaryTierOffloadingManager(OffloadingManager):
             # store costs a re-store later, never correctness.
             return StoreSpec()
         evicted = (
-            ()
-            if snapshot is None
-            else tuple(snapshot - set(self.pool.cached_block_hash_to_block))
+            () if snapshot is None else tuple(snapshot - set(self.pool.cached_block_hash_to_block))
         )
 
         moves = tuple(
