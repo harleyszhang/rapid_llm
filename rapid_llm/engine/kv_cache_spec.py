@@ -496,7 +496,10 @@ class KVCacheCoordinator:
             allocation would leave the caller having to unwind it, and every
             caller's answer to "no room" is to preempt or wait.
         """
-        state = self._requests.setdefault(request_id, _RequestBlocks())
+        state = self._requests.get(request_id)
+        if state is None:
+            state = _RequestBlocks()
+            self._requests[request_id] = state
         if not state.per_group:
             state.per_group = [[] for _ in self.groups]
             state.num_cached = [0 for _ in self.groups]
@@ -637,6 +640,20 @@ class KVCacheCoordinator:
         if state is None:
             return tuple(() for _ in self.groups)
         return tuple(tuple(b.block_id for b in blocks) for blocks in state.per_group)
+
+    def held_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
+        """Per-group live block lists of a request, without copying them out.
+
+        A zero-copy view for callers that only *count* or *slice* a request's
+        blocks: they get the coordinator's own lists instead of a freshly
+        materialized tuple of ids. The lists must not be mutated, and they grow
+        as the request does, so a caller needing a stable snapshot wants
+        :meth:`block_ids` instead.
+        """
+        state = self._requests.get(request_id)
+        if state is None:
+            return tuple([] for _ in self.groups)
+        return tuple(state.per_group)
 
     def num_tracked_requests(self) -> int:
         """Requests currently holding blocks — a leak check for tests."""

@@ -13,7 +13,7 @@ Usage:
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -384,8 +384,10 @@ class Scheduler:
                 )
         self._offloading = offloading
         self._pending_promotes: dict[str, _Promotion] = {}
-        self._ready_promotes: list[Request] = []
+        self._ready_promotes: deque[Request] = deque()
         self._dying_promotes: dict[str, _Promotion] = {}
+        # Reverse index: gpu_blocks -> request_id, so _take_promotion is O(1)
+        self._promotion_by_blocks: dict[tuple[int, ...], str] = {}
 
     def _default_num_blocks(self, num_slots: int) -> int:
         """Pool size to use when the executor did not report its cache size.
@@ -751,6 +753,7 @@ class Scheduler:
             gpu_blocks=gpu_blocks,
             num_tokens=num_tokens,
         )
+        self._promotion_by_blocks[gpu_blocks] = rid
         return True
 
     def _drain_offload_events(self) -> None:
@@ -788,16 +791,18 @@ class Scheduler:
         """Pop the promotion a load event belongs to, by its destination blocks.
 
         Block ids are unique while a promotion holds them — the pool cannot
-        hand out a block that is still referenced — so the match is exact.
+        hand out a block that is still referenced — so the reverse-index
+        match is exact and O(1).
         """
         if not gpu_blocks:
             return None
-        for bank in (self._pending_promotes, self._dying_promotes):
-            for rid, promotion in bank.items():
-                if promotion.gpu_blocks == gpu_blocks:
-                    del bank[rid]
-                    return promotion
-        return None
+        rid = self._promotion_by_blocks.pop(gpu_blocks, None)
+        if rid is None:
+            return None
+        promotion = self._pending_promotes.pop(rid, None)
+        if promotion is not None:
+            return promotion
+        return self._dying_promotes.pop(rid, None)
 
     def _promote_ready(self) -> None:
         """Seat landed promotions as capacity frees up, oldest first.
@@ -812,7 +817,7 @@ class Scheduler:
         while self._ready_promotes and self._free_slots:
             if len(self._running) >= self.max_num_seqs:
                 break
-            request = self._ready_promotes.pop(0)
+            request = self._ready_promotes.popleft()
             request.slot = self._free_slots.pop()
             request.status = RequestStatus.RUNNING
             request.scheduled_time = time.monotonic()
@@ -831,10 +836,13 @@ class Scheduler:
         promotion = self._pending_promotes.pop(rid, None)
         if promotion is not None:
             self._dying_promotes[rid] = promotion
+            # gpu_blocks won't collide: a dying promotion's blocks are still
+            # in flight, so no new allocation has the same id yet.
+            self._promotion_by_blocks[promotion.gpu_blocks] = rid
             return True
-        self._ready_promotes = [
+        self._ready_promotes = deque(
             candidate for candidate in self._ready_promotes if candidate is not request
-        ]
+        )
         return False
 
     # ---------------------------------------------------------------- blocks #
@@ -863,14 +871,21 @@ class Scheduler:
         Returns:
             Whether the request's blocks now cover ``num_tokens``.
         """
+        # Fast path: the pool is normally sized for every slot to hold a full
+        # context, so the first allocation succeeds and the protected set --
+        # O(in-flight requests) -- is never built. Only a refused allocation
+        # has victims to choose between.
+        if self._prefix_cache.allocate(request.request_id, num_tokens):
+            return True
         protected = {id(candidate) for candidate in protect}
         protected.add(id(request))
-        while not self._prefix_cache.allocate(request.request_id, num_tokens):
+        while True:
             victim = self._preempt_victim(protected)
             if victim is None:
                 return False
             victims.append(victim)
-        return True
+            if self._prefix_cache.allocate(request.request_id, num_tokens):
+                return True
 
     def _map_blocks(self, request: Request) -> None:
         """Record the block-table entries the executor owes this request.
