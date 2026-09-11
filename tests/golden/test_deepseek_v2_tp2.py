@@ -103,6 +103,33 @@ def _dsv2_problem(path: Path) -> str | None:
     return None
 
 
+def _drop_exception_frames(exc: BaseException) -> None:
+    """Sever ``exc`` and its chain from the frames their tracebacks pin.
+
+    A checkpoint load that dies mid-flight has already staged most of its
+    weights on the cards -- by the time the last MoE shards are converted,
+    each card sits close enough to its limit that an unfriendly neighbor
+    (this box is shared) taking a couple of GiB is what OOMs it. A bare
+    raise would leave those tensors reachable through the traceback frames,
+    and pytest keeps a failed fixture's exception for the rest of the
+    session -- measured: this file's 3 errors, plus 4 and 7 in the v4 and
+    logprob gates, made 14 of the gate's 24. ``empty_cache`` cannot reclaim
+    them (they are still *allocated*), so cut the tracebacks and keep only
+    the messages -- the exception objects themselves are harmless.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        for nxt in (current.__cause__, current.__context__):
+            if nxt is not None:
+                pending.append(nxt)
+
+
 @pytest.fixture(scope="module")
 def dsv2_dir() -> Path:
     """The checkpoint under test, under the golden gate's no-silent-skip policy."""
@@ -160,16 +187,26 @@ def reference(dsv2_dir: Path, lite: dict[str, Any]) -> list[torch.Tensor]:
     """``[positions, vocab]`` log-softmax rows from transformers, per prompt."""
     from transformers import AutoModelForCausalLM
 
-    model = AutoModelForCausalLM.from_pretrained(
-        str(dsv2_dir),
-        dtype=torch.bfloat16,
-        attn_implementation="eager",
-        device_map="auto",
-        # The checkpoint's auto_map points at DeepSeek's remote-code class,
-        # whose weight names transformers 5.x fails to auto-convert; the
-        # built-in DeepseekV2ForCausalLM shares their naming and loads cleanly.
-        trust_remote_code=False,
-    ).eval()
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(dsv2_dir),
+            dtype=torch.bfloat16,
+            attn_implementation="eager",
+            device_map="auto",
+            # The checkpoint's auto_map points at DeepSeek's remote-code class,
+            # whose weight names transformers 5.x fails to auto-convert; the
+            # built-in DeepseekV2ForCausalLM shares their naming and loads cleanly.
+            trust_remote_code=False,
+        ).eval()
+    except Exception as exc:
+        # On a box where something else just took a couple of GiB, the load
+        # dies in the conversion of the last shards with ~15 GiB per card
+        # already staged; unlink those before pytest reports this failure,
+        # or they outlive the module and OOM the later gates (see the helper).
+        _drop_exception_frames(exc)
+        gc.collect()
+        torch.cuda.empty_cache()
+        raise
     try:
         refs = []
         with torch.no_grad():
