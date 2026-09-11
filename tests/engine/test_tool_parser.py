@@ -9,7 +9,7 @@ first-delta timing (id/name before arguments), string-aware brace counting,
 and the degrade-to-content path for malformed markup.
 
 Usage:
-    pytest tests/serving/test_tool_parser.py
+    pytest tests/engine/test_tool_parser.py
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest
 
 # Marker spellings are assembled, never written out: the transport delivering
 # source edits strips anything it parses as markup.
-from rapid_llm.serving.tool_parser import (
+from rapid_llm.engine.tool_parser import (
     _DS_ARGS_END,
     _DS_CALLS_BEGIN,
     _DS_CALLS_END,

@@ -23,8 +23,17 @@ if TYPE_CHECKING:
     from .llm import LLM
     from .llm_engine import LLMEngine
     from .outputs import CompletionOutput, RequestOutput
+    from .reasoning import ReasoningSplitter
     from .sampler import BatchedSamplingParams, Sampler, SamplingParams, sample_top_p
     from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
+    from .tool_parser import (
+        DeepSeekToolParser,
+        QwenToolParser,
+        ToolCall,
+        ToolCallDelta,
+        ToolParser,
+        ToolStream,
+    )
 
 
 # The submodules pull the executor and the Triton kernels; values such as
@@ -38,7 +47,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "CompletionOutput": (".outputs", "CompletionOutput"),
     "ContinuousBatchingEngine": (".continuous_engine", "ContinuousBatchingEngine"),
     "DataParallelEngine": (".data_parallel", "DataParallelEngine"),
+    "DeepSeekToolParser": (".tool_parser", "DeepSeekToolParser"),
     "LLMEngine": (".llm_engine", "LLMEngine"),
+    "QwenToolParser": (".tool_parser", "QwenToolParser"),
+    "ReasoningSplitter": (".reasoning", "ReasoningSplitter"),
     "Request": (".scheduler", "Request"),
     "RequestOutput": (".outputs", "RequestOutput"),
     "RequestStatus": (".scheduler", "RequestStatus"),
@@ -48,6 +60,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "SchedulerConfig": (".scheduler", "SchedulerConfig"),
     "StreamedOutput": (".async_engine", "StreamedOutput"),
     "TextGenerator": (".generator", "TextGenerator"),
+    "ToolCall": (".tool_parser", "ToolCall"),
+    "ToolCallDelta": (".tool_parser", "ToolCallDelta"),
+    "ToolParser": (".tool_parser", "ToolParser"),
+    "ToolStream": (".tool_parser", "ToolStream"),
     "VisionGenerator": (".generator", "VisionGenerator"),
     "sample_top_p": (".sampler", "sample_top_p"),
 }
@@ -76,7 +92,10 @@ __all__ = [
     "CompletionOutput",
     "ContinuousBatchingEngine",
     "DataParallelEngine",
+    "DeepSeekToolParser",
     "LLMEngine",
+    "QwenToolParser",
+    "ReasoningSplitter",
     "Request",
     "RequestOutput",
     "RequestStatus",
@@ -86,6 +105,10 @@ __all__ = [
     "SchedulerConfig",
     "StreamedOutput",
     "TextGenerator",
+    "ToolCall",
+    "ToolCallDelta",
+    "ToolParser",
+    "ToolStream",
     "VisionGenerator",
     "sample_top_p",
 ]
