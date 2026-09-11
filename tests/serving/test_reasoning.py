@@ -7,7 +7,7 @@ that axiom rides on — tag consumption, the partial-tag suffix window, and the
 two opening modes.
 
 Usage:
-    pytest tests/engine/test_reasoning.py
+    pytest tests/serving/test_reasoning.py
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import itertools
 
 import pytest
 
-from rapid_llm.engine.reasoning import ReasoningSplitter, for_family
+from rapid_llm.serving.reasoning import ReasoningSplitter, for_family
 
 # Tag spellings are assembled, never written out: the transport delivering
 # source edits strips anything it parses as markup.

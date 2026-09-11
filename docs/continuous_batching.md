@@ -136,7 +136,7 @@ python benchmarks/engine/run.py scheduler continuous --model-dir my_weight/Qwen2
 | 文件 | 数量 | 需要 |
 | --- | ---: | --- |
 | `tests/engine/test_scheduler.py` | 25 | CPU |
-| `tests/entrypoints/test_api_server.py` | 23 | CPU（fake engine） |
+| `tests/serving/test_api_server.py` | 23 | CPU（fake engine） |
 | `tests/engine/test_async_engine.py` | 11 + 1 | CPU（stub），1 个需权重 |
 | `tests/engine/test_continuous_batching.py` | 15 | GPU + 权重 |
 | `tests/engine/test_continuous_perf.py` | 4 | GPU + 权重，`slow` |

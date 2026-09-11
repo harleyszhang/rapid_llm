@@ -66,7 +66,7 @@ rapid_llm/
 │   └── dispatcher/  # selection, configuration cache, autotuning
 ├── distributed/     # process groups and collective operations
 ├── batch_overlap/   # CUDA stream scheduling and overlap policies
-├── entrypoints/     # HTTP protocol and server
+├── serving/         # HTTP protocol, parsing and SSE streaming
 └── tools/           # inspection, evaluation, observability
 ```
 

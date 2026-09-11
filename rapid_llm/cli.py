@@ -524,7 +524,7 @@ class ServeCommand(CliCommand):
             option.register(sub)
 
     def run(self, args: argparse.Namespace) -> int:
-        from .entrypoints.api_server import ServerConfig, run_server
+        from .serving.api_server import ServerConfig, run_server
 
         opts = TextEngineOptions.from_args(args)
         # Sampling flags do not apply here: every HTTP request carries its own.
