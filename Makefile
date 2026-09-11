@@ -90,7 +90,7 @@ test-eval:
 test-serving:
 	RAPID_LLM_TEST_MODEL_DIR=$(MODEL_DIR) $(PYTHON) -m pytest \
 		tests/engine/test_scheduler.py tests/engine/test_async_engine.py \
-		tests/engine/test_continuous_batching.py tests/serving
+		tests/engine/test_continuous_batching.py tests/entrypoints
 
 coverage:
 	$(PYTHON) -m pytest -m "not gpu and not weights" \

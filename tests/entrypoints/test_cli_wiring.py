@@ -5,7 +5,7 @@ tests pin the wiring — cuda-graph defaults, tensor-parallel surface,
 chat REPL behaviour — instead of running real engines.
 
 Usage:
-    pytest tests/serving/test_cli_wiring.py
+    pytest tests/entrypoints/test_cli_wiring.py
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ class TestTensorParallelSurface:
     def test_serve_passes_the_process_grid_to_the_server(self, model_dir, monkeypatch):
         pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
-        from rapid_llm.serving import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)
@@ -295,7 +295,7 @@ class TestTensorParallelSurface:
     def test_serve_passes_expert_parallel_to_the_server_config(self, model_dir, monkeypatch):
         pytest.importorskip("pydantic", reason="needs the serve extra")
         captured: dict = {}
-        from rapid_llm.serving import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)
@@ -360,7 +360,7 @@ class TestDataParallelSurface:
     def captured_server(self, monkeypatch):
         pytest.importorskip("fastapi", reason="needs the `serve` extra")
         captured: dict = {}
-        from rapid_llm.serving import api_server
+        from rapid_llm.entrypoints import api_server
 
         monkeypatch.setattr(
             api_server, "run_server", lambda config, host, port: captured.update(config=config)

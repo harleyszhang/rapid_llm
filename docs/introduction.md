@@ -37,7 +37,7 @@ rapid_llm 是一个基于 Triton 内核的轻量级 LLM 推理框架。本文按
 
 ### 1.1 它是什么，不是什么
 
-rapid_llm 是一个**基于 Triton 内核的轻量级 LLM 推理框架**（见 [pyproject.toml](../pyproject.toml)），支持 LLaMA3 / Qwen2.5 / Qwen3 / Qwen3-MoE / LLaVA-1.5 / Qwen3-VL，要求 Python 3.13+，运行依赖只有 torch、triton、transformers、safetensors 四项。文件与类命名对齐 vLLM（`model_runner.py` ↔ `v1/worker/gpu_model_runner.py`、`continuous_engine.py` + `scheduler.py` ↔ `v1/engine/` + `v1/core/sched/`、`serving/` ↔ `entrypoints/openai/`），量化子包的文件布局对齐 sglang，两个项目的代码可以对照阅读。整个框架约 2.3 万行 Python，从 HTTP 请求到 Triton kernel 是同一条代码路径：没有为多进程重写一份逻辑，也没有按运行模式切换的隐藏分支。
+rapid_llm 是一个**基于 Triton 内核的轻量级 LLM 推理框架**（见 [pyproject.toml](../pyproject.toml)），支持 LLaMA3 / Qwen2.5 / Qwen3 / Qwen3-MoE / LLaVA-1.5 / Qwen3-VL，要求 Python 3.13+，运行依赖只有 torch、triton、transformers、safetensors 四项。文件与类命名对齐 vLLM（`model_runner.py` ↔ `v1/worker/gpu_model_runner.py`、`continuous_engine.py` + `scheduler.py` ↔ `v1/engine/` + `v1/core/sched/`、`entrypoints/` ↔ `entrypoints/openai/`），量化子包的文件布局对齐 sglang，两个项目的代码可以对照阅读。整个框架约 2.3 万行 Python，从 HTTP 请求到 Triton kernel 是同一条代码路径：没有为多进程重写一份逻辑，也没有按运行模式切换的隐藏分支。
 
 它不是训练框架，也不是内核研究框架，而是把「服务一个 LLaMA 结构的模型」这条路径走完整：调度、分页 KV、量化、多卡、可观测。一个推理框架该有的组件它都有，每个组件的体量也小到可以通读。
 
@@ -206,7 +206,7 @@ backend/    "外部库"   flashinfer / deepgemm / flashmla / deepep, 每包含 I
 
 - **distributed/parallel_state.py**：`dp × tp` 网格，`global_rank = dp_rank·tp_size + tp_rank`，使同一副本内的 TP rank 编号连续。每个副本有两组进程：NCCL 数据面（激活 / logits）与 gloo 控制面（广播 Python 对象）。单进程时所有集合操作为空操作，单卡路径不引入任何分支。
 - **platform/**：PlatformInfo / CapabilityRequirement，不依赖 torch，注册表可以在 CPU-only 机器上于 import 期完成过滤；CudaPlatform 探测 sm75–sm100，接口为后续支持 ROCm 预留。
-- **serving/**：OpenAI 兼容 FastAPI（`/v1/models`、`/v1/completions`、`/v1/chat/completions` 流式 SSE、`/health`）。这一层保持薄：只做 JSON→SamplingParams 转换、chat template、工具调用与推理解析和 SSE 帧封装；不支持的参数直接报错（例如请求 `n=4` 会返回错误，而不是静默只生成 1 条）。
+- **entrypoints/**：OpenAI 兼容 FastAPI（`/v1/models`、`/v1/completions`、`/v1/chat/completions` 流式 SSE、`/health`）。这一层保持薄：只做 JSON→SamplingParams 转换、chat template 和 SSE 帧封装；不支持的参数直接报错（例如请求 `n=4` 会返回错误，而不是静默只生成 1 条）。
 - **tools/**：observability/collective_stats.py 提供集合通信台账，每次集合操作上报字节数，按数据面 / 控制面分别记账，统计窗口基于 contextvar，可嵌套。借助它，「词表并行采样每步只传 2·batch 个标量」是一个可实测验证的结论而非设计声明。profiling/ 提供不依赖 GPU 的静态显存预算和模型结构树渲染。
 - **utils/**：prompt_templates 是模板处理的唯一入口，instruct 模型套用 tokenizer 自带的 chat_template，base 模型直传；CLI / serve / batch 共享同一个 `PrompterResolver`，避免多处维护各自一套的模板规则。另有 logger（彩色短级别名）、path_utils、image_process（LLaVA 图像处理）。
 

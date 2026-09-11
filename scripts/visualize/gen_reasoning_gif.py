@@ -26,20 +26,10 @@ import textwrap
 from pathlib import Path
 
 from PIL import Image, ImageDraw
-
 from scripts._viz_lib import (
-    AMBER,
-    BG,
-    BLUE,
-    CYAN,
-    DIM,
-    GREEN,
-    PROMPT_FG,
-    TEXT_FG,
-    YELLOW,
-    FontPack,
-    draw_title_bar,
-    save_gif,
+    BG, TITLE_BG, TITLE_FG, PROMPT_FG, DIM, TEXT_FG,
+    CYAN, YELLOW, AMBER, GREEN, BLUE, RED,
+    FontPack, draw_title_bar, save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,19 +68,16 @@ def collect(model_dir: str) -> dict:
     because it might complete a tag.
     """
     from rapid_llm.engine.llm import LLM
+    from rapid_llm.engine.reasoning import _OPEN as THINK
+    from rapid_llm.engine.reasoning import for_family
     from rapid_llm.engine.sampler import SamplingParams
-    from rapid_llm.serving.reasoning import _OPEN as THINK
-    from rapid_llm.serving.reasoning import for_family
 
     prompt = f"User: What is 2+2?\nAssistant: {THINK}\nThe user asks"
     llm = LLM(model=model_dir, max_seq_len=256, max_gpu_num_blocks=2048, use_cuda_graph=False)
     output = llm.generate(
         [prompt],
         SamplingParams(
-            temperature=0.0,
-            max_gen_len=64,
-            repetition_penalty=1.0,
-            stop_on_repeat=False,
+            temperature=0.0, max_gen_len=64, repetition_penalty=1.0, stop_on_repeat=False,
             logprobs=1,
         ),
     )[0]
@@ -113,9 +100,7 @@ def collect(model_dir: str) -> dict:
 
 def _title_bar(draw, fonts, model_name: str):
     _, _, small = fonts
-    draw_title_bar(
-        draw, W, f"rapid_llm  —  streaming reasoning parser  ({model_name})", small=small
-    )
+    draw_title_bar(draw, W, f"rapid_llm  —  streaming reasoning parser  ({model_name})", small=small)
 
 
 def _wrapped(draw, fonts, text: str, x: int, y: int, colour) -> int:
@@ -133,15 +118,8 @@ def _cursor(draw, fonts, x: int, y: int):
     draw.text((x, y), "▌", fill=CYAN, font=body)
 
 
-def _stream_frame(
-    fonts,
-    model_name: str,
-    reasoning: str,
-    content: str,
-    *,
-    cursor_on: bool,
-    tail: list[tuple[str, object, str]] | None = None,
-) -> Image.Image:
+def _stream_frame(fonts, model_name: str, reasoning: str, content: str, *,
+                  cursor_on: bool, tail: list[tuple[str, object, str]] | None = None) -> Image.Image:
     """One frame: the typed call above, the two channels below, optional tail notes."""
     body, bold, _ = fonts
     canvas = Image.new("RGB", (W, H), BG)
@@ -154,12 +132,8 @@ def _stream_frame(
         y += LINE_H
     y += 10
 
-    draw.text(
-        (PAD, y),
-        "stream — deltas land in their channel; tags never leak through",
-        fill=CYAN,
-        font=bold,
-    )
+    draw.text((PAD, y), "stream — deltas land in their channel; tags never leak through",
+              fill=CYAN, font=bold)
     y += LINE_H + 4
 
     draw.text((PAD, y), "delta.reasoning_content", fill=YELLOW, font=bold)
@@ -232,16 +206,9 @@ def build_frames(fonts, data: dict, model_name: str) -> tuple[list[Image.Image],
         ("streamed frames concatenated == the one-shot message (tested as an axiom)", DIM, "body"),
         ("cost: ~0.11 µs/token; a delta that might complete a tag is held, not shown", DIM, "body"),
     ]
-    frames.append(
-        _stream_frame(
-            fonts,
-            model_name,
-            reasoning,
-            content,
-            cursor_on=False,
-            tail=finish_frame,
-        )
-    )
+    frames.append(_stream_frame(
+        fonts, model_name, reasoning, content, cursor_on=False, tail=finish_frame,
+    ))
     durations.append(5200)
     return frames, durations
 

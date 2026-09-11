@@ -1,7 +1,7 @@
 """Streaming tool-call extraction: the markup, not the model, does the talking.
 
 A :class:`ToolParser` watches the content channel (reasoning already stripped
-by :mod:`~rapid_llm.serving.reasoning`) and pulls structured tool calls out of
+by :mod:`~rapid_llm.engine.reasoning`) and pulls structured tool calls out of
 the markup as it arrives — a call's first delta carries its id and name, the
 arguments stream as raw JSON fragments, and text outside any call keeps
 flowing as ordinary content; nothing waits for the closing markup.
