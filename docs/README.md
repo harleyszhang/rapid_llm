@@ -6,7 +6,7 @@
 
 - [CPU 支持](cpu.md)：安装、设备选择、已验证路径和限制。
 - [优化特性与实测](optimization_features.md)：各项优化的作用、执行图、开关对照、复现命令和已知负收益。
-- [连续批处理](continuous_batching.md)：请求调度、分页 KV、前缀复用和抢占。
+- [连续批处理](continuous_batching.md)：请求调度、分页 KV、前缀复用、抢占和 CPU KV offload。
 - [在线服务](online_serving.md)：HTTP 接口、流式输出和进程模型。
 - [张量并行](tensor_parallel.md)、[专家并行](expert_parallel.md)与[数据并行](data_parallel.md)：权重切分、MoE 路由和请求分发。文中的 GPU 实测不适用于 CPU。
 - [量化](quantization.md)：存储格式和加载方式；CPU 支持范围以 CPU 文档为准。

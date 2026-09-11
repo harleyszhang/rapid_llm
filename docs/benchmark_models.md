@@ -96,7 +96,7 @@ tile 配置来自 autotune 落盘表（`~/.cache/rapid_llm/autotune/w4a16_matmul
 python -m pytest tests/kernels/test_quantization.py tests/kernels/test_w4a16_accuracy.py -v
 
 # 先把 w4a16 的 tile 配置调到本机（落盘 ~/.cache/rapid_llm/autotune/）
-python scripts/autotune_collect.py --ops w4a16_matmul \
+python -m scripts.verify.autotune_collect --ops w4a16_matmul \
     --extra-shape 1x4096x4096 --extra-shape 8x4096x4096 \
     --extra-shape 64x4096x4096 --extra-shape 512x4096x4096
 
@@ -376,7 +376,7 @@ python benchmarks/suites/run.py models --dry-run   # 打印将执行的完整命
 python benchmarks/suites/run.py models             # 全套实跑（tee 到 docs/benchmark_logs/）
 ```
 
-### eager vs CUDA graph（benchmarks/bench_e2e.py）
+### eager vs CUDA graph（benchmarks/suites/run.py e2e）
 
 **测试环境**：单卡 NVIDIA A10 22 GiB（sm86），torch 2.11.0+cu129 / triton 3.6.0 / Python 3.12（2026-08-31）。**推理负载**：batch 8、greedy、`max_gen_len=256`，`--mode both` 同时测 eager 与 CUDA graph；多模态为 8 请求串行口径（TTFT 取每请求首 token 均值、TPS 为串行循环聚合吞吐）。**日志**：`docs/benchmark_logs/engine/e2e_<模型>_b<batch>_g<gen>_<版本>.json`（如 `e2e_Qwen2.5-1.5B_b8_g128_v09_release.json`，含环境 meta）。一次覆盖全部四种受支持架构、三条优化路径与两个多模态模型：
 
@@ -407,10 +407,10 @@ python benchmarks/suites/run.py models             # 全套实跑（tee 到 docs
 ```bash
 python benchmarks/suites/run.py e2e --out /tmp/e2e             # 全部模型
 PYTHON=/home/honggao/projects/.venv/bin/python benchmarks/suites/run.py e2e
-.venv/bin/python benchmarks/bench_e2e.py --model-dir my_weight/Qwen3-14B-AWQ \
-    --greedy --mode both --json out.json                     # 单模型
-PYTHONPATH=. python benchmarks/bench_e2e.py \
-    --model-dir my_weight/Qwen3-VL-4B-Instruct --greedy      # 多模态（自动切串行口径）
+.venv/bin/python -m rapid_llm.benchmark.one_batch \
+    --model my_weight/Qwen3-14B-AWQ --batch-sizes 8 --verify # 单模型（graph / eager 各一轮）
+python examples/benchmark_vision.py --engine rapid_llm \
+    --model my_weight/Qwen3-VL-4B-Instruct                   # 多模态（逐请求串行口径）
 ```
 
 ### DeepSeek 多层推理三方对比（含 MoE，examples/benchmark.py，rapid_llm vs transformers vs vLLM）
@@ -674,7 +674,7 @@ eager 路径的 GPU 计算本身没有变化，TPOT 从 15.04 ms 降到 13.55 ms
 
 13，[`TextGenerator`](rapid_llm/engine/generator.py) 默认开启 CUDA Graph 捕获（多模态显式关闭）。KV 显存预算里为 graph 捕获预留 workspace（[`estimate_capture_workspace`](rapid_llm/executor/cuda_graph.py)），并把捕获 batch 上界钳到请求表容量，修复 `0.9 gpu-util + graph capture` 场景下的 OOM。
 
-与 HuggingFace transformers 的对比（NVIDIA A10 23 GB / **Qwen2.5-1.5B-Instruct** fp16 / batch=8 / max_gen_len=256 / greedy，指标口径同上）。HF 侧由 [`bench_e2e.py --backend hf`](benchmarks/bench_e2e.py) 测量：左 padding、不套 chat template、`min_new_tokens` 强制跑满 256 步、sdpa attention：
+与 HuggingFace transformers 的对比（NVIDIA A10 23 GB / **Qwen2.5-1.5B-Instruct** fp16 / batch=8 / max_gen_len=256 / greedy，指标口径同上）。HF 侧由 [`rapid_llm.benchmark.offline_throughput --engine transformers`](rapid_llm/benchmark/offline_throughput.py) 测量：左 padding、不套 chat template、`min_new_tokens` 强制跑满 256 步、sdpa attention：
 
 | 引擎                             | TTFT (ms) | TPOT (ms) | TPS (token/s) | 生成总时间 (s) |
 |----------------------------------|-----------|-----------|---------------|---------------|
@@ -686,7 +686,7 @@ eager 路径的 GPU 计算本身没有变化，TPOT 从 15.04 ms 降到 13.55 ms
 
 > 0.5B 上的历史对照（同口径）：graph 优化前 TPOT 5.54 ms / TPS 1433，10-13 项后 TPOT 3.77 ms / TPS 2096（3.94x），已逼近 0.5B fp16 权重带宽下限 3.46 ms（1260 MB / 600 GB/s）。
 
-精度验证（[`scripts/golden_tokens.py`](scripts/golden_tokens.py)）：8 个 greedy 用例覆盖单条 / 等长 batch / 混合长度 batch × 有无 repetition penalty，优化前后逐字节完全一致。
+精度验证（[`scripts/verify/golden_tokens.py`](scripts/verify/golden_tokens.py)）：8 个 greedy 用例覆盖单条 / 等长 batch / 混合长度 batch × 有无 repetition penalty，优化前后逐字节完全一致。
 
 14，配置 / 权重加载 / 模型注册三个模块重构，参照 vLLM 的分层：
 
@@ -726,16 +726,18 @@ eager 路径的 GPU 计算本身没有变化，TPOT 从 15.04 ms 降到 13.55 ms
 复现命令：
 
 ```bash
-# rapid_llm 端到端指标（默认 my_weight/Qwen2.5-0.5B，--model-dir 切换模型）
-python benchmarks/bench_e2e.py --greedy --max-gen-len 256 --batch 8 --model-dir my_weight/Qwen2.5-1.5B-Instruct
+# rapid_llm 端到端指标（graph / eager 两档；--model 切换模型）
+python -m rapid_llm.benchmark.one_batch --model my_weight/Qwen2.5-1.5B-Instruct \
+    --batch-sizes 8 --output-len 256 --verify
 
-# HF transformers 基线（同 prompts、同指标口径，同一脚本换后端）
-python benchmarks/bench_e2e.py --backend hf --model-dir my_weight/Qwen2.5-1.5B-Instruct --max-gen-len 256 --batch 8
+# HF transformers 基线（同指标口径，同一后端框架换 arm）
+python -m rapid_llm.benchmark.offline_throughput --model my_weight/Qwen2.5-1.5B-Instruct \
+    --engine transformers --greedy --num-prompts 8 --random-output-len 256
 
 # 精度对照
-python scripts/golden_tokens.py --save /tmp/golden.json          # 优化前录制
-python scripts/golden_tokens.py --check /tmp/golden.json         # 优化后比对
-python scripts/golden_tokens.py --check /tmp/golden.json --cuda-graph
+python -m scripts.verify.golden_tokens --save /tmp/golden.json          # 优化前录制
+python -m scripts.verify.golden_tokens --check /tmp/golden.json         # 优化后比对
+python -m scripts.verify.golden_tokens --check /tmp/golden.json --cuda-graph
 ```
 
 ### 历史吞吐对比总表（旧脚本，仅供参考）

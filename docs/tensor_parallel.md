@@ -157,7 +157,7 @@ total                         1464     29.2 MB   (data 29.2 MB, control 10.0 KB)
 
 这本账也让一类新的断言成为可能（`tests/tools/test_collective_stats.py`）：把词表从 4096 放大到 32768，采样流量必须**一个字节都不变**。这是区分"分片采样"和"gather 后采样"的唯一检查。
 
-GIF 由 `scripts/gen_collective_gif.py` 生成，驱动的是真实 tp=2 引擎，每个字节都是量出来的（唯一一条算术而非测量的是"if gathered"那一行，它描述的是另一种实现）。
+GIF 由 `python -m scripts.visualize.gen_collective_gif` 生成，驱动的是真实 tp=2 引擎，每个字节都是量出来的（唯一一条算术而非测量的是"if gathered"那一行，它描述的是另一种实现）。
 
 ## 测试规模
 
