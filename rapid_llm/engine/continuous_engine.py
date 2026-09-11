@@ -48,6 +48,7 @@ from ..tools.observability import EngineMetrics, Tracer
 from ..utils.env_compat import getenv
 from ..utils.logger import get_logger
 from .detokenizer import IncrementalDetokenizer
+from .kv_offload import OffloadingManager
 from .ngram_proposer import NgramProposer
 from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams
@@ -268,6 +269,10 @@ class ContinuousBatchingEngine:
             whose tokens fill in on the first :meth:`step` after the encode
             lands, so a large prompt no longer stalls the engine loop (or the
             step cadence) for its tens of milliseconds of encoding.
+        offloading: A CPU tier whose blocks promote into the GPU pool, built by
+            the caller around the executor's cache (see
+            :class:`~rapid_llm.engine.kv_offload.base.OffloadingManager`).
+            ``None`` (the default) keeps the engine's KV GPU-only.
 
     Raises:
         NotImplementedError: The checkpoint is multimodal — vision prefill
@@ -282,6 +287,7 @@ class ContinuousBatchingEngine:
         *,
         pipeline: bool | None = None,
         async_tokenize: bool = False,
+        offloading: OffloadingManager | None = None,
     ) -> None:
         if engine.model_runner.spec.is_multimodal:
             raise NotImplementedError(
@@ -350,8 +356,9 @@ class ContinuousBatchingEngine:
         # flight; the scheduler hands out exactly those slots, and pages out of a
         # pool sized by the cache the executor actually profiled.
         self.scheduler = Scheduler(
-            config, self._executor.num_slots, self._executor.num_kv_blocks or None
+            config, self._executor.num_slots, self._executor.num_kv_blocks or None, offloading
         )
+        self._offloading = offloading
 
         self._detokenizers: dict[str, IncrementalDetokenizer] = {}
         self._request_ids = itertools.count()
@@ -716,6 +723,19 @@ class ContinuousBatchingEngine:
             or bool(self._tokenizing)
         )
 
+    def _await_offloaded_stores(self) -> None:
+        """Order this step's writes behind any store still reading the cache.
+
+        A store reads GPU blocks in place, so a block the pool has just reused
+        must not be overwritten before the copy lands. The wait goes on the
+        current stream — every launch of this step queues behind it — and costs
+        nothing when offloading is off or no store is in flight.
+        """
+        if self._offloading is None:
+            return
+        for event in self._offloading.pending_store_events():
+            torch.cuda.current_stream().wait_event(event)
+
     @torch.inference_mode()
     def step(self) -> list[Request]:
         """Run one engine step and return the requests it advanced.
@@ -730,6 +750,7 @@ class ContinuousBatchingEngine:
             the launches, which is the latency the mode trades for overlap.
         """
         self._collect_tokenized()
+        self._await_offloaded_stores()
         if self._pipeline:
             return self._step_pipelined()
         return self._step_synchronous()

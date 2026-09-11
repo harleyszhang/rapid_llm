@@ -23,7 +23,7 @@ from collections.abc import Iterator, MutableSequence, Sequence
 from dataclasses import dataclass, field
 
 from .block_pool import BlockPool, KVCacheBlock
-from .kv_cache_spec import KVCacheConfig, KVCacheCoordinator, KVCacheGroup
+from .kv_cache_spec import KVCacheConfig, KVCacheCoordinator, KVCacheGroup, SlidingWindowSpec
 
 #: Tokens per prefix-cache block; 16 mirrors vLLM's default page granularity.
 #: It lives here rather than on the scheduler because everyone who computes a
@@ -303,7 +303,7 @@ class PrefixCache:
         adopted = match.blocks if match is not None and match.num_tokens else None
         return self.coordinator.allocate(request_id, num_tokens, adopted)
 
-    def commit(self, request_id: str, num_computed_tokens: int) -> None:
+    def commit(self, request_id: str, num_computed_tokens: int) -> list[tuple[int, int]]:
         """Index the request's blocks whose K/V the model has actually written.
 
         The token count must be *executed*, not merely scheduled. Under a
@@ -311,12 +311,23 @@ class PrefixCache:
         advances when a chunk is planned, one engine step before its K/V exists,
         and a block indexed at planning time would be handed to the next
         admission as readable rows the model had not written yet.
+
+        Returns:
+            The blocks that just became indexable, as ``(block_id, block_hash)``
+            pairs — what an offloading tier mirrors down. A pair is reported
+            exactly once, the step its hash first appears, and only for the
+            offloadable group (see :attr:`offloadable_group`); the common
+            decode step, where no block completed, reports nothing.
         """
         state = self._sequences.get(request_id)
         if state is None or num_computed_tokens <= state.num_cached_tokens:
-            return
-        self.coordinator.cache_blocks(request_id, state.block_hashes, num_computed_tokens)
+            return []
+        fresh = self.coordinator.cache_blocks(request_id, state.block_hashes, num_computed_tokens)
         state.num_cached_tokens = num_computed_tokens
+        group = self.offloadable_group
+        if group is None:
+            return []
+        return [(block_id, key) for group_id, block_id, key in fresh if group_id == group]
 
     def free(self, request_id: str) -> None:
         """Release every block a request holds and stop tracking it."""
@@ -388,6 +399,23 @@ class PrefixCache:
     def groups(self) -> tuple[KVCacheGroup, ...]:
         """The KV cache groups this cache allocates for, in group order."""
         return self.config.groups
+
+    @property
+    def offloadable_group(self) -> int | None:
+        """The group an offloading tier may mirror, or ``None``.
+
+        Offloading copies whole blocks by content hash, which presumes a block
+        stays valid for the life of every prefix that hash matches. That holds
+        for the single group of a homogeneous full-attention (or MLA) config;
+        a sliding-window group's blocks age out, and a multi-group config
+        would need every group mirrored before a prefix could be restored.
+        v0.12.0 supports the first case only, and answers ``None`` for the
+        rest — the scheduler then runs exactly as it did without a tier.
+        """
+        groups = self.config.groups
+        if len(groups) != 1 or isinstance(groups[0].spec, SlidingWindowSpec):
+            return None
+        return 0
 
     @property
     def hit_rate(self) -> float:

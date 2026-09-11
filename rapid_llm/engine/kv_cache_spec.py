@@ -547,7 +547,7 @@ class KVCacheCoordinator:
 
     def cache_blocks(
         self, request_id: str, block_hashes: Sequence[int], num_computed_tokens: int
-    ) -> None:
+    ) -> list[tuple[int, int, int]]:
         """Index the request's blocks that are now fully computed.
 
         Only whole blocks below ``num_computed_tokens`` are indexed, and only
@@ -558,10 +558,17 @@ class KVCacheCoordinator:
         indexed before its K/V is written would be offered to the next
         admission as readable rows, and the reader would attend over whatever
         was in the cache before.
+
+        Returns:
+            The blocks that actually gained their hash, as
+            ``(group_id, block_id, block_hash)`` triples in indexing order —
+            what an offloading tier mirrors down. Empty on the common decode
+            step, where nothing new became indexable.
         """
         state = self._requests.get(request_id)
         if state is None or not state.per_group:
-            return
+            return []
+        fresh: list[tuple[int, int, int]] = []
         for index, group in enumerate(self.groups):
             spec = group.spec
             hashes = spec.group_block_hashes(block_hashes, self.hash_block_size)
@@ -572,8 +579,15 @@ class KVCacheCoordinator:
             blocks = state.per_group[index][start:full]
             if len(blocks) < full - start:
                 continue  # blocks not allocated yet; a later step will index them
+            gained = [
+                (block.block_id, block_hash)
+                for block, block_hash in zip(blocks, hashes[start:full], strict=True)
+                if block.block_hash is None
+            ]
             self.pool.cache_full_blocks(blocks, hashes[start:full])
+            fresh.extend((index, block_id, block_hash) for block_id, block_hash in gained)
             state.num_cached[index] = full
+        return fresh
 
     def free(self, request_id: str) -> None:
         """Release everything *request_id* holds, tail blocks first.
