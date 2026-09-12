@@ -77,6 +77,12 @@ device-side 回喂使 `seq_lens` 用乐观长度），short 下它干净即为�
 所以改为让**路由不随 graph 开关变化**：graph replay 与 eager 本身已验证逐位一致
 （捕获时 logit diff 0.000e+00），阈值一致即可保证两者输出一致。
 
+> **2026-09-11 注**：本段对 EXTEND 的机制描述已过时——packed stage-1（默认开启）下
+> extend 的 stage-1 也走 tensor core `tl.dot` + fp32 累加，不再存在“fp32 向量 GEMV”；
+> 逐头版（`RAPID_LLM_PACKED_DECODE=0` 或 group 不满足打包条件）才是 fp32 逐元素乘加。
+> 两条 kernel 仍非逐位等价，但默认路径下的差异实为 tl.dot 归约顺序层面的浮点重结合
+> （bf16 6.5e-3 / fp8 6.6e-3），见 [`quantization.md` 分块预填充实测](../../../quantization.md#分块预填充下的-fp8-kv-cache-数值实测)。
+
 ```python
 # 修复前
 cap = max(manager.batch_sizes, default=0) if manager else 0
