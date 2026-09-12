@@ -349,7 +349,8 @@ step():
      S3 decode 批 = 已完成 prefill 的运行集
   ② 引擎把调度结果翻译成 _Work 列表:
      chunk 按"槽里是否已有该序列的 KV"分流 — 首块走 PREFILL 网格（纯 grid 内自注意力），
-     续块必须走 EXTEND（逐 token 成行、读取全部历史，否则已算出的前缀被丢弃）
+     续块按行数分流：短续块走 EXTEND（逐 token 成行、读取全部历史，可重放 decode graph），
+     长续块走 chunked prefill kernel 网格（tensor-core 分块，KV 读槽内缓存行；前缀不丢）
      + DECODE pass（输入 token 即上一步采样出、已在主机上的那个）
   ③ executor.execute(plan): copy_prefix → forward（graph replay 或 eager）→ sample_batched
   ④ _harvest（每步唯一的同步点）: 读回 token → 增量 detokenize → EOS / 长度 / 重复判定

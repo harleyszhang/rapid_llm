@@ -4,7 +4,7 @@
 回归套件 [`tests/evals/gsm8k.py`](../../../tests/evals/gsm8k.py)（同一份
 `build_prompts` / `score`），与 vLLM `tests/evals/gsm8k` 的口径也一致，三边数字可直接对比。
 
-三个臂，同一口径不同引擎：
+三个脚本，同一口径不同引擎：
 
 | 脚本 | 引擎 | 说明 |
 | --- | --- | --- |
