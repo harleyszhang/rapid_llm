@@ -1,0 +1,53 @@
+
+=== fp8-chunked (passes={'PREFILL': 28}) vs fp8-extend (passes={'PREFILL': 4, 'EXTEND': 24}) ===
+  short    (10 tok): 32/32 一致 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+  medium   (158 tok): 32/32 一致 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+    tok[7]: 24231 vs 315
+  long-a   (3501 tok): 7/32 一致, 首差 @ 位置 7 | 一致段 maxΔtop1=0.7004 maxΔcommon=1.1511 | 首步 top16 重叠=1.00 Δtop1=0.7004 Δcommon=0.9246
+  long-b   (3001 tok): 32/32 一致 | 一致段 maxΔtop1=0.3661 maxΔcommon=0.8743 | 首步 top16 重叠=1.00 Δtop1=0.3661 Δcommon=0.3661
+
+=== fp8-chunked (passes={'PREFILL': 28}) vs bf16-chunked (passes={'PREFILL': 28}) ===
+    tok[2]: 374 vs 11
+  short    (10 tok): 2/32 一致, 首差 @ 位置 2 | 一致段 maxΔtop1=0.0383 maxΔcommon=1.5867 | 首步 top16 重叠=0.88 Δtop1=0.0383 Δcommon=1.5867
+    tok[1]: 374 vs 1521
+  medium   (158 tok): 1/32 一致, 首差 @ 位置 1 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+    tok[0]: 264 vs 576
+  long-a   (3501 tok): 0/32 一致, 首差 @ 位置 0 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=0.06 Δtop1=0.0107 Δcommon=2.1357
+    tok[7]: 7600 vs 11221
+  long-b   (3001 tok): 7/32 一致, 首差 @ 位置 7 | 一致段 maxΔtop1=0.7788 maxΔcommon=5.8460 | 首步 top16 重叠=0.12 Δtop1=0.7788 Δcommon=0.7788
+
+=== fp8-chunked (passes={'PREFILL': 28}) vs bf16-extend (passes={'PREFILL': 4, 'EXTEND': 24}) ===
+    tok[2]: 374 vs 11
+  short    (10 tok): 2/32 一致, 首差 @ 位置 2 | 一致段 maxΔtop1=0.0383 maxΔcommon=1.5867 | 首步 top16 重叠=0.88 Δtop1=0.0383 Δcommon=1.5867
+    tok[1]: 374 vs 1521
+  medium   (158 tok): 1/32 一致, 首差 @ 位置 1 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+    tok[0]: 264 vs 576
+  long-a   (3501 tok): 0/32 一致, 首差 @ 位置 0 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=0.06 Δtop1=0.0930 Δcommon=2.0320
+    tok[7]: 7600 vs 11221
+  long-b   (3001 tok): 7/32 一致, 首差 @ 位置 7 | 一致段 maxΔtop1=0.6626 maxΔcommon=5.9702 | 首步 top16 重叠=0.12 Δtop1=0.6626 Δcommon=0.6626
+
+=== fp8-extend (passes={'PREFILL': 4, 'EXTEND': 24}) vs bf16-chunked (passes={'PREFILL': 28}) ===
+    tok[2]: 374 vs 11
+  short    (10 tok): 2/32 一致, 首差 @ 位置 2 | 一致段 maxΔtop1=0.0383 maxΔcommon=1.5867 | 首步 top16 重叠=0.88 Δtop1=0.0383 Δcommon=1.5867
+    tok[1]: 374 vs 1521
+  medium   (158 tok): 1/32 一致, 首差 @ 位置 1 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+    tok[0]: 264 vs 576
+  long-a   (3501 tok): 0/32 一致, 首差 @ 位置 0 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=0.06 Δtop1=0.7111 Δcommon=1.3361
+    tok[7]: 7600 vs 11221
+  long-b   (3001 tok): 7/32 一致, 首差 @ 位置 7 | 一致段 maxΔtop1=0.4127 maxΔcommon=6.1921 | 首步 top16 重叠=0.12 Δtop1=0.4127 Δcommon=0.6627
+
+=== fp8-extend (passes={'PREFILL': 4, 'EXTEND': 24}) vs bf16-extend (passes={'PREFILL': 4, 'EXTEND': 24}) ===
+    tok[2]: 374 vs 11
+  short    (10 tok): 2/32 一致, 首差 @ 位置 2 | 一致段 maxΔtop1=0.0383 maxΔcommon=1.5867 | 首步 top16 重叠=0.88 Δtop1=0.0383 Δcommon=1.5867
+    tok[1]: 374 vs 1521
+  medium   (158 tok): 1/32 一致, 首差 @ 位置 1 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+    tok[0]: 264 vs 576
+  long-a   (3501 tok): 0/32 一致, 首差 @ 位置 0 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=0.06 Δtop1=0.6074 Δcommon=1.2324
+    tok[7]: 7600 vs 11221
+  long-b   (3001 tok): 7/32 一致, 首差 @ 位置 7 | 一致段 maxΔtop1=0.3087 maxΔcommon=6.3163 | 首步 top16 重叠=0.12 Δtop1=0.2964 Δcommon=0.7964
+
+=== bf16-chunked (passes={'PREFILL': 28}) vs bf16-extend (passes={'PREFILL': 4, 'EXTEND': 24}) ===
+  short    (10 tok): 32/32 一致 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+  medium   (158 tok): 32/32 一致 | 一致段 maxΔtop1=0.0000 maxΔcommon=0.0000 | 首步 top16 重叠=1.00 Δtop1=0.0000 Δcommon=0.0000
+  long-a   (3501 tok): 32/32 一致 | 一致段 maxΔtop1=0.1037 maxΔcommon=0.2295 | 首步 top16 重叠=1.00 Δtop1=0.1037 Δcommon=0.1463
+  long-b   (3001 tok): 32/32 一致 | 一致段 maxΔtop1=0.1163 maxΔcommon=0.2491 | 首步 top16 重叠=0.94 Δtop1=0.1163 Δcommon=0.1337
