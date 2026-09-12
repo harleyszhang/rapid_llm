@@ -5,19 +5,6 @@ routed-plus-shared MoE and every TP split/collective, exercised through the
 real continuous engine on two ranks, against a teacher-forced transformers
 reference spread over the same cards.
 
-The budgets are drift budgets, not token-exact agreement, and that is a
-measured property of the model, not a concession: scripts/dsv2_layer_diff.py
-shows the prefill hidden states stay within ~6e-3 relative of the reference
-at every layer, while the BOS position — whose MoE output norm is ~1000x any
-other token's — turns one bf16 ULP into an 8.0 absolute spike, and near-tie
-router scores (~3e-4 probability apart) flip expert sets between any two
-faithful bf16 implementations. Greedy tokens therefore disagree on ~14% of
-steps with the reference while every layer remains in band. The budgets below
-are calibrated by scripts/dsv2_tp2_parity_probe.py on 2x A10 with roughly 2x
-separation from the observed noise; a systematic error (a wrong MLA
-absorption, a broken TP split, a missing YaRN mscale) pushes the mean and the
-max through them, not the odd token.
-
 Usage:
     pytest tests/golden/test_deepseek_v2_tp2.py
 
