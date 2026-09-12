@@ -44,6 +44,8 @@ python -m rapid_llm.cli --model-dir my_weight/Qwen3-0.6B --quantization fp8
 python -m rapid_llm.cli --model-dir my_weight/Qwen3-0.6B --kv-cache-dtype fp8
 ```
 
+chunked prefill 下同样可用：续块走 chunked kernel 的 fp8 反量化路径（与 decode 同一数值处理），实测见[分块预填充下的 fp8 KV cache 数值实测](#分块预填充下的-fp8-kv-cache-数值实测)。
+
 ### NVFP4 仅权重 4-bit
 
 ```bash
@@ -459,6 +461,58 @@ Qwen3-0.6B 的 token 级精度对比（A10，greedy decode，与[性能基准测
 python -m scripts.debug.quant_kv_error --model-dir $RAPID_LLM_MODELZOO/Qwen3/Qwen3-4B-Thinking-2507 \
     --max-gen-len 128 --gsm8k 500 --json docs/benchmark_logs/quantization/kv_fp8_error.json
 ```
+
+## 分块预填充下的 fp8 KV cache 数值实测
+
+fp8 KV 与 chunked prefill 打通后（续块不再被迫走 extend，`b660386`），续块走 chunked kernel 的 fp8 反量化路径。两层实验回答“路径切换是否改变数值语义、组合后精度代价是否变化”（NVIDIA H100 80GB HBM3，torch 2.13.0+cu130 / triton 3.7.1，2026-09-11）。
+
+**内核级隔离**（`scripts/debug/fp8_kv_chunked_kernel_parity.py`）：复刻长 prompt 尾块形状（P=3328、C=173、Qwen2.5-1.5B），同一份随机 K/V，chunked 与 extend 内核对拍，参考实现为 torch fp32：
+
+| 对比 | 相对误差 |
+|---|---|
+| chunked-fp8 vs torch 参考 | 4.20e-3 |
+| extend-fp8 vs torch 参考 | 4.16e-3 |
+| chunked vs extend（同一份 fp8 cache） | 6.58e-3 |
+| chunked vs extend（同一份 bf16 cache，对照） | 6.54e-3 |
+| fp8 vs bf16（同内核，量化本身漂移） | 2.61e-2 |
+| 尾行（生成首个 token 的行）chunked-fp8 vs extend-fp8 | 6.10e-5 |
+
+两条 fp8 路径之间的 6.58e-3 与 bf16 下换内核的 6.54e-3 同量级——**路径切换引入的是浮点重结合级别差异，与 fp8 无关**；2.61e-2 的 fp8/bf16 漂移是 e4m3 格式固有代价（与上一节 2.66e-2 RMS 相互印证）。
+
+**引擎级矩阵**（`scripts/debug/fp8_kv_chunked_precision.py`，Qwen2.5-1.5B-Instruct，greedy 32 token，四档 prompt × 2×2 配置 = {fp8, bf16} × {chunked, extend}）：
+
+- **修复的数值语义**（fp8-chunked vs fp8-extend）：short/medium 两档逐位一致，long-b 32/32 一致；long-a 7/32、首步 top-16 完全同集（重叠 1.00）、top-1 logprob 差 0.70、位置 7 翻转。passes 计数证实配置生效：chunked 侧 28 个 PREFILL；extend 侧 4 个 PREFILL + 24 个 EXTEND。
+- **bf16 对照**（bf16-chunked vs bf16-extend）：四档 **32/32 全部一致**，首步 logprob 差最大 0.12——**同一处内核差异在 bf16 下从不翻转 token**，在 fp8 下被放大约 7×（0.10 → 0.70）才越过翻转线。这排除了“修复引入新数值路径缺陷”：差异根因是两条 kernel 的浮点重结合，修复只是不再让 fp8 请求被迫绕行。
+- **量化误差 vs 路径差异**（fp8 vs bf16 同路径）：首差 0~7 token，长 prompt 首步 top-16 重叠低至 0.06——**与 dtype 相关的差异显著大于与路径相关的差异**。long-a 首步两条配置在 fp8 下选出的续写均合理（' a' 与 ' The'），不是退化输出。
+
+**“量化从哪一步介入”的一个易误读点**——取决于 pass 从哪里读 K/V：
+
+| pass | K/V 来源 | fp8 的本 pass 影响 |
+|---|---|---|
+| eager 首 chunk（plain 内核） | 本 pass 未量化张量 | 无（实测 fp8 vs bf16 首步逐位一致） |
+| prefill-graph 首 chunk（默认开启、宽度 ∈ `PREFILL_WIDTH_BUCKETS`） | 本 pass 刚写入的 cache 行 | 首步即介入 |
+| 续块（chunked kernel） | 前序 chunk 的 cache | 本 pass 即介入 |
+| decode / extend | cache | 一直如此 |
+
+prefill graph 的行为是设计使然（一份 graph 同时服务首块与续块，见 `PrefillGraphRunner` 文档串），与本次修复无关；`RAPID_LLM_PREFILL_GRAPH=0` 下可实测到首 chunk 的 fp8 vs bf16 首步逐位一致（归档中的 `*_nograph.json`）。
+
+**结论：修复本身对精度没有影响。** 可观测的 token 分叉是“两条路径浮点重结合差异被 fp8 量化台阶放大的确定性结果”（bf16 无感、fp8 长 prompt 偶发）；fp8 KV 的主要精度代价依旧是量化本身（上一节的 2.66e-2 RMS、GSM8K −2.8 pp）。
+
+复现：
+
+```bash
+# 内核级
+python -m scripts.debug.fp8_kv_chunked_kernel_parity
+# 引擎级：四个配置分别跑，再两两对比
+python -m scripts.debug.fp8_kv_chunked_precision --run fp8-chunked --out /tmp/prec_fp8_chunked.json
+python -m scripts.debug.fp8_kv_chunked_precision --run fp8-extend --out /tmp/prec_fp8_extend.json
+python -m scripts.debug.fp8_kv_chunked_precision --run bf16-chunked --out /tmp/prec_bf16_chunked.json
+python -m scripts.debug.fp8_kv_chunked_precision --run bf16-extend --out /tmp/prec_bf16_extend.json
+python -m scripts.debug.fp8_kv_chunked_precision --compare /tmp/prec_fp8_chunked.json \
+    /tmp/prec_fp8_extend.json /tmp/prec_bf16_chunked.json /tmp/prec_bf16_extend.json
+```
+
+原始输出：[`fp8_kv_chunked_20260911/`](benchmark_logs/quantization/fp8_kv_chunked_20260911/)
 
 ## 运行基准测试
 
