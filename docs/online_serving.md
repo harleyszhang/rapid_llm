@@ -69,6 +69,7 @@ CPU 服务使用 `pip install -e '.[serve]'`，启动时加 `--device cpu --max-
 | `--tensor-parallel-size` | `1` | 一份权重的 TP 切分数（切权重，装得下大模型） |
 | `--data-parallel-size` | `1` | 整模型副本数（每副本一卡起，买吞吐；与 TP 组成 dp×tp 网格） |
 | `--load-balancer` | `round_robin` | 请求怎么路由到副本：`round_robin` / `total_requests` / `total_tokens` |
+| `--engine-backend` | `thread` | 引擎后端：`thread` 为工作线程内运行（见[线程模型](#线程模型)），`process` 为独立 EngineCore 子进程（ZMQ IPC，需 pyzmq / msgpack，仅服务单副本） |
 
 `--max-num-seqs` 既是显存旋钮也是延迟旋钮：超过某个宽度之后，每 token 的成本不再下降，而单请求延迟还在涨。
 
@@ -102,6 +103,10 @@ rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 ```
 
 进程布局与历史实测见[数据并行](./data_parallel.md)。吞吐随工作负载和硬件变化，不保证线性扩展。
+
+### 进程后端：`--engine-backend process`
+
+引擎也可以整体搬进独立子进程（vLLM v1 式的切分）：父进程保留 tokenizer 与流式 detokenizer，子进程独占调度器与执行器，两侧只交换 token id——命令通道 ROUTER ↔ DEALER、输出通道 PUSH ↔ PULL，msgpack 帧加协议版本握手。[`EngineCoreClient`](../rapid_llm/engine/engine_core_client.py) 对外镜像 `AsyncLLMEngine` 的接口，OpenAI 层与所有端点行为不变；子进程崩溃会以 `EngineDeadError` 传播到所有打开的流。该后端只服务单副本（`--data-parallel-size > 1` 会被拒绝）。
 
 ## 不经 HTTP 直接用
 
