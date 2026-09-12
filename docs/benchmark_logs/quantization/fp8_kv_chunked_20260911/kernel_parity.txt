@@ -1,0 +1,23 @@
+P=3328 C=173  |ref|max=0.0186
+
+--- 对 torch 参考 (fp8 真值) ---
+  chunked-fp8 vs ref : 4.20e-03
+  extend-fp8  vs ref : 4.16e-03
+
+--- 对 torch 参考 (bf16 真值) ---
+  chunked-bf16 vs ref: 4.32e-03
+  extend-bf16  vs ref: 4.16e-03
+
+--- 两内核互比 (读同一输入) ---
+  fp8 : chunked vs extend: 6.58e-03
+  bf16: chunked vs extend: 6.54e-03
+
+--- 量化本身带来的漂移 (同内核) ---
+  chunked: fp8 vs bf16: 2.61e-02
+  extend : fp8 vs bf16: 2.61e-02
+
+最后一行 (row 172) 的逐头最大绝对差:
+  chunked-fp8 vs extend-fp8        6.10e-05
+  chunked-bf16 vs extend-bf16      6.10e-05
+  chunked-fp8 vs chunked-bf16      4.58e-04
+  extend-fp8 vs extend-bf16        4.27e-04
