@@ -65,6 +65,14 @@ Same shape for expert stacks: `create_weights(block)` returns a
 runs the expert contract the router expects. SKIP when the format is
 dense-only (NVFP4 currently is).
 
+KV-cache schemes answer two design questions up front: the scale
+granularity (per-token / per-head), and whether quantization happens on
+write or dequantization on read. State both in the scheme's doc section;
+`tests/kernels/test_fp8_kv_accuracy.py` is the accuracy pattern. Mixed
+precision (e.g. FP8 dense Linear + MXFP4 experts) composes through the
+per-prefix dispatch in `get_quant_method`, and needs its own e2e
+correctness row.
+
 ## Weight loading
 
 - Packed checkpoints arrive in vendor layouts; `adapt_packed_checkpoint`
@@ -111,6 +119,12 @@ there. Do not write Triton inline in the strategy layer:
    - A negative result is a result: NVFP4 weight-only loses on every
      tested shape and the docs say so. Publish the loss with its reason
      (e.g. e2m1 unpack cost per weight) instead of omitting the row.
+5. **Compatibility matrix**: the scheme × {TP, CUDA Graph, speculative
+   decoding} measured cell by cell, accuracy and performance both —
+   "should be fine" is not a cell. On the accuracy side the bar is a
+   stated perplexity degradation against the bf16 baseline on one fixed
+   set (e.g. W8A8/FP8-block ≤ 1%, W4A16 ≤ 2%, FP4-family ≤ 3%); adjust
+   to the measured baseline if needed, but a number is required.
 
 ## Finish
 

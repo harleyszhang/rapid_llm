@@ -12,6 +12,9 @@ dispatch tier above it (`dispatcher/`, `ops/interfaces.py`) stays torch-free
 and `kernels/__init__.py` re-exports lazily, which is what keeps a CPU-only
 install importable. Most kernels are reached through `dispatch()` behind a
 `KernelSpec` row; the few the engine calls directly are re-exported by name.
+Triton is the default kernel path; when it cannot express an op (inline PTX,
+special intrinsics, fine-grained memory control), `add-jit-kernel` covers the
+CUDA C++ JIT alternative and carries the full path-decision table.
 Correctness lives in `tests/kernels/` against `tests/reference.py`;
 measurement belongs to `benchmarks/kernels/` and the `kernel-microbenchmark`
 skill.

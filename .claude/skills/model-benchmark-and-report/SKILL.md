@@ -1,5 +1,5 @@
 ---
-name: benchmark-and-report
+name: model-benchmark-and-report
 description: Run engine-level benchmarks in rapid_llm and write the numbers into docs under the repository's evidence rules — device-separated tables, reproduction commands, JSON logs, and known regressions. Use when measuring a feature end to end, producing or reviewing a performance claim, updating benchmark docs or release notes, or re-recording the README GIFs.
 ---
 

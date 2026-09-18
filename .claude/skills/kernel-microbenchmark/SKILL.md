@@ -1,6 +1,6 @@
 ---
 name: kernel-microbenchmark
-description: Build, run and read rapid_llm GPU kernel microbenchmarks — Triton/torch kernels, cold-L2 timing, correctness gates before numbers, KV-cache pool fixtures, host-time measurement for the block allocator, SOL sanity checks, and feeding results back into autotune and dispatch.
+description: Build, run and read rapid_llm GPU kernel microbenchmarks — Triton/torch kernels, cold-L2 timing, correctness gates before numbers, KV-cache pool fixtures, host-time measurement for the block allocator, SOL sanity checks, and feeding results back into autotune and dispatch. Use when adding or changing a kernel benchmark, when a kernel performance number needs a reproduction-grade table, or when reviewing a kernel timing claim.
 ---
 
 # Kernel Microbenchmark

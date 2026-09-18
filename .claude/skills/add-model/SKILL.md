@@ -93,10 +93,19 @@ the text model's own translation. The placeholder scatter is
 padding silently. `qwen3_vl.py` is the reference; LLaVA shows the
 `USER: <image>` template variant.
 
+## Checkpoint sources
+
+Weights come from two mirrors — ModelScope inside CN, HuggingFace
+elsewhere — switched by env var or config, with a download-and-verify
+script per source. The two sources of one model must agree: identical
+weight checksums, or token-identical output on a shared prompt set.
+
 ## Step 4 — Verification ladder
 
 Climb in this order; each rung is cheaper than the one below it and
-catches a different class of error.
+catches a different class of error. The onboarding bar: greedy output
+agrees with transformers on ≥ 99% of tokens over the prompt set, with
+first-token logits max-abs-diff and KL divergence reported as numbers.
 
 1. `pytest tests/models/test_weight_mapping.py -k <new>` — translation
    rules are pure functions; get them green first.
@@ -113,7 +122,14 @@ catches a different class of error.
    sampling issue).
 5. Golden + accuracy: record a baseline with `scripts/golden_tokens.py`
    and run the eval tier — workflows are in the `write-test` skill.
-6. Numbers for docs: `benchmark-and-report` skill.
+6. Numbers for docs: `model-benchmark-and-report` skill.
+7. Record the un-optimized baseline (TTFT / TPOT / throughput) exactly
+   as it stands — the number must exist, not look good. Performance
+   work is the *next* phase and gets only a plan document here: fusion
+   candidates with expected gains and reference implementations, an
+   overlap proposal (which of SGLang's mechanisms, e.g. TBO, apply to
+   this framework), and a parallelism recommendation. That phase then
+   runs per the `optimize-model-performance` skill.
 
 ## Common failure modes
 
