@@ -1111,6 +1111,7 @@ class Scheduler:
         from .scheduler_ipc import (
             AbortRequest,
             AddRequest,
+            AddRequestBatch,
             RequestEvent,
             SchedulerEvents,
             ShutdownScheduler,
@@ -1120,13 +1121,17 @@ class Scheduler:
         )
 
         sent_tokens: dict[str, int] = {}
+        stream_outputs: dict[str, bool] = {}
         last_step_ms = 0.0
         stopping = False
         globally_active = False
 
         def apply(command) -> None:
             nonlocal stopping
-            if isinstance(command, AddRequest):
+            if isinstance(command, AddRequestBatch):
+                for request in command.requests:
+                    apply(request)
+            elif isinstance(command, AddRequest):
                 if stopping:
                     return
                 try:
@@ -1152,9 +1157,11 @@ class Scheduler:
                     )
                 else:
                     sent_tokens[command.request_id] = 0
+                    stream_outputs[command.request_id] = command.stream
             elif isinstance(command, AbortRequest):
                 self.abort(command.request_id)
                 sent_tokens.pop(command.request_id, None)
+                stream_outputs.pop(command.request_id, None)
             elif isinstance(command, UtilityRequest):
                 if command.method == "step_stats":
                     event_queue.put(
@@ -1223,6 +1230,9 @@ class Scheduler:
             last_step_ms = (time.monotonic() - started) * 1e3
             outputs = []
             for request in advanced:
+                stream = stream_outputs.get(request.request_id, True)
+                if not stream and not request.is_finished:
+                    continue
                 sent = sent_tokens.get(request.request_id, 0)
                 new_token_ids = tuple(request.output_token_ids[sent:])
                 if new_token_ids:
@@ -1230,6 +1240,7 @@ class Scheduler:
                 prompt_logprobs = None
                 if request.is_finished:
                     sent_tokens.pop(request.request_id, None)
+                    stream_outputs.pop(request.request_id, None)
                     if request.prompt_logprobs is not None:
                         prompt_logprobs = tuple(request.prompt_logprobs)
                 if new_token_ids or request.is_finished:
@@ -1245,7 +1256,7 @@ class Scheduler:
                     )
             if outputs:
                 event_queue.put(SchedulerEvents(outputs=tuple(outputs)))
-            elif self.has_unfinished_requests() or enable_dp_attention:
+            elif not advanced and (self.has_unfinished_requests() or enable_dp_attention):
                 time.sleep(0.001)
 
     def generate(

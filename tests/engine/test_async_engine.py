@@ -134,7 +134,7 @@ async def _collect(engine, prompt, **kwargs):
 
 
 def test_scheduler_protocol_version_is_pinned():
-    assert PROTOCOL_VERSION == 1
+    assert PROTOCOL_VERSION == 2
 
 
 async def test_generate_streams_until_the_request_finishes():

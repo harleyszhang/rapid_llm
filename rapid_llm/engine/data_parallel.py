@@ -31,6 +31,7 @@ from .scheduler_ipc import (
     PROTOCOL_VERSION,
     AbortRequest,
     AddRequest,
+    AddRequestBatch,
     ReplicaFailed,
     ReplicaReady,
     SchedulerEvents,
@@ -495,6 +496,31 @@ class DataParallelController:
             raise RuntimeError("DataParallelController has been shut down")
         if self._failure is not None:
             raise self._failure
+        if isinstance(command, AddRequestBatch):
+            request_ids = [request.request_id for request in command.requests]
+            with self._route_lock:
+                if len(set(request_ids)) != len(request_ids):
+                    raise ValueError("request ids in a batch must be unique")
+                duplicate = next(
+                    (request_id for request_id in request_ids if request_id in self._routes), None
+                )
+                if duplicate is not None:
+                    raise ValueError(f"request id {duplicate!r} is already active")
+                grouped: list[list[AddRequest]] = [[] for _ in range(self.data_parallel_size)]
+                for request in command.requests:
+                    token_ids = request.prompt_token_ids
+                    replica = self._select(len(token_ids), token_ids, request_id=request.request_id)
+                    self._routes[request.request_id] = _Route(replica)
+                    grouped[replica].append(request)
+            try:
+                for replica, requests in enumerate(grouped):
+                    if requests:
+                        self._send_replica(replica, AddRequestBatch(tuple(requests)))
+            except BaseException:
+                for request_id in request_ids:
+                    self._release(request_id)
+                raise
+            return
         if isinstance(command, AddRequest):
             token_ids = command.prompt_token_ids
             with self._route_lock:
@@ -595,10 +621,21 @@ class DataParallelController:
 
         with self._sync_lock:
             try:
-                for request_id, ids in zip(request_ids, token_ids, strict=True):
-                    self.send(
-                        AddRequest(request_id, tuple(ids), params, arrival_time=time.monotonic())
+                arrival_time = time.monotonic()
+                self.send(
+                    AddRequestBatch(
+                        tuple(
+                            AddRequest(
+                                request_id,
+                                tuple(ids),
+                                params,
+                                arrival_time=arrival_time,
+                                stream=params.logprobs is not None,
+                            )
+                            for request_id, ids in zip(request_ids, token_ids, strict=True)
+                        )
                     )
+                )
                 pending = set(request_ids)
                 while pending:
                     event = self.receive()

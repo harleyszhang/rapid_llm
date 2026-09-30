@@ -222,6 +222,36 @@ def test_an_eos_request_does_not_strand_the_process_event_loop():
     engine.shutdown()
 
 
+def test_non_streaming_event_loop_publishes_only_the_completed_output():
+    """Blocking callers receive one final event instead of one IPC message per token."""
+    engine = _build_engine([[_WORD], [_WORD + 1], [_EOS]])
+    commands: queue.Queue = queue.Queue()
+    events: queue.Queue = queue.Queue()
+    worker = threading.Thread(target=engine.run_event_loop, args=(commands, events))
+    worker.start()
+    commands.put(
+        AddRequest(
+            request_id="batch",
+            prompt_token_ids=(10, 11, 12),
+            sampling_params=SamplingParams(),
+            arrival_time=0.0,
+            stream=False,
+        )
+    )
+
+    event = events.get(timeout=2.0)
+    commands.put(ShutdownScheduler())
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert isinstance(event, SchedulerEvents)
+    assert len(event.outputs) == 1
+    assert event.outputs[0].new_token_ids == (_WORD, _WORD + 1)
+    assert event.outputs[0].finish_reason == "eos"
+    assert events.empty()
+    engine.shutdown()
+
+
 def test_dpa_event_loop_steps_an_idle_replica_until_the_global_wave_drains(monkeypatch):
     """A wake command makes an idle replica join peer forwards without local requests."""
     from rapid_llm.engine import scheduler as scheduler_module
