@@ -18,6 +18,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from ...utils.torch_compat import is_float8_e8m0fnu
 from .base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -58,7 +59,7 @@ def repack_mxfp4_pairs(packed: torch.Tensor) -> torch.Tensor:
 
 def e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
     """e8m0 scale table -> fp32 (each byte is ``2 ** (x - 127)``)."""
-    if scale.dtype == torch.float8_e8m0fnu:
+    if is_float8_e8m0fnu(scale.dtype):
         return scale.to(torch.float32)
     if scale.dtype == torch.uint8:
         return torch.exp2(scale.to(torch.int32) - 127)

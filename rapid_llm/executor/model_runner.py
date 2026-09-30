@@ -30,6 +30,7 @@ from ..kernels.dispatcher import step_prepare_for
 from ..models.config import ModelConfig
 from ..models.registry import ModelRegistry, ModelSpec
 from ..utils.logger import get_logger
+from ..utils.torch_compat import TORCH_ACCELERATOR_ERRORS, is_accelerator_oom
 from .attention_metadata import AttentionMetadata
 from .cuda_graph import (
     _PREFILL_GRAPH_ENV,
@@ -404,7 +405,7 @@ class ModelRunner:
                 manager.capture_seed()
             else:
                 manager.capture_all()
-        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
+        except TORCH_ACCELERATOR_ERRORS as exc:
             # A failed capture may leave a half-open graph; dropping the manager
             # is safe because replay state is only installed on success. An
             # allocation failure inside ``capture_end`` surfaces as a generic
@@ -413,10 +414,7 @@ class ModelRunner:
             # than the dense estimate the KV profiler reserved, so capturing a
             # full EP grid beside a profiled KV pool lands here. Anything that
             # is not an OOM is a real capture bug and must not be swallowed.
-            if (
-                not isinstance(exc, torch.cuda.OutOfMemoryError)
-                and "out of memory" not in str(exc).lower()
-            ):
+            if not is_accelerator_oom(exc):
                 raise
             logger.warning("CUDA graph capture ran out of memory; falling back to eager decode")
             captured = False
