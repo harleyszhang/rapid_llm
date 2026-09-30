@@ -136,7 +136,7 @@ assert stats.tally(Collective.ALL_GATHER).nbytes < 1024   # 关于流量的一�
 五个设计点：
 
 - **窗口式，不是全局的。** 没人开窗时那个 ContextVar 是空 tuple，埋点的代价就是这一个 `if`。测量因此天然是**有作用域的**——问的是"这一步花了多少"，而不是"进程启动以来累计多少"。
-- **打开的窗口存在 `ContextVar` 里，不是模块全局变量里。** 于是一个窗口只属于开它的那个线程和 asyncio task。DP 副本是并发推进的（`async_data_parallel.py`），窗口若共享，每个副本的 per-step 测量都会把兄弟副本的流量算进来——得到的是一个看起来完全合理、但恰好错了 DP 倍的数字。
+- **打开的窗口存在 `ContextVar` 里，不是模块全局变量里。** 于是一个窗口只属于开它的那个线程和 asyncio task。`DataParallelController` 管理的 DP 副本会并发推进，窗口若共享，每个副本的 per-step 测量都会把兄弟副本的流量算进来——得到的是一个看起来完全合理、但恰好错了 DP 倍的数字。
 - **窗口可嵌套，事件计入所有打开的窗口。** per-step 窗口套在 whole-run 窗口里，一趟就同时拿到两份数据，调用方不需要做减法。
 - **op 与 plane 是枚举，不是字符串。** 打错一个 op 名，字符串写法会安静地开出一行新账，让本该记录的那一行报 0——而"报 0"恰恰是这个模块唯一要回答的问题（这个通信到底有没有发生）。`Collective` 是封闭集合，plane 由 `Collective.plane` 给出：`broadcast_object` 是控制面（pickle 对象走 gloo），其余是数据面（张量走 NCCL）。二者是设计上互相交换的关系——花两个标量的控制流量换掉一次词表规模的 gather——所以按调用点打标签迟早会漂。报告、断言和 GIF 面板都从这一处取 plane。
 - **记账点在 world-of-one 早退之后。** 单卡下的 no-op collective 不搬字节，记它就是在量调用点而不是量线路。`tensor_model_parallel_broadcast_object_list` 的字节数需要第二次 pickle，所以只在有窗口打开时才算，并且**在广播之后**算——这样 follower 报的数就是 driver 发出去的数。

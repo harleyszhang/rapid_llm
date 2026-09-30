@@ -222,6 +222,41 @@ def test_an_eos_request_does_not_strand_the_process_event_loop():
     engine.shutdown()
 
 
+def test_dpa_event_loop_steps_an_idle_replica_until_the_global_wave_drains(monkeypatch):
+    """A wake command makes an idle replica join peer forwards without local requests."""
+    from rapid_llm.engine import scheduler as scheduler_module
+    from rapid_llm.engine.scheduler_ipc import WakeScheduler
+
+    class IdleScheduler:
+        planner = None
+
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def has_unfinished_requests(self) -> bool:
+            return False
+
+        def step(self):
+            self.steps += 1
+            return []
+
+    active = iter((1, 0))
+    monkeypatch.setattr(
+        scheduler_module,
+        "coordinate_forward_count_across_dp",
+        lambda local: next(active),
+    )
+    scheduler = IdleScheduler()
+    commands: queue.Queue = queue.Queue()
+    events: queue.Queue = queue.Queue()
+    commands.put(WakeScheduler())
+    commands.put(ShutdownScheduler())
+
+    Scheduler.run_event_loop(scheduler, commands, events, enable_dp_attention=True)
+
+    assert scheduler.steps == 1
+
+
 def _record(token_id: int, logprob: float = -0.1) -> PositionLogprobs:
     return PositionLogprobs(
         token_id=token_id,

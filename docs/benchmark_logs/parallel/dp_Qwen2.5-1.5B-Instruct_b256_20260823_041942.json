@@ -22,7 +22,7 @@
       "tps_per_gpu": 11034.4
     },
     {
-      "label": "DataParallelEngine dp=1",
+      "label": "DataParallelController dp=1",
       "replicas": 1,
       "batch": 256,
       "latency_s": 2.9840106833726168,
@@ -31,7 +31,7 @@
       "tps_per_gpu": 10981.2
     },
     {
-      "label": "DataParallelEngine dp=2",
+      "label": "DataParallelController dp=2",
       "replicas": 2,
       "batch": 256,
       "latency_s": 1.7921503856778145,

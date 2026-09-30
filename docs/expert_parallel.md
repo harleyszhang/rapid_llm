@@ -16,7 +16,7 @@ engine = Scheduler.from_pretrained(
 )
 ```
 
-CPU 调试时增加 `device="cpu"`，通信后端改为 Gloo。直接构造 `LLM` 不会创建多 rank 进程组；多卡入口应使用 `Scheduler.from_pretrained` 或 `DataParallelEngine`。
+CPU 调试时增加 `device="cpu"`，通信后端改为 Gloo。直接构造 `LLM` 不会创建多 rank 进程组；多卡入口应使用 `Scheduler.from_pretrained` 或 `DataParallelController`。
 
 ## 数据流（五阶段流水线）
 

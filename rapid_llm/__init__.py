@@ -14,10 +14,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .engine.async_data_parallel import AsyncDataParallelEngine
     from .engine.async_engine import AsyncLLMEngine, StreamedOutput
     from .engine.batch_planner import Request, SchedulerConfig
-    from .engine.data_parallel import DataParallelEngine
+    from .engine.data_parallel import DataParallelController
     from .engine.generator import TextGenerator, VisionGenerator
     from .engine.llm import LLM
     from .engine.llm_engine import LLMEngine
@@ -33,11 +32,10 @@ if TYPE_CHECKING:
 # same API without eagerly importing every implementation behind it.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "LLM": (".engine.llm", "LLM"),
-    "AsyncDataParallelEngine": (".engine.async_data_parallel", "AsyncDataParallelEngine"),
     "AsyncLLMEngine": (".engine.async_engine", "AsyncLLMEngine"),
     "CompletionOutput": (".engine.outputs", "CompletionOutput"),
     "Scheduler": (".engine.scheduler", "Scheduler"),
-    "DataParallelEngine": (".engine.data_parallel", "DataParallelEngine"),
+    "DataParallelController": (".engine.data_parallel", "DataParallelController"),
     "LLMEngine": (".engine.llm_engine", "LLMEngine"),
     "Request": (".engine.batch_planner", "Request"),
     "RequestOutput": (".engine.outputs", "RequestOutput"),
@@ -70,10 +68,9 @@ __version__ = "0.11.0"
 
 __all__ = [
     "LLM",
-    "AsyncDataParallelEngine",
     "AsyncLLMEngine",
     "CompletionOutput",
-    "DataParallelEngine",
+    "DataParallelController",
     "LLMEngine",
     "Request",
     "RequestOutput",

@@ -120,8 +120,8 @@
 | # | 问题 | 代码证据 | vLLM/SGLang 的做法 |
 | --- | --- | --- | --- |
 | 1 | **TP 是"镜像进程"不是引擎**:每个 rank 跑一个完整 `TextGenerator`(含 tokenizer/sampler/停止判断),rank 0 把 prompt tokens `dist.broadcast` 给 mirror worker 陪跑,输出丢弃 | `cli.py:_tp_mirror_worker` 的 broadcast 循环 | 调度只在 leader 算一次,广播的是**结构化 SchedulerOutput**,worker 只执行 forward(vLLM `WorkerProc`、SGLang leader scheduler) |
-| 2 | **TP 与持续批处理互斥**:调度/停止/detokenize 在每个 rank 独立执行,靠"相同输入→相同决策"隐式锁步;抢占/异步停止等 rank-local 决策一旦引入就 desync | `continuous_engine.py:from_pretrained` 直接拒绝 tp>1 | 调度决策单点,天然一致 |
-| 3 | **DP worker 是一次性批处理**:副本闲在两次 `generate()` 之间;请求不能中途加入;KV 每次 `free_all()` 全量重置 | `data_parallel.py:_dp_worker` 调 `LLM.generate()` | 副本是常驻 EngineCore 循环,请求随到随入(vLLM `DPEngineCoreProc`) |
+| 2 | **旧 TP 与持续批处理互斥**:调度/停止/detokenize 在每个 rank 独立执行,靠"相同输入→相同决策"隐式锁步;抢占/异步停止等 rank-local 决策一旦引入就 desync | 旧连续批处理入口直接拒绝 tp>1 | 调度决策单点,天然一致 |
+| 3 | **旧 DP worker 是一次性批处理**:副本闲在两次 `generate()` 之间;请求不能中途加入;KV 每次 `free_all()` 全量重置 | 旧 `data_parallel.py` worker 调 `LLM.generate()` | 副本改为常驻 scheduler process，请求随到随入 |
 | 4 | **DP×TP 组合死锁** | `data_parallel.py:99` `init_parallel(global_rank=dp_rank*tp_size, tp_size, dp_size)` 声明 dp×tp 的 NCCL world,但只 spawn 了 dp 个进程 | spawn 完整 dp×tp 进程网格(SGLang)或组内嵌套 spawn TP worker(vLLM) |
 
 **bug(3 条)**:
@@ -129,7 +129,7 @@
 | # | bug | 位置 | 修法 |
 | --- | --- | --- | --- |
 | 5 | `all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
-| 6 | DP 路由用字符数 `len(prompt)` 当 token 数;`LeastLoadedBalancer.select` 的 `estimated_tokens` 形参实际未用,语义是 total_requests 却起了误导名字 | `data_parallel.py:_route` / `dp_load_balancer.py` | 路由层用 tokenizer 计数(或显式 len/4 启发式并命名 honest);balancer 命名对齐 SGLang 语义 |
+| 6 | 旧 DP 路由用字符数 `len(prompt)` 当 token 数，least-loaded 的参数与语义不一致 | 旧 controller 路由与独立 policy 模块 | 路由层复用 token ids，policy 按 request id 精确记账 |
 | 7 | TP 采样 RNG 不同步(已修,保留监控) | `tensor_model_parallel_broadcast` 采样后广播 | — |
 
 ### 目标进程模型
@@ -149,7 +149,7 @@ DP:                    Frontend ── Router(P10) ── EngineCore 进程 × d
 
 ### 验收
 
-- TP=2 下 `ContinuousBatchingEngine` 可用(摘掉 `NotImplementedError`),golden 全绿;
+- TP=2 下连续批处理 `Scheduler` 可用，golden 全绿;
 - DP×TP(2×2)能起能推理(当前是死锁);
 - `AsyncLLMEngine`(HTTP 服务路径)+ TP=2 可跑;
 - 单卡默认路径仍单进程(冒烟:pdb 断点直达 Triton kernel 调用点);
@@ -664,7 +664,7 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
   - DP worker 从一次性 `generate()` 换成常驻引擎循环
   - 进程网格一次 spawn(dp×tp),不再分层拉起
 - **feat**
-  - TP 接入 ContinuousBatchingEngine,摘掉 `NotImplementedError`
+  - TP 接入连续批处理 `Scheduler`
   - `AsyncLLMEngine` 支持 TP
   - 并行 module 补齐(A11):`QKVParallelLinear`(q 与 kv 两段 fused 成一次 GEMM,按 head 边界切)、`VocabParallelEmbedding` / `ParallelLMHead` 按 vocab 切分、去中心化 log_softmax 分布式采样(标量 logsumexp 规约 + 局部 top-k gather,详见第四节)
 - **benchmark**

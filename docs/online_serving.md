@@ -91,7 +91,7 @@ CPU 服务使用 `pip install -e '.[serve]'`，启动时加 `--device cpu --max-
 
 ### 多卡：`--data-parallel-size` / `--tensor-parallel-size`
 
-`--tensor-parallel-size > 1` 时仍是上面这个形状（TP 的 follower 由引擎内部拉起，对服务层透明）。`--data-parallel-size > 1` 时换成 [`AsyncDataParallelEngine`](../rapid_llm/engine/async_data_parallel.py)：每个副本一个进程一条常驻引擎，负载均衡器逐请求选副本，一条**泵线程**把共享结果队列里的消息按 request_id 投回各协程的事件循环——协程仍然只看到同样的 `generate` / `generate_text` 接口，OpenAI 层和所有端点行为不变。
+`--tensor-parallel-size > 1` 时仍是上面这个形状（TP follower 由执行层拉起，对服务层透明）。`--data-parallel-size > 1` 时 `AsyncLLMEngine` 连接 [`DataParallelController`](../rapid_llm/engine/data_parallel.py)：controller 逐请求选择 replica，每个 replica leader 直接运行同一个 `Scheduler.run_event_loop()`。request manager 仍只有一张请求状态表和一个 event 接收循环，按 request id 把增量投回对应协程；DP rank、replica queue 和 DPA 锁步对 OpenAI 层不可见。
 
 ```bash
 # 两份整模型副本，按在飞 token 数路由

@@ -240,9 +240,9 @@ class DPBackend(Backend):
     def __init__(
         self, model_dir: str, *, data_parallel_size: int, max_num_seqs: int = 0, **engine_kwargs
     ):
-        from rapid_llm import DataParallelEngine
+        from rapid_llm import DataParallelController
 
-        self._engine = DataParallelEngine(
+        self._engine = DataParallelController(
             model=model_dir,
             data_parallel_size=data_parallel_size,
             max_num_seqs=max_num_seqs,

@@ -181,6 +181,7 @@ class AsyncLLMEngine:
         startup_timeout_s: float = _STARTUP_TIMEOUT_S,
         process_target: Callable = run_scheduler_process,
         process_context: Any = None,
+        controller: Any = None,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer
@@ -195,21 +196,28 @@ class AsyncLLMEngine:
         self._receiver: threading.Thread | None = None
         self._stop_receiver = threading.Event()
 
-        ctx = process_context or mp.get_context("spawn")
-        self._commands = ctx.Queue()
-        self._events = ctx.Queue()
-        self._process = ctx.Process(
-            target=process_target,
-            args=(model, self._engine_kwargs, self._commands, self._events),
-            daemon=False,
-            name="rapid-llm-scheduler",
-        )
-        try:
-            self._process.start()
-            self._ready = self._await_ready(startup_timeout_s)
-        except BaseException:
-            self._abort_launch()
-            raise
+        self._controller = controller
+        if controller is None:
+            ctx = process_context or mp.get_context("spawn")
+            self._commands = ctx.Queue()
+            self._events = ctx.Queue()
+            self._process = ctx.Process(
+                target=process_target,
+                args=(model, self._engine_kwargs, self._commands, self._events),
+                daemon=False,
+                name="rapid-llm-scheduler",
+            )
+            try:
+                self._process.start()
+                self._ready = self._await_ready(startup_timeout_s)
+            except BaseException:
+                self._abort_launch()
+                raise
+        else:
+            self._commands = None
+            self._events = None
+            self._process = None
+            self._ready = controller.scheduler_info
         self._state = _Lifecycle.RUNNING
 
     @classmethod
@@ -220,6 +228,29 @@ class AsyncLLMEngine:
         startup_timeout_s: float = _STARTUP_TIMEOUT_S,
         **engine_kwargs: Any,
     ) -> AsyncLLMEngine:
+        data_parallel_size = int(engine_kwargs.pop("data_parallel_size", 1))
+        load_balancer = engine_kwargs.pop("load_balancer", "round_robin")
+        enable_dp_attention = bool(engine_kwargs.pop("enable_dp_attention", False))
+        if data_parallel_size > 1:
+            from .data_parallel import DataParallelController
+
+            controller = DataParallelController(
+                model,
+                data_parallel_size=data_parallel_size,
+                load_balancer=load_balancer,
+                enable_dp_attention=enable_dp_attention,
+                startup_timeout_s=startup_timeout_s,
+                **engine_kwargs,
+            )
+            return cls(
+                model,
+                controller.tokenizer,
+                {},
+                startup_timeout_s=startup_timeout_s,
+                controller=controller,
+            )
+        if enable_dp_attention:
+            raise ValueError("DP attention requires data_parallel_size > 1")
         tokenizer = LLMEngine._load_tokenizer(model)
         return cls(model, tokenizer, engine_kwargs, startup_timeout_s=startup_timeout_s)
 
@@ -248,14 +279,14 @@ class AsyncLLMEngine:
                 return
             self._state = _Lifecycle.CLOSING
             with contextlib.suppress(Exception):
-                self._commands.put(ShutdownScheduler())
+                self._put_command(ShutdownScheduler())
             self._stop_receiver.set()
             receiver = self._receiver
 
         loop = asyncio.get_running_loop()
         if receiver is not None:
             await loop.run_in_executor(None, receiver.join, 5.0)
-        await loop.run_in_executor(None, self._join_process)
+        await loop.run_in_executor(None, self._join_backend)
         self._tracker.clear(None)
         self._close_channels()
         with self._lifecycle_lock:
@@ -291,7 +322,7 @@ class AsyncLLMEngine:
                 raise ValueError("the prompt is empty after tokenisation")
             with self._lifecycle_lock:
                 self._require_running()
-                self._commands.put(
+                self._put_command(
                     AddRequest(
                         request_id=request_id,
                         prompt_token_ids=tuple(token_ids),
@@ -329,7 +360,7 @@ class AsyncLLMEngine:
     def abort(self, request_id: str) -> None:
         with self._lifecycle_lock:
             if self._state is _Lifecycle.RUNNING:
-                self._commands.put(AbortRequest(request_id))
+                self._put_command(AbortRequest(request_id))
 
     def _await_ready(self, timeout_s: float) -> SchedulerReady:
         deadline = time.monotonic() + timeout_s
@@ -340,11 +371,11 @@ class AsyncLLMEngine:
                     f"scheduler process did not report ready within {timeout_s:.0f}s"
                 )
             try:
-                event = self._events.get(timeout=min(_OUTPUT_POLL_S, remaining))
+                event = self._get_event(timeout=min(_OUTPUT_POLL_S, remaining))
             except queue.Empty:
-                if not self._process.is_alive():
+                if not self._backend_is_alive():
                     raise RuntimeError(
-                        f"scheduler process exited with code {self._process.exitcode} during startup"
+                        f"scheduler process exited with code {self._backend_exitcode()} during startup"
                     ) from None
                 continue
             if isinstance(event, SchedulerFailed):
@@ -373,9 +404,9 @@ class AsyncLLMEngine:
         last_stats = time.monotonic()
         while not self._stop_receiver.is_set():
             try:
-                event = self._events.get(timeout=_OUTPUT_POLL_S)
+                event = self._get_event(timeout=_OUTPUT_POLL_S)
             except queue.Empty:
-                if not self._process.is_alive():
+                if not self._backend_is_alive():
                     self._on_process_exit()
                     return
             else:
@@ -385,7 +416,7 @@ class AsyncLLMEngine:
             now = time.monotonic()
             if now - last_stats >= _STATS_INTERVAL_S:
                 last_stats = now
-                self._commands.put(UtilityRequest(next(self._utility_ids), "step_stats"))
+                self._put_command(UtilityRequest(next(self._utility_ids), "step_stats"))
 
     def _handle_event(self, event) -> None:
         if isinstance(event, SchedulerFailed):
@@ -412,7 +443,7 @@ class AsyncLLMEngine:
         with self._lifecycle_lock:
             if self._state is not _Lifecycle.RUNNING:
                 return
-        self._mark_failed(f"exited unexpectedly with code {self._process.exitcode}")
+        self._mark_failed(f"exited unexpectedly with code {self._backend_exitcode()}")
 
     def _mark_failed(self, message: str) -> None:
         error = SchedulerProcessError(f"scheduler process failed: {message}")
@@ -431,8 +462,31 @@ class AsyncLLMEngine:
         if self._state is not _Lifecycle.RUNNING:
             raise RuntimeError(f"AsyncLLMEngine is {self._state.value}")
 
+    def _put_command(self, command) -> None:
+        if self._controller is not None:
+            self._controller.send(command)
+        else:
+            self._commands.put(command)
+
+    def _get_event(self, timeout: float):
+        if self._controller is not None:
+            return self._controller.receive(timeout)
+        return self._events.get(timeout=timeout)
+
+    def _backend_is_alive(self) -> bool:
+        if self._controller is not None:
+            return self._controller.is_alive()
+        return self._process.is_alive()
+
+    def _backend_exitcode(self):
+        if self._controller is not None:
+            return self._controller.exitcode
+        return self._process.exitcode
+
     def _abort_launch(self) -> None:
-        if self._process.is_alive():
+        if self._controller is not None:
+            self._controller.shutdown()
+        elif self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=_TERMINATE_GRACE_S)
             if self._process.is_alive():
@@ -440,7 +494,10 @@ class AsyncLLMEngine:
                 self._process.join(timeout=_TERMINATE_GRACE_S)
         self._close_channels()
 
-    def _join_process(self) -> None:
+    def _join_backend(self) -> None:
+        if self._controller is not None:
+            self._controller.shutdown()
+            return
         self._process.join(timeout=_JOIN_GRACE_S)
         if self._process.is_alive():
             logger.warning("scheduler process did not stop; terminating it")
@@ -452,6 +509,8 @@ class AsyncLLMEngine:
             self._process.join(timeout=_TERMINATE_GRACE_S)
 
     def _close_channels(self) -> None:
+        if self._controller is not None:
+            return
         for channel in (self._commands, self._events):
             with contextlib.suppress(Exception):
                 channel.close()

@@ -157,10 +157,8 @@ graph TB
 | [sampler.py](../rapid_llm/engine/sampler.py) | 采样：temperature / top-p / repetition penalty；`BatchedSamplingParams` 把逐请求参数整理成 `[batch, 1]` 张量，整批一次采样。**词表并行采样**基于恒等式 `log_softmax(x)_i = x_i − logsumexp(x)`（4.1 节展开），每行只需在 rank 间交换 2 个标量（对比 vLLM 的 all-gather 整份 logits）；top-p 候选池取各 rank 局部 top-k 的并集，通信量为 `O(k·tp)`，与词表大小无关 |
 | [stop_criteria.py](../rapid_llm/engine/stop_criteria.py) | 设备端停止判定：`StopCriteria` 用词表大小的 bool 查表代替 `torch.isin`，因此可以进入 CUDA graph；`load_stop_token_ids` 合并 tokenizer EOS 与 generation_config.json 的 eos 列表；另有文本级重复检测（数字归一化后匹配 128 字符尾窗） |
 | [detokenizer.py](../rapid_llm/engine/detokenizer.py) | 增量解码：`prefix_offset` / `read_offset` 双偏移窗口，摊销成本 O(1)；处理 SentencePiece 的 `▁` 与跨 token 的 UTF-8 序列 |
-| [async_engine.py](../rapid_llm/engine/async_engine.py) | asyncio 前端：引擎独占一个 worker 线程；协程只投递命令、经 `call_soon_threadsafe` 接收增量，不直接操作引擎。因此 worker 线程内部不需要加锁 |
-| [data_parallel.py](../rapid_llm/engine/data_parallel.py) | DP 协调器：N 个整模型副本进程，每个副本常驻一个 `Scheduler`，从队列领取请求；副本之间没有 NCCL 通信 |
-| [dp_load_balancer.py](../rapid_llm/engine/dp_load_balancer.py) | 纯策略对象：round_robin / total_requests / total_tokens / cache_aware。`needs_token_estimate` / `needs_token_ids` 两个标志声明各策略的输入需求，router 只为被实际用到的字段做 tokenize |
-| [async_data_parallel.py](../rapid_llm/engine/async_data_parallel.py) | DP 的 asyncio 前端：pump 线程把 mp.Queue 的消息调度回创建它的 event loop；消费者断开连接时 abort 对应请求，释放其 KV |
+| [async_engine.py](../rapid_llm/engine/async_engine.py) | asyncio request manager：父进程负责 tokenizer、增量 detokenization、请求状态和单一 event 接收循环；DP=1 直连 scheduler process，DP>1 连接 `DataParallelController`，两者使用相同 typed command/event |
+| [data_parallel.py](../rapid_llm/engine/data_parallel.py) | DP controller 与路由策略：拉起 DP × TP scheduler process 网格，维护 request→replica 映射和负载快照；round_robin / total_requests / total_tokens / cache_aware 在同一模块内按 request id 精确记账 |
 | [prefix_cache.py](../rapid_llm/engine/prefix_cache.py) | 块哈希链式前缀缓存（结构对标 vLLM BlockPool）：blake2b 哈希保证跨进程结果一致（DP router 与各副本因此能算出相同的块标识）；引用计数 + LRU，引用归零的块仍驻留供后续命中；容量上限防止缓存无限增长 |
 | [multimodal.py](../rapid_llm/engine/multimodal.py) | 多模态准备接口：`MultimodalPreparer` 调用 HF processor、套用 Qwen3-VL chat template，并复用 HF 参考实现计算 mrope 的 3D position ids |
 | [outputs.py](../rapid_llm/engine/outputs.py) | `RequestOutput` / `CompletionOutput`，结构对应 vLLM 的 outputs.py |

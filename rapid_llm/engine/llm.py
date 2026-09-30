@@ -63,7 +63,7 @@ class LLM(LLMEngine):
             drives the graph decision and is stored for introspection.
         data_parallel_size: Accepted only as ``1``. DP replicates the whole model
             across processes, which cannot be done from inside one of them; use
-            :class:`~rapid_llm.engine.data_parallel.DataParallelEngine`, which owns
+            :class:`~rapid_llm.engine.data_parallel.DataParallelController`, which owns
             the replicas and exposes the same ``generate``.
         kv_cache_dtype: KV-cache element type — ``"auto"`` (fp16) or an fp8
             spelling (``"fp8"`` / ``"fp8_e4m3"``), halving the cache footprint.
@@ -95,7 +95,7 @@ class LLM(LLMEngine):
             raise ValueError(
                 f"LLM is a single model replica and cannot host "
                 f"data_parallel_size={data_parallel_size}; use "
-                f"DataParallelEngine(model=..., data_parallel_size={data_parallel_size}) "
+                f"DataParallelController(model=..., data_parallel_size={data_parallel_size}) "
                 f"instead — it spawns one LLM per replica and routes requests to them"
             )
 

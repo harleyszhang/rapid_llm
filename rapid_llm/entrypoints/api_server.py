@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..engine.async_data_parallel import AsyncDataParallelEngine
 from ..engine.async_engine import AsyncLLMEngine, StreamedOutput
 from ..engine.reasoning import ReasoningSplitter, for_family
 from ..engine.sampler import PositionLogprobs, SamplingParams
@@ -52,8 +51,7 @@ from .protocol import (
 )
 
 if TYPE_CHECKING:
-    #: Both backends expose the same request-manager interface.
-    EngineBackend = AsyncLLMEngine | AsyncDataParallelEngine
+    EngineBackend = AsyncLLMEngine
 
 logger = get_logger(__name__)
 
@@ -136,15 +134,14 @@ class ServerConfig:
         prefix_cache_blocks: Optional prefix-cache capacity in 16-token blocks.
         enable_preemption: Allow recompute-based oversubscription of cache slots.
         data_parallel_size: Whole-model replicas serving this one endpoint,
-            combined with ``tensor_parallel_size`` into the usual
-            ``dp x tp`` GPU grid. Above 1 the lifespan builds an
-            :class:`~rapid_llm.engine.async_data_parallel.AsyncDataParallelEngine`
-            instead — the replicas multiply concurrent decode, which is what a
-            server is for; the fields above apply *per replica*.
+            combined with ``tensor_parallel_size`` into the usual ``dp x tp``
+            GPU grid. The request manager connects to a
+            :class:`~rapid_llm.engine.data_parallel.DataParallelController`
+            when this is greater than one.
         enable_dp_attention: Keep attention and KV cache local to each DP rank
             while pooling MoE tokens across the full DP x TP expert grid.
         load_balancer: Which replica each request is routed to, one of
-            :data:`~rapid_llm.engine.dp_load_balancer.LOAD_BALANCERS`.
+            :data:`~rapid_llm.engine.data_parallel.LOAD_BALANCE_POLICIES`.
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
@@ -566,55 +563,36 @@ def build_app(config: ServerConfig, engine: EngineBackend | None = None):
     @asynccontextmanager
     async def lifespan(_app):
         if state["engine"] is None:
+            engine_kwargs: dict[str, Any] = {
+                "max_seq_len": config.max_seq_len,
+                "max_num_seqs": config.max_num_seqs,
+                "max_num_batched_tokens": config.max_num_batched_tokens,
+                "enable_chunked_prefill": config.enable_chunked_prefill,
+                "max_chunk_size": config.max_chunk_size,
+                "max_gpu_num_blocks": config.max_gpu_num_blocks,
+                "use_cuda_graph": config.use_cuda_graph,
+                "quantization": config.quantization,
+                "tensor_parallel_size": config.tensor_parallel_size,
+                "enable_expert_parallel": config.enable_expert_parallel,
+                "kv_cache_dtype": config.kv_cache_dtype,
+                "enable_prefix_cache": config.enable_prefix_cache,
+                "prefix_cache_blocks": config.prefix_cache_blocks,
+                "enable_preemption": config.enable_preemption,
+            }
             if config.data_parallel_size > 1:
-                # ``device`` is deliberately absent: a replica's device is its
-                # position in the grid, and the coordinator loads no model.
-                logger.info(
-                    "loading %s for serving on %d replicas",
-                    config.model_dir,
-                    config.data_parallel_size,
-                )
-                state["engine"] = AsyncDataParallelEngine(
-                    model=config.model_dir,
-                    **({"device": "cpu"} if config.device == "cpu" else {}),
+                engine_kwargs.update(
                     data_parallel_size=config.data_parallel_size,
                     enable_dp_attention=config.enable_dp_attention,
                     load_balancer=config.load_balancer,
-                    max_seq_len=config.max_seq_len,
-                    max_num_seqs=config.max_num_seqs,
-                    max_num_batched_tokens=config.max_num_batched_tokens,
-                    enable_chunked_prefill=config.enable_chunked_prefill,
-                    max_chunk_size=config.max_chunk_size,
-                    max_gpu_num_blocks=config.max_gpu_num_blocks,
-                    use_cuda_graph=config.use_cuda_graph,
-                    quantization=config.quantization,
-                    tensor_parallel_size=config.tensor_parallel_size,
-                    enable_expert_parallel=config.enable_expert_parallel,
-                    kv_cache_dtype=config.kv_cache_dtype,
-                    enable_prefix_cache=config.enable_prefix_cache,
-                    prefix_cache_blocks=config.prefix_cache_blocks,
-                    enable_preemption=config.enable_preemption,
                 )
-            else:
-                engine_kwargs: dict[str, Any] = {
-                    "max_seq_len": config.max_seq_len,
-                    "max_num_seqs": config.max_num_seqs,
-                    "max_num_batched_tokens": config.max_num_batched_tokens,
-                    "enable_chunked_prefill": config.enable_chunked_prefill,
-                    "max_chunk_size": config.max_chunk_size,
-                    "max_gpu_num_blocks": config.max_gpu_num_blocks,
-                    "device": config.device,
-                    "use_cuda_graph": config.use_cuda_graph,
-                    "quantization": config.quantization,
-                    "tensor_parallel_size": config.tensor_parallel_size,
-                    "enable_expert_parallel": config.enable_expert_parallel,
-                    "kv_cache_dtype": config.kv_cache_dtype,
-                    "enable_prefix_cache": config.enable_prefix_cache,
-                    "prefix_cache_blocks": config.prefix_cache_blocks,
-                    "enable_preemption": config.enable_preemption,
-                }
-                logger.info("loading %s in a scheduler process", config.model_dir)
-                state["engine"] = AsyncLLMEngine.from_pretrained(config.model_dir, **engine_kwargs)
+            if config.data_parallel_size == 1 or config.device == "cpu":
+                engine_kwargs["device"] = config.device
+            logger.info(
+                "loading %s through the async request manager (%d replicas)",
+                config.model_dir,
+                config.data_parallel_size,
+            )
+            state["engine"] = AsyncLLMEngine.from_pretrained(config.model_dir, **engine_kwargs)
         active: EngineBackend = state["engine"]
         active.start()
         state["server"] = OpenAIServer(

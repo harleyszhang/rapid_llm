@@ -265,14 +265,14 @@ def _measure_dp(payload: dict[str, Any]) -> dict[str, Any]:
     the aggregate over replicas. TTFT/TPOT are absent because ``generate`` returns
     once, with no per-step callback to time.
     """
-    from rapid_llm import DataParallelEngine, SamplingParams
+    from rapid_llm import DataParallelController, SamplingParams
 
     spec: RunSpec = payload["spec"]
     prompts = expand_prompts(PROMPTS, payload["batch"] * spec.dp)
     params = SamplingParams(temperature=0.0, max_gen_len=payload["max_gen"])
     kwargs = _lite_kwargs(spec, payload["max_seq_len"], payload["kv_tokens"], with_tp=False)
 
-    with DataParallelEngine(
+    with DataParallelController(
         model=payload["model"],
         data_parallel_size=spec.dp,
         tensor_parallel_size=spec.tp,
@@ -808,4 +808,3 @@ def _default_json_path(model_dir: str) -> Path:
         / "benchmark_logs"
         / f"bench_quant_{Path(model_dir).name}_{gpu}_{stamp}.json"
     )
-

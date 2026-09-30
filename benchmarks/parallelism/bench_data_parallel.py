@@ -2,7 +2,7 @@
 """Data-parallel benchmarks: scaling, prefix-cache routing and CUDA graphs.
 
 Three experiments behind one entry point, all driving the same DP coordinator
-(``measure_dp`` / ``DataParallelEngine``) and all diffing outputs so speed never
+(``measure_dp`` / ``DataParallelController``) and all diffing outputs so speed never
 hides wrongness:
 
 Usage:
@@ -25,7 +25,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from rapid_llm import LLM, DataParallelEngine
+from rapid_llm import LLM, DataParallelController
 from rapid_llm.benchmark import (
     PROMPTS,
     expand_prompts,
@@ -38,7 +38,7 @@ from rapid_llm.benchmark import (
     timestamped_log_path,
     write_json_log,
 )
-from rapid_llm.engine.dp_load_balancer import LOAD_BALANCERS, make_load_balancer
+from rapid_llm.engine.data_parallel import LOAD_BALANCE_POLICIES, create_load_policy
 
 # --------------------------------------------------------------------------- #
 # DP scaffolding: this script benchmarks the DP feature itself — replica load
@@ -127,7 +127,7 @@ def measure_dp(
         the tokenizer lets a caller replay routing decisions on exactly the ids the
         balancer saw.
     """
-    with DataParallelEngine(
+    with DataParallelController(
         model=model, data_parallel_size=dp, max_num_seqs=max_num_seqs, **engine_kwargs
     ) as engine:
         tokenizer = engine.tokenizer
@@ -246,7 +246,7 @@ def bench_data_parallel(
     return DPResult(
         latency_s=latency,
         gen_tokens=tokens,
-        label=f"DataParallelEngine dp={replicas}",
+        label=f"DataParallelController dp={replicas}",
         replicas=replicas,
         batch=len(prompts),
     ), texts
@@ -439,7 +439,7 @@ def describe_routing(prompts: list[str], group_of: list[int], dp: int, tokenizer
     token_ids = [list(ids) for ids in tokenizer(prompts, add_special_tokens=True)["input_ids"]]
     print(f"routing ({len(prompts)} requests, {len(set(group_of))} prefixes, dp={dp}):")
     for policy in ("round_robin", "cache_aware"):
-        balancer = make_load_balancer(policy, dp)
+        balancer = create_load_policy(policy, dp)
         placed = [balancer.select(estimated_tokens=len(ids), token_ids=ids) for ids in token_ids]
         per_replica = [placed.count(r) for r in range(dp)]
         copies = len(set(zip(group_of, placed, strict=True)))
@@ -616,7 +616,7 @@ def measure_graph_cell(
     time.sleep(2.0)  # let the previous cell's workers fully release
 
     t0 = time.perf_counter()
-    with DataParallelEngine(
+    with DataParallelController(
         model=model,
         data_parallel_size=dp,
         tensor_parallel_size=1,
@@ -760,8 +760,8 @@ def run_skew(args) -> None:
     )
 
     results = []
-    for policy in LOAD_BALANCERS:
-        balancer = make_load_balancer(policy, dp)
+    for policy in LOAD_BALANCE_POLICIES:
+        balancer = create_load_policy(policy, dp)
         per_replica = [0] * dp
         for ids in token_ids_list:
             replica = balancer.select(estimated_tokens=len(ids), token_ids=ids)
@@ -845,7 +845,7 @@ def main() -> None:
     parser.add_argument(
         "--load-balancer",
         default="round_robin",
-        choices=list(LOAD_BALANCERS),
+        choices=list(LOAD_BALANCE_POLICIES),
         help="[scaling] balancer under test",
     )
     parser.add_argument(

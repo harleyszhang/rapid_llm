@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from rapid_llm import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelController, SamplingParams
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CKPT = str(ROOT / "my_weight" / "Qwen3-0.6B")
@@ -41,7 +41,7 @@ def _greedy(gen_len: int = 32) -> SamplingParams:
 
 def _run_dp(use_cuda_graph: bool, prompts: list[str], gen_len: int) -> list[str]:
     """One arm: identical routing, identical requests, only the graph differs."""
-    with DataParallelEngine(
+    with DataParallelController(
         model=CKPT,
         data_parallel_size=2,
         tensor_parallel_size=1,
@@ -70,7 +70,7 @@ def _graph_probe(rank: int, queue) -> None:
 
     This is the DP worker's own shape — one process, one device, tp=1, no
     collectives anywhere in the graph — so what it reports is exactly what
-    each DataParallelEngine replica holds after startup.
+    each DataParallelController replica holds after startup.
     """
     try:
         import torch

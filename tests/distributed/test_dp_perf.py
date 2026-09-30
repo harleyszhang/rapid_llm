@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from rapid_llm import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelController, SamplingParams
 from tests.distributed.tp_harness import needs_gpus
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
@@ -65,7 +65,7 @@ def _serve(model_dir: Path, replicas: int) -> tuple[float, int]:
     measure the compiler.
     """
     prompts = _PROMPTS * replicas
-    engine = DataParallelEngine(
+    engine = DataParallelController(
         model=str(model_dir),
         data_parallel_size=replicas,
         max_seq_len=_MAX_SEQ_LEN,

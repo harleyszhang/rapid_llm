@@ -6,7 +6,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from rapid_llm import (
     LLM,
-    DataParallelEngine,
+    DataParallelController,
     SamplingParams,
     Scheduler,
     SchedulerConfig,
@@ -153,7 +153,7 @@ def test_parallel_generation(checkpoint, dp, tp, pipeline, monkeypatch):
     monkeypatch.setenv(PIPELINE_ENV, "1")
     monkeypatch.setenv("RAPID_LLM_COMM_OVERLAP", "1")
     monkeypatch.setenv("RAPID_LLM_TBO", "1")
-    with DataParallelEngine(
+    with DataParallelController(
         str(path),
         device="cpu",
         data_parallel_size=dp,

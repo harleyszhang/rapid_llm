@@ -50,7 +50,7 @@ workload 与特性匹配：`long` 触发 `chunked_prefill`，`shared` 触发 `pr
 | Qwen2.5-0.5B | long | 6 |
 | Qwen2.5-0.5B | shared | 9 |
 
-根因已在代码中确认（`engine/continuous_engine.py`）：
+根因已在代码中确认（现位于 `engine/scheduler.py`）：
 
 ```python
 cap = max(manager.batch_sizes, default=0) if manager else 0
@@ -123,7 +123,7 @@ cap = max(manager.batch_sizes, default=0) if manager else max(DEFAULT_BATCH_SIZE
 | 契约 | 位置 | 结论 |
 |---|---|---|
 | readback ring 生命周期 | `executor/overlap.py` | 正确：`_in_use` 按 `data_ptr` 持有直到 `release_readback`，两个方向都 `record_stream` 防分配器回收竞争；`_acquire` 跳过在途缓冲、退役不可用的 |
-| `release_readback` 调用链 | overlap → worker → executor → continuous_engine | 完整，无断链 |
+| `release_readback` 调用链 | overlap → worker → executor → scheduler | 完整，无断链 |
 | cuda_graph TP 三道闸门 | `executor/cuda_graph.py`、`model_runner.py` | 完整：env kill-switch、grid 一致性 all-reduce、数值 parity（atol 1e-2）；实测 logit diff 0.000e+00 |
 | prefix cache 哈希契约 | `engine/prefix_cache.py` | 完整：blake2b 链式哈希作为跨进程契约（DP router 与 replica 必须一致） |
 

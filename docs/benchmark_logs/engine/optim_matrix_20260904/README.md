@@ -29,7 +29,7 @@ JSON 重算，非手抄。
 | max_seq_len | 2048 |
 | max_num_seqs | 16 |
 | KV 池 | 40960 token |
-| 引擎 | 连续批处理（`ContinuousBatchingEngine`），逐 `step()` 驱动 |
+| 运行时 | 连续批处理 `Scheduler`，逐 `step()` 驱动 |
 
 三个 workload 分别对准不同特性的生效条件——用短 prompt 测 chunked prefill
 等于测一个从未触发的开关：
@@ -222,7 +222,7 @@ eager 与 graph 的 greedy 输出 8/8 全不同。定位到根因：打开 CUDA 
 两条路由不是逐位等价的，greedy argmax 把这个差异放大成整条序列的分岔。
 
 这是既有实现层面的问题（路由逻辑本身是有意为之，见
-`engine/continuous_engine.py` 的 `_prefill_work`），不是本轮引入，本轮未修：
+`engine/scheduler.py` 的 `_prefill_work`），不是本轮引入，本轮未修：
 要么让两条 kernel 数值对齐，要么在 golden 门禁里把「路由随 graph 开关变化」
 显式纳入。列为后续项。
 
