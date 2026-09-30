@@ -132,9 +132,9 @@ The Python sampling limit is `max_gen_len`; HTTP requests use `max_tokens`. CUDA
 Requests can enter and leave between decoding steps. The scheduler supports chunked prefill, prefix reuse, and opt-in recompute preemption.
 
 ```python
-from rapid_llm import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import SamplingParams, Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen2.5-0.5B", device="cpu",
     max_seq_len=512, max_gpu_num_blocks=2048, max_num_seqs=4,
 )

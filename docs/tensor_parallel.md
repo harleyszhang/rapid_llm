@@ -4,7 +4,7 @@
 
 张量并行（TP）把权重切分到多个 rank，减小每个 rank 的权重占用。行并行层通过 all-reduce 合并局部输出。是否降低延迟取决于矩阵规模、设备计算能力和通信开销。
 
-CPU 部署给 `ContinuousBatchingEngine.from_pretrained` 传入 `device="cpu"`，使用 Gloo 数据面。多进程调用应放在脚本的 `if __name__ == "__main__":` 下。CUDA Graph 和后文的 NCCL 测量仅适用于 GPU，CPU 使用 eager 执行。详见 [CPU 支持](cpu.md)。
+CPU 部署给 `Scheduler.from_pretrained` 传入 `device="cpu"`，使用 Gloo 数据面。多进程调用应放在脚本的 `if __name__ == "__main__":` 下。CUDA Graph 和后文的 NCCL 测量仅适用于 GPU，CPU 使用 eager 执行。详见 [CPU 支持](cpu.md)。
 
 两者正交，构成 `dp_size × tp_size` 的 rank 网格，见[数据并行](./data_parallel.md)。
 
@@ -15,9 +15,9 @@ python -m rapid_llm.cli chat \
 ```
 
 ```python
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.scheduler import Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen3-8B", tensor_parallel_size=2
 )
 ```
@@ -28,7 +28,7 @@ engine = ContinuousBatchingEngine.from_pretrained(
 
 | 角色 | 本仓库 | vLLM |
 | --- | --- | --- |
-| 一次前向的**数据描述** | `executor/worker.py::ModelInput` | `SchedulerOutput` / `ModelRunnerOutput` |
+| 一次前向的**数据描述** | `executor/worker.py::ModelInput` | `StepPlan` / `ModelRunnerOutput` |
 | 执行一次 plan（本进程） | `UniProcExecutor` | `UniProcExecutor` |
 | 执行一次 plan（多进程） | `MultiprocExecutor` | `MultiprocExecutor` |
 | 非 driver rank 的全部行为 | `serve_plans` | `WorkerProc.worker_busy_loop` |

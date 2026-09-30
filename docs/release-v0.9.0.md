@@ -35,7 +35,7 @@ v0.9 有两条工作线。
 - `ModelWorker.prepare()` 先做 host 侧布局（`slot_batch` 新增的 `flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows` 三个 prepare-path helper），随即把 input ids / positions / logits positions 经 pinned staging 异步上传，返回携带 event 的 `_PreparedPass`；
 - 三个 `_forward_*` 消费 prepared pass，compute stream 用 `pool.consume(event)` 插一次等待，forward 本体包在 `timeline.region()` 里；
 - `prepare` 被提到 `copy_prefix` 之前——否则 host 先阻塞在 D2D 前缀拷贝的启动上，upload 窗口被推迟到重叠机会之后；
-- `ContinuousBatchingEngine.step()` 改为 deferred harvest：先执行全部 pass，步末统一读回 token。原来每 pass 一次 `tolist()`，GPU 在每个 pass 之间被抽干，重叠在结构上不可能发生。
+- `Scheduler.step()` 改为 deferred harvest：先执行全部 pass，步末统一读回 token。原来每 pass 一次 `tolist()`，GPU 在每个 pass 之间被抽干，重叠在结构上不可能发生。
 
 ![L1 cross-stream overlap](./images/overlap_l1.gif)
 
@@ -111,7 +111,7 @@ golden 门禁在 overlap 默认开启下通过：prepared 路径与 inline 路�
 | ------ | ------ |
 | 修改 | `rapid_llm/executor/slot_batch.py`（prepare-path helpers：`flatten_extend_rows` / `plan_extend_rows` / `pad_decode_rows`） |
 | 修改 | `rapid_llm/executor/worker.py`（`_PreparedPass` + `prepare()` + 三个 `_forward_*` 消费 prepared 并记录 timeline） |
-| 修改 | `rapid_llm/engine/continuous_engine.py`（step 改 deferred harvest，一步一次同步） |
+| 修改 | `rapid_llm/engine/scheduler.py`（step 改 deferred harvest，一步一次同步） |
 | 修改 | `benchmarks/overlap/levels.py (L1)`（长短不齐的长 prompt 负载 + token 预算参数） |
 | 修改 | `tests/utils/test_prompt_templates.py`、`tests/models/test_checkpoint_index.py`（测试债修复） |
 | 新建 | `scripts/gen_overlap_l1_gif.py`、`docs/images/overlap_l1.gif` |

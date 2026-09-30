@@ -419,7 +419,7 @@ class _LoopQueue:
 
 
 class _LoopEngine:
-    """A :class:`ContinuousBatchingEngine` stand-in whose requests finish on schedule.
+    """A :class:`Scheduler` stand-in whose requests finish on schedule.
 
     Hands out *real* ``Request`` objects, because the loop reads completion off the
     handles the engine updates in place; a renamed field has to fail here rather

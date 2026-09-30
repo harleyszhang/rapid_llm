@@ -27,10 +27,10 @@ _MAX_GEN = 32
 
 def _lite_run() -> list[dict]:
     """Greedy completions with per-step logprobs from a two-rank engine."""
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
     from rapid_llm.engine.sampler import SamplingParams
+    from rapid_llm.engine.scheduler import Scheduler
 
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model=_MODEL,
         device="cuda:0",
         max_seq_len=1024,

@@ -26,17 +26,17 @@ step  A B C D                        step  A B C D   等待队列
 
 | 模块 | 职责 | 在哪一侧 |
 | --- | --- | --- |
-| [`Scheduler`](../rapid_llm/engine/scheduler.py) | 谁 prefill、谁 decode、谁拿哪个槽位 | 纯 host，无张量 |
+| [`BatchPlanner`](../rapid_llm/engine/batch_planner.py) | 谁 prefill、谁 decode、谁拿哪个槽位 | 纯 host，无张量 |
 | [`SlotBatch`](../rapid_llm/executor/slot_batch.py) | 分页 KV 映射与每步 attention 元数据 | host / device |
-| [`ContinuousBatchingEngine`](../rapid_llm/engine/continuous_engine.py) | 串起 step 循环、采样、停止判定 | 两侧 |
+| [`Scheduler`](../rapid_llm/engine/scheduler.py) | 串起 step 循环、采样、停止判定 | 两侧 |
 
-`Scheduler` 不持有张量，调度测试无需 GPU 或模型权重。模型执行也可以选择 CPU，安装与限制见 [CPU 支持](cpu.md)。
+`BatchPlanner` 不持有张量，调度测试无需 GPU 或模型权重。模型执行也可以选择 CPU，安装与限制见 [CPU 支持](cpu.md)。
 
 ## 每一步做什么
 
 ```python
 # 对外由 engine.step() 执行；下面只表示阶段关系。
-scheduled = scheduler.schedule()
+scheduled = planner.plan()
 # 分配并写入本步需要的块表。
 # 处理 scheduled.prefill 里的 prompt chunks，以及 scheduled.decode。
 # 采样后更新请求，释放已结束请求持有的块引用。

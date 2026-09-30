@@ -17,10 +17,10 @@ from typing import Any
 import pytest
 import torch
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.batch_planner import SchedulerConfig
 from rapid_llm.engine.llm import LLM
 from rapid_llm.engine.sampler import PositionLogprobs, SamplingParams
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
 
@@ -82,7 +82,7 @@ def _chunked(model_dir: Path) -> list[PositionLogprobs | None]:
     ``tests/engine/test_chunked_prefill`` does it: the scheduler owns the chunking and
     ``from_pretrained`` sizes its token budget for throughput, not for this test.
     """
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         str(model_dir),
         max_seq_len=_MAX_SEQ_LEN,
         max_num_seqs=4,
@@ -91,7 +91,7 @@ def _chunked(model_dir: Path) -> list[PositionLogprobs | None]:
     )
     config = SchedulerConfig(max_seq_len=_MAX_SEQ_LEN, max_num_seqs=4, max_chunk_size=_CHUNK)
     engine.config = config
-    engine.scheduler.config = config
+    engine.planner.config = config
     try:
         return list(engine.generate([_PROMPT], _params())[0].prompt_logprobs or [])
     finally:

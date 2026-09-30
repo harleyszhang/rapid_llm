@@ -50,9 +50,9 @@ Python API 用 `max_gen_len` 限制生成长度；HTTP API 对应字段为 `max_
 请求可以在解码步骤之间加入和退出。调度器支持分块预填充、前缀复用，以及按需开启的重计算抢占。
 
 ```python
-from rapid_llm import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import SamplingParams, Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen2.5-0.5B", device="cpu",
     max_seq_len=512, max_gpu_num_blocks=2048, max_num_seqs=4,
 )

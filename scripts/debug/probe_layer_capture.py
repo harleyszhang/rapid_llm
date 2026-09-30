@@ -11,11 +11,11 @@ import torch.distributed as dist
 
 
 def payload(rank: int) -> dict:
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.scheduler import Scheduler
     from rapid_llm.executor.attention_metadata import AttentionMetadata
     from rapid_llm.kernels import skip_rmsnorm
 
-    eng = ContinuousBatchingEngine.from_pretrained(
+    eng = Scheduler.from_pretrained(
         model="my_weight/DeepSeek-V2-Lite",
         device=f"cuda:{rank}",
         max_seq_len=256,

@@ -414,7 +414,7 @@ python -m pytest tests/distributed/test_tp_cuda_graph.py   # TP×graph×quant �
 
 ### 哪个引擎能跑 TP
 
-`LLM`（因此 `TextGenerator`）不能：它的 generate 循环只广播采样出的 token，从不广播步计划，follower rank 会永远等待。它现在对 `tensor_parallel_size > 1` 直接报错，而不是默默在单卡上跑——那是它过去的行为，也正是让某行标注 `tp2` 的基准实际测成 tp1 的原因。请改用 `ContinuousBatchingEngine.from_pretrained(...)`、`rapid-llm serve` 或 `rapid-llm batch`，它们的 executor 会广播每一步的计划。
+`LLM`（因此 `TextGenerator`）不能：它的 generate 循环只广播采样出的 token，从不广播步计划，follower rank 会永远等待。它现在对 `tensor_parallel_size > 1` 直接报错，而不是默默在单卡上跑——那是它过去的行为，也正是让某行标注 `tp2` 的基准实际测成 tp1 的原因。请改用 `Scheduler.from_pretrained(...)`、`rapid-llm serve` 或 `rapid-llm batch`，它们的 executor 会广播每一步的计划。
 
 ## 精度
 

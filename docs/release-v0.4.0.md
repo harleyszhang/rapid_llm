@@ -105,7 +105,7 @@ if get_tp_world_size() > 1:
     next_token = broadcast_tp(next_token)
 ```
 
-**影响范围：** `llm_engine.py`（offline batch）和 `continuous_engine.py`（online batch）的两个采样点均已修复。
+**影响范围：** `llm_engine.py`（offline batch）和 `scheduler.py`（online batch）的两个采样点均已修复。
 
 **修复前后对比 (TP=2, Qwen3-0.6B, temperature=0.7, seed 每 rank 不同)：**
 

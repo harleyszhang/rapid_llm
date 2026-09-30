@@ -105,9 +105,9 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     time out, because a rank that dies during rendezvous takes the group with it.
     """
     try:
-        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+        from rapid_llm.engine.scheduler import Scheduler
 
-        engine = ContinuousBatchingEngine.from_pretrained(
+        engine = Scheduler.from_pretrained(
             model=spec["model"],
             device="cuda:0",
             max_seq_len=_MAX_SEQ_LEN,
@@ -507,9 +507,9 @@ def test_shutdown_returns_the_process_to_a_world_of_one(model_dir: Path):
     process itself.
     """
     from rapid_llm.distributed import parallel_state as ps
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.scheduler import Scheduler
 
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model=str(model_dir),
         device="cuda:0",
         max_seq_len=_MAX_SEQ_LEN,
@@ -541,14 +541,14 @@ def test_a_failed_build_returns_the_process_to_a_world_of_one(model_dir: Path, m
     the follower side builds a one-layer stack and parks on its first plan.
     """
     from rapid_llm.distributed import parallel_state as ps
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.scheduler import Scheduler
 
     def _boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("simulated shard-load failure")
 
     monkeypatch.setattr("rapid_llm.engine.llm_engine.LLMEngine", _boom)
     with pytest.raises(RuntimeError, match="simulated shard-load failure"):
-        ContinuousBatchingEngine.from_pretrained(
+        Scheduler.from_pretrained(
             model=str(model_dir),
             device="cuda:0",
             max_seq_len=_MAX_SEQ_LEN,

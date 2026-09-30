@@ -174,9 +174,9 @@ class EngineBackend(Backend):
     """
 
     def __init__(self, model_dir: str, *, tensor_parallel_size: int = 1, **engine_kwargs):
-        from rapid_llm.engine import ContinuousBatchingEngine
+        from rapid_llm.engine import Scheduler
 
-        self._engine = ContinuousBatchingEngine.from_pretrained(
+        self._engine = Scheduler.from_pretrained(
             model_dir, tensor_parallel_size=tensor_parallel_size, **engine_kwargs
         )
         self.tensor_parallel_size = tensor_parallel_size

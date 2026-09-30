@@ -155,7 +155,7 @@ autotune store 经 `set_perf_provider` 接进 rank 步：有冻结记录就按�
 | 新建 | `rapid_llm/observe/{__init__,metrics,trace}.py`（A7 registry + OTLP tracer） |
 | 新建 | `rapid_llm/tools/harness/`、`scripts/layer_harness.py`（F1 单层 harness） |
 | 新建 | `rapid_llm/kernels/dispatcher/autotune/frozen.py`、`benchmarks/kernels/freeze_dispatch_ranking.py`（冻结实测排序） |
-| 修改 | `rapid_llm/engine/{sampler,continuous_engine,llm_engine,llm,async_engine,scheduler,outputs}.py`、`rapid_llm/executor/{worker,executor}.py`、`rapid_llm/entrypoints/{api_server,protocol}.py`（logprobs 六层透传） |
+| 修改 | `rapid_llm/engine/{sampler,batch_planner,scheduler,llm_engine,llm,async_engine,outputs}.py`、`rapid_llm/executor/{worker,executor}.py`、`rapid_llm/entrypoints/{api_server,protocol}.py`（logprobs 六层透传） |
 | 修改 | `rapid_llm/executor/weight_utils.py`（`key_filter`，读张量前过滤）、`rapid_llm/kernels/dispatcher/registry.py`（`decisions()`） |
 | 新建 | `benchmarks/bench_observability.py`、`benchmarks/kernels/bench_dispatch.py` |
 | 修改 | `benchmarks/common.py` + 全部 bench 脚本接工厂；删除 `bench_all_kernels.py` / `flashattention*.py` / `bench_hf_baseline.py` |

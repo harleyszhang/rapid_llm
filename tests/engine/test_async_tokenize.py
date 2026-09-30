@@ -19,8 +19,8 @@ import pytest
 import torch
 
 from rapid_llm.engine.async_engine import AsyncLLMEngine
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.batch_planner import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler
 
 _EOS = 2
 _WORD = 100
@@ -63,7 +63,7 @@ class _ScriptedExecutor:
         pass
 
 
-def _build_engine(rows, *, delay=0.0) -> ContinuousBatchingEngine:
+def _build_engine(rows, *, delay=0.0) -> Scheduler:
     fake = SimpleNamespace(
         model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
         device="cpu",
@@ -71,7 +71,7 @@ def _build_engine(rows, *, delay=0.0) -> ContinuousBatchingEngine:
         stop_token_ids={_EOS},
         max_seq_len=64,
     )
-    return ContinuousBatchingEngine(
+    return Scheduler(
         fake,
         SchedulerConfig(max_seq_len=64, max_num_seqs=4),
         executor=_ScriptedExecutor(rows),
@@ -101,7 +101,7 @@ def test_the_request_joins_the_scheduler_on_the_next_step():
     engine._tokenizing[request.request_id].future.result(timeout=5.0)  # encode landed
     engine.step()  # collects, then admits and prefills in the same step
 
-    assert engine.scheduler.waiting == []
+    assert engine.planner.waiting == []
     assert request.prompt_token_ids == [10, 11, 12]
     assert request.delta  # the prefill pass already ran
     engine.shutdown()
@@ -124,7 +124,7 @@ def test_explicit_token_ids_bypass_the_pool():
     request = engine.add_request("hi", prompt_token_ids=[7, 8])
 
     assert engine._tokenizing == {}
-    assert engine.scheduler.waiting == [request]
+    assert engine.planner.waiting == [request]
     assert request.prompt_len == 2
     engine.shutdown()
 
@@ -157,7 +157,7 @@ def test_an_empty_prompt_finishes_invalid_and_fires_on_error():
     assert isinstance(request.error, ValueError)  # the scheduler's rejection
     assert fired and fired[0][0] is request
     assert request.request_id not in engine._tokenizing
-    assert engine.scheduler.waiting == []  # never admitted
+    assert engine.planner.waiting == []  # never admitted
     engine.shutdown()
 
 

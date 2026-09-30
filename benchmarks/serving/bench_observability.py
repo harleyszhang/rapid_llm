@@ -30,8 +30,8 @@ from rapid_llm.benchmark import (
     run_requests,
     write_json_log,
 )
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.tools.observability import METRICS_ENV, EngineMetrics, Tracer
 
 CKPT = "my_weight/Qwen3-0.6B"
@@ -174,7 +174,7 @@ def main() -> int:
     require_gpus(1)
     prompts = expand_prompts(PROMPTS, args.batch)
 
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         args.model_dir,
         max_seq_len=args.max_seq_len,
         max_num_seqs=args.max_num_seqs,

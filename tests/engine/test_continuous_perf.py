@@ -16,10 +16,9 @@ import time
 import pytest
 import torch
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.llm_engine import LLMEngine
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights, pytest.mark.slow]
 
@@ -87,7 +86,7 @@ def _serve_serially(model_dir) -> tuple[float, int, list[float]]:
 
 def _serve_continuously(model_dir) -> tuple[float, int, list[float]]:
     """Continuous batching: an arrival is admitted at the next step."""
-    engine = ContinuousBatchingEngine(
+    engine = Scheduler(
         LLMEngine(
             str(model_dir),
             max_seq_len=_MAX_SEQ_LEN,

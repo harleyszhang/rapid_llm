@@ -113,9 +113,9 @@ rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 服务层很薄，引擎自己就能用。同步、step 驱动：
 
 ```python
-from rapid_llm import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import SamplingParams, Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
 )
 

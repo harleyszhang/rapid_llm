@@ -36,10 +36,9 @@ from rapid_llm.benchmark import (
     timestamped_log_path,
     write_json_log,
 )
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.llm_engine import LLMEngine
 from rapid_llm.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 from rapid_llm.executor.executor import UniProcExecutor
 from rapid_llm.executor.kv_offload import build_cpu_tier
 
@@ -170,7 +169,7 @@ def build_engine(
     )
     executor = UniProcExecutor(llm, config.max_num_seqs, config.max_seq_len)
     manager = build_cpu_tier(llm.model_runner.kv_cache_manager, tier_blocks) if tier else None
-    engine = ContinuousBatchingEngine(llm, config, executor, offloading=manager)
+    engine = Scheduler(llm, config, executor, offloading=manager)
     return engine, manager
 
 
@@ -246,7 +245,7 @@ def measure_overflow_arm(
         total_s += run.total_s
         cached += sum(request.num_cached_tokens for request in run.requests)
         prompt_total += sum(request.prompt_len for request in run.requests)
-    gpu_hit_rate = engine.scheduler.prefix_cache_hit_rate
+    gpu_hit_rate = engine.planner.prefix_cache_hit_rate
     arm = OverflowArm(
         label=f"tier {'on' if tier else 'off'}",
         tier=tier,

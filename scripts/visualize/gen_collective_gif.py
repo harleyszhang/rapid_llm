@@ -10,7 +10,7 @@ step no matter how large the vocabulary is, because :func:`global_argmax` exchan
 values per row rather than gathering the logits.
 
 Nothing here is staged. The engine is a real
-:class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine` with
+:class:`~rapid_llm.engine.scheduler.Scheduler` with
 ``tensor_parallel_size=2``, so this process *is* rank 0 and the follower is a real
 process on the second GPU; every number comes from a
 :meth:`~rapid_llm.tools.observability.CollectiveStats.collect` window wrapped around
@@ -33,19 +33,32 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW, BLUE, PURPLE, PANEL_BG, BAR_BG,
-    DATA_FG, CONTROL_FG, ALERT,
-    RUNNING, QUEUED, DONE,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    ALERT,
+    BAR_BG,
+    BG,
+    CONTROL_FG,
+    DATA_FG,
+    DIM,
+    DONE,
+    LINE_H,
+    PAD,
+    PANEL_BG,
+    PROMPT_FG,
+    QUEUED,
+    RUNNING,
+    TEXT_FG,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.tools.observability import (
     Collective,
     CollectiveStats,
@@ -117,7 +130,7 @@ def record(model_dir: str, max_gen_len: int) -> tuple[list[Frame], str]:
     Returns:
         One :class:`Frame` per step, and the ledger report for the whole run.
     """
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir,
         max_seq_len=512,
         max_num_seqs=len(PROMPTS),

@@ -320,12 +320,12 @@ def _measure_cb(payload: dict[str, Any]) -> dict[str, Any]:
     """
     from rapid_llm import SamplingParams
     from rapid_llm.benchmark import footprint_stats, run_requests
-    from rapid_llm.engine import ContinuousBatchingEngine
+    from rapid_llm.engine import Scheduler
 
     spec: RunSpec = payload["spec"]
     prompts = expand_prompts(PROMPTS, payload["batch"])
     torch.cuda.reset_peak_memory_stats()
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         payload["model"],
         max_num_seqs=max(payload["batch"], 8),
         tensor_parallel_size=spec.tp,

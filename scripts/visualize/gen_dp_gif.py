@@ -8,7 +8,7 @@ that concurrency is the whole speedup.
 
 What is real here and what is staged: the routing (which replica each prompt goes to)
 is the actual :class:`RoundRobinBalancer` decision, and each lane's per-step text and
-token counts are recorded from a real :class:`ContinuousBatchingEngine` run over that
+token counts are recorded from a real :class:`Scheduler` run over that
 lane's sub-batch. The two lanes are recorded one after another on a single GPU, then
 replayed in lockstep for the animation, because in a real two-GPU run they execute
 concurrently — the GIF shows that truth without needing two cards to render it.
@@ -27,19 +27,28 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW, BLUE, PURPLE, PANEL_BG,
-    RUNNING, QUEUED, DONE,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    BG,
+    DIM,
+    DONE,
+    LINE_H,
+    PAD,
+    PROMPT_FG,
+    QUEUED,
+    RUNNING,
+    TEXT_FG,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.dp_load_balancer import RoundRobinBalancer
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.utils.prompt_templates import get_prompter
 
 # Eight short prompts over two replicas: enough that round-robin visibly stripes them
@@ -80,7 +89,7 @@ def record_lane(model_dir: str, prompts: list[tuple[int, str]], max_gen_len: int
     Returns:
         One :class:`LaneStep` per decode step this replica took.
     """
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir, max_seq_len=512, max_num_seqs=len(prompts), max_gpu_num_blocks=8192
     )
     prompter = get_prompter(engine.tokenizer)

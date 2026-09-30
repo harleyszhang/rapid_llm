@@ -8,7 +8,7 @@ v0.10 之后以性能为目标的专题设计。条目编号 O1–O14，落地�
 
 **KV 是槽位而非页，prefix 复用靠拷贝。** `executor/slot_batch.py` 中 slot `s` 永久拥有行 `[s*max_seq_len, (s+1)*max_seq_len)`，并发上限等于槽位数；`executor/kv_cache_manager.py` 自述 `One row per token (block_size=1)`，并留有 `TODO: reshape into [blocks, block_size, ...] to support PagedAttention`。因此 `engine/prefix_cache.py` 的命中结果是一串 `(src_slot, start, len)` 拷贝段：每 token 的 KV（fp16、TP=2、48 层）约 96 KB/rank，一个 4K 共享前缀的命中要搬约 200 MB D2D。v0.6 的分页 KV 落地的是行级引用计数，真分页（block_size > 1 + block_table）没有落。
 
-**一步最多三次 forward，metadata 三套。** `engine/continuous_engine.py` 把每步拆成 `PREFILL`（padded 网格、不读 cache）、`EXTEND`（逐 token 行、读 cache）、`DECODE` 三个 pass，各自一套注意力元数据与 kernel。根因是 prefill kernel 不读 cache，续传 chunk 只能走 EXTEND 兜底。
+**一步最多三次 forward，metadata 三套。** `engine/scheduler.py` 把每步拆成 `PREFILL`（padded 网格、不读 cache）、`EXTEND`（逐 token 行、读 cache）、`DECODE` 三个 pass，各自一套注意力元数据与 kernel。根因是 prefill kernel 不读 cache，续传 chunk 只能走 EXTEND 兜底。
 
 **CPU-GPU 串行，TP 下无 CUDA graph。** `engine/async_engine.py` 的 worker 线程逐条 `step()`：调度 → 发射 kernel → 同步等采样结果回读 → 才调下一步。TP > 1 时 CUDA graph 被显式禁用，48 层 × 2 个 all-reduce 走 NCCL ring over PCIe（batch 小、payload 小，延迟主导），加上数百次 kernel launch 的 Python 派发，batch=1 的 TPOT 里约 30–40% 是非计算开销。
 
@@ -62,7 +62,7 @@ kernel 层
 
 decode 的输入 token 不再回 CPU：下一步的 embedding 直接查 device 上的采样结果，step 拆成 launch / harvest 两半，隔一步读结果。
 
-**现状。** `ContinuousBatchingEngine.step()` 每步严格串行：调度 → 发射 kernel → 等 GPU 算完 → 采样 token 读回 CPU → detokenize/判停 → 下一轮。两侧互相等待，任一时刻只有一侧在工作。batch=1 decode 的时间线（数字为估算）：
+**现状。** `Scheduler.step()` 每步严格串行：调度 → 发射 kernel → 等 GPU 算完 → 采样 token 读回 CPU → detokenize/判停 → 下一轮。两侧互相等待，任一时刻只有一侧在工作。batch=1 decode 的时间线（数字为估算）：
 
 ```text
 现状，一步 ≈ 7.5ms：
@@ -81,7 +81,7 @@ GPU:                     [======decode 计算 5ms======]
 ```python
 result_q = deque()
 while True:
-    plan = scheduler.schedule()            # 纯 CPU；GPU 正算着上一步
+    plan = scheduler.planner.plan()        # 纯 CPU；GPU 正算着上一步
     result_q.append(executor.launch(plan)) # 只发射，不同步
     if len(result_q) > 1:                  # 隔一步才读
         last = result_q.popleft()
@@ -229,7 +229,7 @@ prefill（compute-bound）与 decode（memory-bound）无数据依赖（decode �
 
 实例：现在 `use_cuda_graph=True` 启动要等全桶捕获（每桶一次 capture + warmup），与 F3「冷启动秒级」目标直接冲突。惰性化后 ~2s 进服务，第一个 batch=16 请求多花 1s，之后零成本。反复起停、跑单测的场景收益最大。预期启动 -80%+（几十秒 → 2–3s），显存预留降到实际用到的桶。
 
-**落地记录（dev-v0.11）**：已落地，默认关（`cuda_graph_lazy=False` 保持全量捕获旧行为），全链同名参数透传（`LLM` / `TextGenerator` / `VisionGenerator` / `ContinuousBatchingEngine.from_pretrained` / `LLMEngine` / `ModelRunner`）。
+**落地记录（dev-v0.11）**：已落地，默认关（`cuda_graph_lazy=False` 保持全量捕获旧行为），全链同名参数透传（`LLM` / `TextGenerator` / `VisionGenerator` / `Scheduler.from_pretrained` / `LLMEngine` / `ModelRunner`）。
 
 - **种子对**：`CUDAGraphManager.capture_seed()` 启动只捕两图——最小 batch×最小桶（单个新请求立即上图）+ 最大 batch×最大桶（饱和长上下文 batch 也在图路径上）。网格先经 `max_seq_len` / `max_request_num` clamp 再取端点，退化网格（单形状）自动去重为一图。
 - **按需捕获**：`try_replay` miss 且 lazy 时 `_capture_on_miss` 现场捕获：`torch.cuda.synchronize()` 排空流水后，warmup 借用当前 step 的真实 `(b_req_idx, cur_select_index)` 作写目标，warmup 的垃圾 K/V 落在紧随的 replay 要写的同一位置并被覆盖，不污染任何其它请求的行（安全前提：slot 恒等映射，写位置由 `cur_select_index` 决定）。

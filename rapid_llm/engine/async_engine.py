@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..utils.logger import get_logger
-from .continuous_engine import ContinuousBatchingEngine
 from .sampler import PositionLogprobs, SamplingParams
+from .scheduler import Scheduler
 
 logger = get_logger(__name__)
 
@@ -106,7 +106,7 @@ class AsyncLLMEngine:
             ``step()`` elsewhere would race the worker thread.
     """
 
-    def __init__(self, engine: ContinuousBatchingEngine) -> None:
+    def __init__(self, engine: Scheduler) -> None:
         self._engine = engine
         self._commands: queue.SimpleQueue[tuple[str, Any] | None] = queue.SimpleQueue()
         self._streams: dict[str, _RequestStream] = {}
@@ -131,9 +131,9 @@ class AsyncLLMEngine:
         Args:
             model: HuggingFace checkpoint directory.
             **kwargs: Forwarded to
-                :meth:`ContinuousBatchingEngine.from_pretrained`.
+                :meth:`Scheduler.from_pretrained`
         """
-        return cls(ContinuousBatchingEngine.from_pretrained(model, **kwargs))
+        return cls(Scheduler.from_pretrained(model, **kwargs))
 
     # ------------------------------------------------------------- lifecycle #
     @property
@@ -365,7 +365,7 @@ class AsyncLLMEngine:
         the requests that triggered it are still scheduled. Clearing them returns
         the worker to idle so later requests get a clean engine.
         """
-        for request in [*self._engine.scheduler.running, *self._engine.scheduler.waiting]:
+        for request in [*self._engine.planner.running, *self._engine.planner.waiting]:
             try:
                 self._engine.abort(request.request_id)
             except Exception:  # already on the failure path

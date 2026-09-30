@@ -23,7 +23,7 @@ from typing import Any, ClassVar
 
 from PIL import Image
 
-from .engine import ContinuousBatchingEngine, SamplingParams, VisionGenerator
+from .engine import SamplingParams, Scheduler, VisionGenerator
 from .engine.dp_load_balancer import LOAD_BALANCERS
 from .engine.scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 from .modules.quantization import RUNTIME_SCHEMES
@@ -224,8 +224,8 @@ class TextEngineOptions(BaseOptions):
         *,
         max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
         max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
-    ) -> ContinuousBatchingEngine:
-        return ContinuousBatchingEngine.from_pretrained(
+    ) -> Scheduler:
+        return Scheduler.from_pretrained(
             self.model_dir,
             max_seq_len=self.max_seq_len,
             max_num_seqs=max_num_seqs,
@@ -364,7 +364,7 @@ class ChatCommand(CliCommand):
 
     @staticmethod
     def _stream_reply(
-        engine: ContinuousBatchingEngine,
+        engine: Scheduler,
         prompter: ChatPrompter | None,
         params: SamplingParams,
         user_input: str,

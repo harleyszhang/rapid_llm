@@ -1,6 +1,6 @@
 """Record the chunked-prefill GIF: what a long prompt costs a decoding batch.
 
-Drives the real :class:`Scheduler` with one 2000-token prompt arriving into a
+Drives the real :class:`BatchPlanner` with one 2000-token prompt arriving into a
 batch of already-decoding requests, one frame per scheduler step. The thing to
 look at is the PREFILL token count per step: unchunked, a single step carries
 all 2000 tokens and every decode request in that step waits behind them;
@@ -21,22 +21,29 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW, AMBER,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    AMBER,
+    BG,
+    DIM,
+    GREEN,
+    LINE_H,
+    PAD,
+    PROMPT_FG,
+    RED,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import (
-    Request,
-    Scheduler,
-    SchedulerConfig,
-)
 
 #: Four short requests already decoding when the long prompt lands.
 SHORT_PROMPT_LEN = 24
@@ -83,13 +90,12 @@ def record(chunk_size: int, max_steps: int = 14) -> list[Frame]:
         max_num_batched_tokens=65536,
         max_chunk_size=chunk_size,
     )
-    sched = Scheduler(config, num_slots=8)
+    sched = BatchPlanner(config, num_slots=8)
 
     # Get the short requests admitted and past their prefill first.
     for i in range(NUM_SHORT):
         sched.add_request(_make_request(f"short-{i}", SHORT_PROMPT_LEN))
-    warm = sched.schedule()
-    sched.advance_chunks(warm.prefill, warm.prefill_chunk_lens)
+    sched.plan()
 
     # The long prompt lands into a running batch.
     sched.add_request(_make_request("LONG", LONG_PROMPT_LEN))
@@ -97,7 +103,7 @@ def record(chunk_size: int, max_steps: int = 14) -> list[Frame]:
     frames: list[Frame] = []
     done_tokens = 0
     for step in range(1, max_steps + 1):
-        out = sched.schedule()
+        out = sched.plan()
 
         rows: list[tuple[str, int, int, int]] = []
         long_chunk = 0
@@ -123,7 +129,6 @@ def record(chunk_size: int, max_steps: int = 14) -> list[Frame]:
             )
         )
 
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
         if done_tokens >= LONG_PROMPT_LEN and not out.prefill:
             break
     return frames

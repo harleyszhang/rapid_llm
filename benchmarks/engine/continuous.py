@@ -28,8 +28,8 @@ from rapid_llm.benchmark import (
     sampling_params,
     write_json_log,
 )
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.llm_engine import LLMEngine
+from rapid_llm.engine.scheduler import Scheduler
 
 CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 
@@ -82,10 +82,10 @@ def static_engine(model_dir: str, kv_blocks: int, max_seq_len: int, warm_prompts
 
 
 @contextmanager
-def continuous_engine(
+def scheduler_engine(
     model_dir: str, kv_blocks: int, max_seq_len: int, max_num_seqs: int, warm_prompts: list[str]
 ):
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir,
         max_seq_len=max_seq_len,
         max_num_seqs=max_num_seqs,
@@ -175,7 +175,7 @@ def measure_continuous_batch(
     label: str,
 ) -> Measurement:
     """Continuous batching over a batch submitted at once; ``params_list`` is per request."""
-    with continuous_engine(
+    with scheduler_engine(
         model_dir, kv_blocks, max_seq_len, max_num_seqs, warm_prompts=prompts[:2]
     ) as engine:
         run = run_requests(engine, prompts, params_list)
@@ -225,7 +225,7 @@ def measure_continuous_online(
     max_num_seqs: int,
     interval: float,
 ) -> Measurement:
-    with continuous_engine(
+    with scheduler_engine(
         model_dir, kv_blocks, max_seq_len, max_num_seqs, warm_prompts=prompts[:2]
     ) as engine:
         started = time.perf_counter()

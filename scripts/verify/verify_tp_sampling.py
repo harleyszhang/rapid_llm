@@ -39,12 +39,12 @@ def _run_rank(
 
     if disable_broadcast:
         # Monkey-patch to simulate the pre-fix behavior
-        import rapid_llm.engine.continuous_engine as ceng
         import rapid_llm.engine.llm_engine as eng
+        import rapid_llm.engine.scheduler as scheduler_module
 
         # Override the module-level reference so the decode loop's broadcast is a no-op
         eng.tensor_model_parallel_broadcast = lambda t, src=0: t
-        ceng.tensor_model_parallel_broadcast = lambda t, src=0: t
+        scheduler_module.tensor_model_parallel_broadcast = lambda t, src=0: t
 
     from rapid_llm import SamplingParams, TextGenerator
 

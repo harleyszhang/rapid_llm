@@ -1,4 +1,4 @@
-"""The engine core process: one ContinuousBatchingEngine behind a ZMQ door.
+"""The engine core process: one Scheduler behind a ZMQ door.
 
 This is vLLM's EngineCore boundary (``vllm/v1/engine/core.py``) cut to
 rapid_llm's size, and it keeps vLLM's split exactly: **token ids in, token ids
@@ -42,8 +42,8 @@ import zmq
 
 from .. import __version__
 from ..utils.logger import get_logger
-from .continuous_engine import ContinuousBatchingEngine
 from .sampler import PositionLogprobs, SamplingParams
+from .scheduler import Scheduler
 
 if TYPE_CHECKING:
     from .scheduler import Request
@@ -382,7 +382,7 @@ class EngineCoreProc:
         command_address: Parent's ROUTER endpoint to connect to.
         output_address: Parent's PULL endpoint to connect to.
         engine_kwargs: Forwarded to
-            :meth:`ContinuousBatchingEngine.from_pretrained`.
+            :meth:`Scheduler.from_pretrained`
     """
 
     def __init__(
@@ -402,7 +402,7 @@ class EngineCoreProc:
         # Sockets first, engine second: when loading fails, the death notice
         # still reaches the parent, which is waiting on the output channel.
         try:
-            self._engine = ContinuousBatchingEngine.from_pretrained(model_dir, **engine_kwargs)
+            self._engine = Scheduler.from_pretrained(model_dir, **engine_kwargs)
         except BaseException as exc:
             self._signal_dead(f"engine construction failed: {type(exc).__name__}: {exc}")
             raise
@@ -542,7 +542,7 @@ class EngineCoreProc:
         Aborting rather than draining: the parent asked to stop and is not
         reading tokens any more. Their KV and slots free during teardown.
         """
-        for request in [*self._engine.scheduler.running, *self._engine.scheduler.waiting]:
+        for request in [*self._engine.planner.running, *self._engine.planner.waiting]:
             try:
                 self._engine.abort(request.request_id)
             except Exception:  # already on the way out
@@ -599,7 +599,7 @@ class EngineCoreProc:
             engine_version=__version__,
             max_model_len=self._engine.config.max_seq_len,
             num_gpu_blocks=self._engine.num_kv_blocks,
-            max_num_seqs=self._engine.scheduler.max_num_seqs,
+            max_num_seqs=self._engine.planner.max_num_seqs,
         )
         self._command.send_multipart([READY_TAG, encode_ready(ready)])
 

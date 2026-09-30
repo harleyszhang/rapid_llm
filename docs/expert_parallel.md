@@ -7,16 +7,16 @@
 EP 复用 TP 进程组。专家数必须能被 `tensor_parallel_size` 整除。
 
 ```python
-from rapid_llm import ContinuousBatchingEngine
+from rapid_llm import Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/DeepSeek-V2-Lite",
     tensor_parallel_size=2,
     enable_expert_parallel=True,
 )
 ```
 
-CPU 调试时增加 `device="cpu"`，通信后端改为 Gloo。直接构造 `LLM` 不会创建多 rank 进程组；多卡入口应使用 `ContinuousBatchingEngine.from_pretrained` 或 `DataParallelEngine`。
+CPU 调试时增加 `device="cpu"`，通信后端改为 Gloo。直接构造 `LLM` 不会创建多 rank 进程组；多卡入口应使用 `Scheduler.from_pretrained` 或 `DataParallelEngine`。
 
 ## 数据流（五阶段流水线）
 

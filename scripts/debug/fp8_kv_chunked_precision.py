@@ -75,15 +75,14 @@ def run(config: str, out_path: str, model: str) -> None:
     else:
         os.environ.pop("RAPID_LLM_FUSED_CHUNK_PREFILL", None)
 
-    from rapid_llm.engine import continuous_engine as ce_mod
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine import scheduler as scheduler_mod
     from rapid_llm.engine.llm_engine import LLMEngine
     from rapid_llm.engine.sampler import SamplingParams
-    from rapid_llm.engine.scheduler import SchedulerConfig
+    from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 
     # 记录本配置实际跑过的 pass 种类, 证明配置真的生效。
     pass_counts: dict[str, int] = {}
-    _real_prefill_work = ce_mod._prefill_work
+    _real_prefill_work = scheduler_mod._prefill_work
 
     def _traced(group, chunk_lens, chunked_min_rows=float("inf")):
         works = _real_prefill_work(group, chunk_lens, chunked_min_rows)
@@ -92,10 +91,10 @@ def run(config: str, out_path: str, model: str) -> None:
             pass_counts[key] = pass_counts.get(key, 0) + 1
         return works
 
-    ce_mod._prefill_work = _traced
+    scheduler_mod._prefill_work = _traced
 
     engine = LLMEngine(model, max_seq_len=8192, kv_cache_dtype=cfg["kv"])
-    ce = ContinuousBatchingEngine(
+    ce = Scheduler(
         engine,
         SchedulerConfig(
             max_seq_len=8192,

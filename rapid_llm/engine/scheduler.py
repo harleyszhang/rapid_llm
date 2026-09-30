@@ -1,1105 +1,1277 @@
-"""Request scheduling with chunked prefill and prefix caching.
+"""Continuous batching runtime for independently arriving requests.
 
-Per step the :class:`Scheduler` decides which requests prefill (in chunks),
-which decode, and which slot each holds, so a long prompt cannot stall
-running decodes. Scheduling commits: once planned, a chunk is assumed to
-have run, and the request objects are the single source of truth.
+Each ``step()`` asks the internal :class:`~rapid_llm.engine.batch_planner.BatchPlanner`
+for an immutable plan, runs it through the executor, harvests sampled tokens and
+updates request state. Chunked prefills and running decodes share one pass. The
+``PIPELINE_ENV`` mode reshapes that order into launch/harvest pipelining:
+schedule and launch step N while N-1 is still on the GPU, then harvest N-1's
+tokens — their readback has landed under N's forward, so the host's
+detokenise/stop work overlaps compute instead of serialising against it.
+Decode inputs never cross to the host in that mode: the worker feeds them back
+on the device (see :meth:`~rapid_llm.executor.worker.ModelWorker`).
 
 Usage:
-    scheduler = Scheduler(SchedulerConfig(...), num_slots)
-    scheduler.add_request(request); plan = scheduler.schedule()
+    engine.add_request(prompt, params)
+    finished = engine.step()
 """
 
 from __future__ import annotations
 
+import itertools
+import math
+import os
 import time
-from collections import OrderedDict, deque
-from dataclasses import dataclass, field
-from enum import StrEnum
+from collections import deque
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from multiprocessing.process import BaseProcess
+from typing import TYPE_CHECKING, NamedTuple
 
-from .kv_offload import LookupResult, OffloadingManager
-from .prefix_cache import PREFIX_CACHE_BLOCK_SIZE, PrefixCache, PrefixMatch
+import torch
+
+from ..distributed.dp_attention import coordinate_forward_count_across_dp
+from ..distributed.parallel_state import (
+    dp_attention_enabled,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from ..executor.cuda_graph import DEFAULT_BATCH_SIZES
+from ..executor.executor import (
+    Executor,
+    MultiprocExecutor,
+    UniProcExecutor,
+    launch_tensor_parallel,
+    reclaim_tensor_parallel_followers,
+)
+from ..executor.worker import ModelInput, PassKind, PassLogprobs, pipeline_enabled
+from ..models.config import read_model_type
+from ..models.registry import ModelRegistry
+from ..tools.observability import EngineMetrics, Tracer
+from ..utils.env_compat import getenv
+from ..utils.logger import get_logger
+from .batch_planner import (
+    DEFAULT_MAX_CHUNK_SIZE,
+    DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    DEFAULT_MAX_NUM_SEQS,
+    BatchPlanner,
+    Request,
+    RequestStatus,
+    SchedulerConfig,
+    StepPlan,
+)
+from .detokenizer import IncrementalDetokenizer
+from .kv_offload import OffloadingManager
+from .ngram_proposer import NgramProposer
+from .outputs import CompletionOutput, RequestOutput
 from .sampler import PositionLogprobs, SamplingParams
+from .stop_criteria import POLL_INTERVAL, detect_repetition
+
+__all__ = [
+    "BatchPlanner",
+    "Request",
+    "RequestStatus",
+    "Scheduler",
+    "SchedulerConfig",
+    "StepPlan",
+]
+
+if TYPE_CHECKING:
+    from .llm_engine import LLMEngine
+
+#: Set to ``0`` to keep the pre-fused behaviour: resumed chunks (and prefix-cache
+#: hit remainders) extend one decode-style row per token instead of running as
+#: a grid pass through the chunked prefill kernel. A kill-switch rather than a
+#: config field because the engine decides once, from the cache dtype.
+_FUSED_CHUNK_ENV = "RAPID_LLM_FUSED_CHUNK_PREFILL"
+
+logger = get_logger(__name__)
+
+#: Ngram speculative decoding (O5): ``1``/``true``/``on`` enables ngram proposal
+#: for decode requests. The proposer scans the prompt + generated tokens for
+#: repeated n-grams and proposes draft continuations; a verify pass checks them
+#: in one forward, accepting matches and sampling at the first mismatch.
+_SPECULATE_ENV = "LITE_LLAMA_SPECULATE"
 
 
-class RequestStatus(StrEnum):
-    """Where a request sits in its lifecycle.
+class _Work(NamedTuple):
+    """A plan plus the requests whose tokens it will produce, in that order.
 
-    ``WAITING`` requests hold no cache slot; ``RUNNING`` ones own exactly one and
-    are part of every step until they finish.
+    The plan names slots, not requests, so the step keeps request objects
+    alongside it. ``requests`` is parallel to ``plan.sampled``;
+    ``chunk_requests`` is parallel to ``plan.slots`` (chunk passes only).
     """
 
-    WAITING = "waiting"
-    RUNNING = "running"
-    FINISHED = "finished"
+    plan: ModelInput
+    requests: list[Request]
+    chunk_requests: tuple[Request, ...] = ()
 
 
-@dataclass(slots=True)
-class Request:
-    """One generation request, from arrival to completion.
-
-    Carries both the inputs and everything the engine accumulates about it, so a
-    caller holding a :class:`Request` can report progress without consulting the
-    engine. ``delta`` is deliberately per-step scratch: the engine overwrites it
-    each step and streaming callers drain it, while ``text`` keeps the whole
-    completion for callers that only want the final answer.
-
-    Attributes:
-        request_id: Caller-visible identifier, unique among live requests.
-        prompt: The prompt as submitted, kept for echoing back in the response.
-        prompt_token_ids: Tokenised prompt.
-        params: Per-request sampling configuration.
-        max_new_tokens: Generation cap, resolved against the context window at
-            admission so the scheduler never has to consult the engine.
-        num_computed_tokens: Prompt tokens whose KV is already in the cache —
-            the cached prefix plus every chunk scheduled so far. The next chunk
-            of this request starts at exactly this offset.
-        arrival_time: ``time.monotonic()`` when the request entered the queue.
-        scheduled_time: When the request last left the queue for a slot — the
-            queue wait is ``scheduled_time - arrival_time`` (re-admission after
-            a preemption restarts it, since the request was waiting again).
-        status: Lifecycle position.
-        slot: Cache slot while running, ``None`` otherwise.
-        output_token_ids: Tokens generated so far.
-        text: Detokenised completion so far.
-        delta: Text produced by the most recent step only.
-        finish_reason: ``"eos"``, ``"length"``, ``"repeat"``, ``"abort"`` or
-            ``"invalid"`` (background tokenize rejected the prompt, O10).
-        first_token_time: When the first token became visible (for TTFT).
-        finish_time: When the request finished.
-        num_cached_tokens: Leading prompt tokens this request reused from the
-            prefix cache instead of prefilling. Their K/V sits in physical
-            blocks this request now *shares* with whoever computed them, so
-            ``num_computed_tokens`` starts here rather than at 0 and nothing
-            was copied to get there.
-        block_plan: Per-step scratch: the block-table entries the executor must
-            write before this step's pass reads them, as ``(group_id,
-            start_block, block_ids)`` per KV cache group. Set on the step a
-            request is admitted (its whole mapping, reused blocks included) and
-            on any later step that grew it past a block boundary; empty on
-            steps that need no new mapping.
-        prompt_logprobs: Per-position records for the prompt, ``prompt_len``
-            long once prefill completes; position 0 and prefix-cache hits stay
-            ``None`` (their predictor never ran). Built chunk by chunk; ``None``
-            until the first chunk of a request that asked arrives, ``None``
-            forever when it did not.
-        output_logprobs: Per-token records for the generated span, parallel to
-            ``output_token_ids``; ``None`` when the request did not ask.
-        delta_logprobs: Per-step scratch like ``delta``: the record of the token
-            this step produced, drained by the streaming layer. ``None`` on
-            steps with no new token, and for requests that did not ask.
-        pending_tokens: Tokens whose pass has launched but whose harvest has
-            not run — the optimistic half of the launch/harvest pipeline. Zero
-            forever in the synchronous engine; one while the pipeline is full,
-            which is exactly the gap between what the device has and what the
-            host has harvested, and what the next decode plan adds back to the
-            request's bookkeeping to keep writing the right cache rows.
-        error: The exception that rejected this request before it reached the
-            scheduler — a background-tokenize failure or an empty/over-long
-            prompt (O10). ``None`` on every request that actually ran; the
-            synchronous path raises from ``add_request`` instead.
-    """
-
-    request_id: str
-    prompt: str
-    prompt_token_ids: list[int]
-    params: SamplingParams
-    max_new_tokens: int = 0
-    num_computed_tokens: int = 0
-    arrival_time: float = field(default_factory=time.monotonic)
-    scheduled_time: float | None = None
-    status: RequestStatus = RequestStatus.WAITING
-    slot: int | None = None
-    output_token_ids: list[int] = field(default_factory=list)
-    text: str = ""
-    delta: str = ""
-    finish_reason: str | None = None
-    first_token_time: float | None = None
-    finish_time: float | None = None
-    num_cached_tokens: int = 0
-    block_plan: tuple[tuple[int, int, tuple[int, ...]], ...] = ()
-    prompt_logprobs: list[PositionLogprobs | None] | None = None
-    output_logprobs: list[PositionLogprobs] | None = None
-    delta_logprobs: PositionLogprobs | None = None
-    pending_tokens: int = 0
-    error: BaseException | None = None
-
-    @property
-    def prompt_len(self) -> int:
-        return len(self.prompt_token_ids)
-
-    @property
-    def seq_len(self) -> int:
-        """Tokens currently in this request's KV cache."""
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-    @property
-    def is_finished(self) -> bool:
-        return self.status is RequestStatus.FINISHED
-
-    @property
-    def has_room(self) -> bool:
-        """Whether the generation cap still allows another token."""
-        return len(self.output_token_ids) < self.max_new_tokens
-
-    @property
-    def prefill_done(self) -> bool:
-        """Whether the whole prompt is in the cache, i.e. decode may proceed."""
-        return self.num_computed_tokens >= self.prompt_len
+# Background tokenize workers (O10). Tokenizer.encode releases the GIL, so a
+# few workers give a burst of arrivals genuinely parallel encoding; idle
+# threads cost nothing.
+_TOKENIZE_WORKERS = 4
 
 
-DEFAULT_MAX_NUM_SEQS = 32
-DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
-DEFAULT_MAX_CHUNK_SIZE = 512
-
-
-@dataclass(frozen=True, slots=True)
-class SchedulerConfig:
-    """Limits the admission policy enforces.
-
-    Attributes:
-        max_seq_len: Context window; also the per-slot cache capacity.
-        max_num_seqs: Ceiling on concurrently running requests.
-        max_num_batched_tokens: Ceiling on the padded token count of one
-            prefill group. Measured on *chunks*, not whole prompts: with
-            chunked prefill a step's grid is as wide as its longest chunk.
-        enable_chunked_prefill: Whether one prompt may prefill across several
-            steps. On by default, as in vLLM: a long prompt is split into
-            ``max_chunk_size`` pieces that interleave with decode, so a single
-            32k prefill cannot stall every running request. Off means each
-            prompt prefills in one pass, which needs a token budget wide
-            enough to hold the longest context — ``max_num_batched_tokens >=
-            max_seq_len``, validated here the way vLLM validates it. Passing
-            ``max_chunk_size=0`` is the older spelling of off and still turns
-            this flag off, so there is one source of truth to read.
-        max_chunk_size: Maximum tokens per prefill chunk, once chunking is on.
-            A prompt longer than this is split into chunks interleaved with
-            decode steps. Ignored when ``enable_chunked_prefill`` is False.
-        enable_prefix_cache: Whether to reuse blocks across sequences by block
-            hash. Blocks are paged and reference-counted either way; this only
-            decides whether a completed block is *indexed* so another sequence
-            can share it.
-        prefix_cache_blocks: Override for the physical block-pool size, in
-            blocks of :data:`~rapid_llm.engine.prefix_cache.PREFIX_CACHE_BLOCK_SIZE`
-            tokens. ``None`` takes the executor's real cache size, falling back
-            to a bound derived from the slot geometry (see
-            :meth:`Scheduler._default_num_blocks`).
-        enable_preemption: When True, ``max_num_seqs`` is honoured as a desired
-            concurrency even beyond the slot count: an oversubscribed batch
-            time-shares slots by preempting (recompute) the youngest running
-            request to admit an older waiting one. When False (default) the
-            batch is capped at the slot count and nothing is ever evicted.
-        decode_window_steps: How many pure-decode steps a fresh prompt waits
-            at most before it may interrupt them (O9 decode window). ``0`` (the
-            default) admits immediately — the honest baseline. ``N > 0`` trades
-            a little TTFT for decode smoothness: while decodes are running and
-            no chunked prefill is already in flight, admission is deferred up
-            to ``N`` steps, so a burst of prompts cannot stretch every running
-            request's step back-to-back. Steps carrying resumed chunks never
-            defer — the interruption is already paid.
-    """
-
-    max_seq_len: int = 2048
-    max_num_seqs: int = DEFAULT_MAX_NUM_SEQS
-    max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS
-    enable_chunked_prefill: bool = True
-    max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
-    enable_prefix_cache: bool = False
-    prefix_cache_blocks: int | None = None
-    enable_preemption: bool = False
-    decode_window_steps: int = 0
-
-    def __post_init__(self) -> None:
-        if self.max_seq_len < 2:
-            raise ValueError(f"max_seq_len must be >= 2, got {self.max_seq_len}")
-        if self.max_num_seqs < 1:
-            raise ValueError(f"max_num_seqs must be >= 1, got {self.max_num_seqs}")
-        if self.max_num_batched_tokens < 1:
-            raise ValueError(
-                f"max_num_batched_tokens must be >= 1, got {self.max_num_batched_tokens}"
-            )
-        if self.max_chunk_size < 0:
-            raise ValueError(f"max_chunk_size must be >= 0, got {self.max_chunk_size}")
-        # ``max_chunk_size=0`` predates the flag; fold it in so the scheduler
-        # only ever has to consult ``enable_chunked_prefill``.
-        if self.max_chunk_size == 0:
-            object.__setattr__(self, "enable_chunked_prefill", False)
-        if not self.enable_chunked_prefill and self.max_num_batched_tokens < self.max_seq_len:
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is smaller than "
-                f"max_seq_len ({self.max_seq_len}) with chunked prefill disabled: a whole "
-                "prompt must fit one prefill pass. Raise max_num_batched_tokens, lower "
-                "max_seq_len, or leave chunked prefill on."
-            )
-        # Two is the floor rather than one: block 0 is the reserved null block.
-        if self.prefix_cache_blocks is not None and self.prefix_cache_blocks < 2:
-            raise ValueError(
-                f"prefix_cache_blocks must be >= 2 or None, got {self.prefix_cache_blocks}"
-            )
-        if self.decode_window_steps < 0:
-            raise ValueError(f"decode_window_steps must be >= 0, got {self.decode_window_steps}")
-
-
-@dataclass(frozen=True, slots=True)
-class SchedulerOutput:
-    """What one engine step should run.
-
-    Prefill and decode coexist in one step: the engine executes the prefill
-    pass, then the decode pass, so chunked prefill never stalls decode.
-
-    Attributes:
-        prefill: Requests receiving prefill work this step, in batch order.
-        decode: Requests receiving one decode token this step.
-        prefill_chunk_lens: Tokens to process per prefill request. A request
-            whose chunk completes its prompt produces its first sampled token
-            this step; a partial chunk produces none.
-        preempted: Requests evicted this step (for logging/metrics).
-    """
-
-    prefill: list[Request] = field(default_factory=list)
-    decode: list[Request] = field(default_factory=list)
-    prefill_chunk_lens: list[int] = field(default_factory=list)
-    preempted: list[Request] = field(default_factory=list)
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.prefill and not self.decode
-
-
-@dataclass(slots=True)
-class _Promotion:
-    """A request parked while a CPU-tier prefix is copied up to the GPU.
-
-    The GPU blocks are already allocated and the copy is in flight; until its
-    event lands the request sits in neither queue — re-admitting it would
-    double-allocate, and a step cannot read rows whose copy has not landed.
-    ``num_tokens`` is the block-aligned length the promotion covers, and it
-    is what the request's ``num_computed_tokens`` becomes once readable.
-
-    Attributes:
-        request: The parked request.
-        gpu_blocks: Blocks the copy lands in; the handle its event matches on.
-        num_tokens: Tokens the promotion covers, CPU hit plus GPU prefix.
-    """
+class _TokenizeJob(NamedTuple):
+    """One background encode (O10): a request awaiting its prompt tokens."""
 
     request: Request
-    gpu_blocks: tuple[int, ...]
-    num_tokens: int
+    future: Future[list[int]]
+    on_error: Callable[[Request, BaseException], None] | None
+
+
+def _chunk_work(kind: PassKind, chunks: list[tuple[Request, int]]) -> _Work:
+    """Plan one prompt-chunk pass; the two routes differ only in ``kind``.
+
+    Chunk ``i`` writes cache rows ``[num_computed_tokens - chunk,
+    num_computed_tokens)`` of its slot — the scheduler already advanced the
+    counter. A chunk resuming on a prefix-cache hit also carries the copies.
+    """
+    slots, starts, lens, tokens = [], [], [], []
+    sampled, requests = [], []
+    prompt_logprobs, prompt_targets = [], []
+    writes: list[tuple[int, int, int, tuple[int, ...]]] = []
+    for row, (request, chunk) in enumerate(chunks):
+        start = request.num_computed_tokens - chunk
+        end = request.num_computed_tokens
+        slots.append(request.slot)
+        starts.append(start)
+        lens.append(end)
+        tokens.extend(request.prompt_token_ids[start:end])
+        prompt_logprobs.append(request.params.prompt_logprobs)
+        # Row j is scored against the token at start+j+1. A partial chunk's
+        # last row targets the *next* chunk's first token; a final chunk's
+        # last row is sampled and has no target. Both tails pad with 0.
+        targets = request.prompt_token_ids[start + 1 : end + 1]
+        prompt_targets.extend(targets + [0] * (chunk - len(targets)))
+        writes += [
+            (request.slot, group_id, start_block, block_ids)
+            for group_id, start_block, block_ids in request.block_plan
+        ]
+        if request.num_computed_tokens == request.prompt_len:
+            # Only a finished prompt has a next token to sample; the pass
+            # mixes both, so sampled rows are a subset named by row index.
+            sampled.append(row)
+            requests.append(request)
+
+    wants_prompt = any(k is not None for k in prompt_logprobs)
+    return _Work(
+        ModelInput(
+            kind=kind,
+            slots=tuple(slots),
+            seq_starts=tuple(starts),
+            seq_lens=tuple(lens),
+            tokens=tuple(tokens),
+            sampling=tuple(request.params for request in requests),
+            sampled=tuple(sampled),
+            # A first token has no repetition-penalty history yet.
+            gen_counts=(0,) * len(requests),
+            block_writes=tuple(writes),
+            prompt_logprobs=tuple(prompt_logprobs) if wants_prompt else (),
+            prompt_targets=tuple(prompt_targets) if wants_prompt else (),
+        ),
+        requests,
+        tuple(request for request, _ in chunks),
+    )
+
+
+def _prefill_work(
+    group: list[Request], chunk_lens: list[int], chunked_min_rows: float = math.inf
+) -> list[_Work]:
+    """Split the step's prompt chunks by the kernel each may legally use.
+
+    A *first* chunk (``num_computed_tokens == chunk``) runs as a padded grid
+    through the prefill kernel — nothing of the prompt is cached yet. A
+    *resumed* chunk lands on cached rows, and its pass is routed by row count:
+
+    * a short remainder whose rows fit inside a captured CUDA-graph batch
+      extends instead — decode-style rows replay a decode graph, the cheapest
+      pass of all;
+    * a longer one (``rows >= chunked_min_rows``) runs as a grid pass through
+      the chunked prefill kernel — queries are the chunk's rows, keys/values
+      its slot's own cache rows, tensor-core tiled. An extend pass of that
+      width cannot replay (it exceeds every captured batch) and pays one
+      decode-style row per token, roughly an order of magnitude more per token
+      than the grid.
+
+    ``chunked_min_rows`` is ``math.inf`` when the chunked kernel may not run
+    at all (the ``RAPID_LLM_FUSED_CHUNK_PREFILL=0`` kill-switch), and the
+    smallest value that cannot replay a graph (one past the largest captured
+    batch size, so ``1`` with graphs off) otherwise.
+    """
+    pairs = list(zip(group, chunk_lens, strict=True))
+    fresh = [pair for pair in pairs if pair[0].num_computed_tokens == pair[1]]
+    resumed = [pair for pair in pairs if pair[0].num_computed_tokens > pair[1]]
+    works = [_chunk_work(PassKind.PREFILL, fresh)] if fresh else []
+    if resumed:
+        rows = sum(chunk for _, chunk in resumed)
+        kind = PassKind.PREFILL if rows >= chunked_min_rows else PassKind.EXTEND
+        works.append(_chunk_work(kind, resumed))
+    return works
+
+
+def _decode_work(running: list[Request], *, from_device: bool = False) -> _Work:
+    """Plan one decode token for every fully prefilled request.
+
+    The input token is the last one each request generated — already back on
+    the host from the previous step's synchronisation. With ``from_device``
+    (the launch/harvest pipeline) it is instead whatever the device sampled
+    last, which the host has *not* harvested yet: the plan carries a
+    placeholder id only the worker's device-side gather can replace, and every
+    length is the optimistic one — the request's bookkeeping plus its
+    launched-but-unharvested token.
+    """
+
+    def ahead(request: Request) -> int:
+        """How far the device is past the host's ledger; 0 outside the pipeline."""
+        return request.pending_tokens if from_device else 0
+
+    # The request already counts the token it is about to feed, plus the one
+    # the pipeline fed it before the host ever saw it.
+    seq_lens = tuple(request.seq_len + ahead(request) for request in running)
+    return _Work(
+        ModelInput(
+            kind=PassKind.DECODE,
+            slots=tuple(request.slot for request in running),
+            # One token per row, landing at the row its cache length points at.
+            seq_starts=tuple(length - 1 for length in seq_lens),
+            seq_lens=seq_lens,
+            # ``-1`` is deliberately not a token id: if a placeholder ever
+            # reaches an embedding, the pipeline's device-side gather was
+            # skipped and the failure is loud, never a silently wrong token.
+            tokens=(
+                tuple(-1 for _ in running)
+                if from_device
+                else tuple(request.output_token_ids[-1] for request in running)
+            ),
+            sampling=tuple(request.params for request in running),
+            sampled=tuple(range(len(running))),
+            gen_counts=tuple(len(request.output_token_ids) + ahead(request) for request in running),
+            # A decode step that crossed a block boundary was given a fresh page
+            # by the scheduler; its table entry has to land before the gather.
+            block_writes=tuple(
+                (request.slot, group_id, start_block, block_ids)
+                for request in running
+                for group_id, start_block, block_ids in request.block_plan
+            ),
+        ),
+        running,
+    )
 
 
 class Scheduler:
-    """FCFS admission with chunked prefill and preemption support.
+    """Serves independently arriving requests as one continuously reshaped batch.
 
-    The scheduling step is a three-stage template (mirrors vLLM v1's
-    ``schedule``): resume in-flight partial prefills, admit queued requests
-    into whatever budget and slots remain, then collect the decode batch.
-    Every stage advances ``num_computed_tokens`` on the request itself as it
-    commits work, which is why no external ``advance`` protocol exists.
-
-    The scheduler is also the KV cache's allocator: every stage that plans work
-    first reserves the physical blocks that work will write, through the
-    :class:`~rapid_llm.engine.prefix_cache.PrefixCache`. That is what makes
-    reuse free — a shared prefix is a shared block, and the ``block_plan`` each
-    request carries is the executor's instruction to point its table rows at it.
+    Drive it by calling :meth:`step` in a loop: each call runs the scheduler's
+    plan (prompt chunks, then a decode token for everything running) and returns
+    the requests that produced a token. One host-device synchronisation per
+    step is deliberate — it reads sampled tokens back to detokenise and to
+    decide who stops, so a finished request leaves the batch on the next step.
 
     Args:
-        config: Admission and chunking limits.
-        num_slots: Cache slots available.
-        num_blocks: Physical KV blocks the executor allocated, the null block
-            included. ``None`` derives a bound from the slot geometry (see
-            :meth:`_default_num_blocks`), which is what a scheduler driven
-            without an executor gets.
-        offloading: An iteration behind the GPU prefix cache — a CPU tier
-            whose blocks promote into freshly allocated GPU blocks at
-            admission. ``None`` (the default) keeps admission GPU-only.
+        engine: A built :class:`~rapid_llm.engine.llm_engine.LLMEngine`; takes
+            over its KV cache and must be the only user of it.
+        config: Admission limits. Defaults derive ``max_seq_len`` from the engine.
+        executor: Where passes run. Defaults to a
+            :class:`~rapid_llm.executor.executor.UniProcExecutor` (single GPU);
+            injecting a fake is how a test drives the step loop without a model.
+        async_tokenize: O10 — encode prompts on a background thread pool
+            instead of the caller's thread. ``add_request`` returns a request
+            whose tokens fill in on the first :meth:`step` after the encode
+            lands, so a large prompt no longer stalls the engine loop (or the
+            step cadence) for its tens of milliseconds of encoding.
+        offloading: A CPU tier whose blocks promote into the GPU pool, built by
+            the caller around the executor's cache (see
+            :class:`~rapid_llm.engine.kv_offload.base.OffloadingManager`).
+            ``None`` (the default) keeps the engine's KV GPU-only.
 
     Raises:
-        ValueError: Offloading was configured for a KV cache layout that
-            cannot be mirrored (see
-            :attr:`~rapid_llm.engine.prefix_cache.PrefixCache.offloadable_group`),
-            or with prefix caching off — the tier's keys are the cache's block
-            hashes.
+        NotImplementedError: The checkpoint is multimodal — vision prefill
+            needs per-request processor outputs the batched grid has no place for.
     """
 
     def __init__(
         self,
-        config: SchedulerConfig,
-        num_slots: int,
-        num_blocks: int | None = None,
+        engine: LLMEngine,
+        config: SchedulerConfig | None = None,
+        executor: Executor | None = None,
+        *,
+        pipeline: bool | None = None,
+        pipeline_depth: int = 1,
+        async_tokenize: bool = False,
         offloading: OffloadingManager | None = None,
     ) -> None:
-        if num_slots < 1:
-            raise ValueError(f"need at least one cache slot, got {num_slots}")
-        self.config = config
-        self.num_slots = num_slots
-        # Preemption lets the running set exceed the slot count (slots are
-        # time-shared via recompute); otherwise concurrency is slot-capped.
-        self.max_num_seqs = (
-            config.max_num_seqs if config.enable_preemption else min(config.max_num_seqs, num_slots)
-        )
-
-        # Ordered map = FCFS iteration plus constant-time cancellation. Serving
-        # queues can be much deeper than the running batch, so a deque scan on
-        # every disconnected client becomes measurable under overload.
-        self._waiting: OrderedDict[str, Request] = OrderedDict()
-        self._running: list[Request] = []
-
-        self._requests: dict[str, Request] = {}
-        self._free_slots: list[int] = list(reversed(range(num_slots)))
-
-        # One allocator whether or not reuse is on: paging is how a request gets
-        # its rows at all now, so "prefix caching off" only switches off the hash
-        # index. That keeps admission on a single code path instead of a
-        # branch-per-stage null object.
-        self._prefix_cache = PrefixCache(
-            num_blocks=(
-                config.prefix_cache_blocks or num_blocks or self._default_num_blocks(num_slots)
-            ),
-            block_size=PREFIX_CACHE_BLOCK_SIZE,
-            enable_caching=config.enable_prefix_cache,
-        )
-
-        # Blocks whose K/V a planned pass will write, awaiting the step that
-        # proves it ran; see :meth:`_commit_pending_blocks`.
-        self._pending_blocks: list[tuple[Request, int]] = []
-        self.num_preemptions: int = 0
-        # Pure-decode steps deferred since the first request started waiting
-        # (O9 decode window): the wait is bounded by ``decode_window_steps``.
-        self._deferred_steps: int = 0
-
-        # Offloading state. A promotion is a request whose CPU-tier prefix is
-        # being copied into freshly allocated GPU blocks: in neither queue
-        # until the copy's event lands, then slot-gated (`_ready_promotes`),
-        # or freed late if the request died in flight (`_dying_promotes`).
-        if offloading is not None:
-            if self._prefix_cache.offloadable_group is None:
-                raise ValueError(
-                    "offloading needs a homogeneous, non-windowed KV cache layout; "
-                    "this model's groups cannot be mirrored by the CPU tier"
-                )
-            if not config.enable_prefix_cache:
-                raise ValueError(
-                    "offloading keys blocks by their content hash, so it needs "
-                    "enable_prefix_cache=True"
-                )
-        self._offloading = offloading
-        self._pending_promotes: dict[str, _Promotion] = {}
-        self._ready_promotes: deque[Request] = deque()
-        self._dying_promotes: dict[str, _Promotion] = {}
-        # Reverse index: gpu_blocks -> request_id, so _take_promotion is O(1)
-        self._promotion_by_blocks: dict[tuple[int, ...], str] = {}
-
-    def _default_num_blocks(self, num_slots: int) -> int:
-        """Pool size to use when the executor did not report its cache size.
-
-        Enough blocks for every slot to hold a full context — the capacity the
-        fixed-slot layout used to reserve outright. Paging pays off precisely
-        when the pool is *smaller* than this, but a scheduler built without an
-        executor (every unit test) should not be where that is discovered.
-        """
-        return max(2, num_slots * self.config.max_seq_len // PREFIX_CACHE_BLOCK_SIZE + 1)
-
-    # ------------------------------------------------------------------ queue #
-    def add_request(self, request: Request) -> None:
-        """Queue a request, resolving its generation cap against the context window.
-
-        Raises:
-            ValueError: The prompt is empty, or leaves no room to generate.
-        """
-        if request.request_id in self._requests:
-            raise ValueError(f"request id {request.request_id!r} is already active")
-        if request.status is not RequestStatus.WAITING or request.slot is not None:
-            raise ValueError("only a fresh waiting request can be submitted")
-
-        limit = self.config.max_seq_len
-        if request.prompt_len == 0:
-            raise ValueError(f"request {request.request_id} has an empty prompt")
-        if request.prompt_len >= limit:
-            raise ValueError(
-                f"request {request.request_id} prompt length {request.prompt_len} "
-                f"leaves no room under max_seq_len {limit}"
+        if engine.model_runner.spec.is_multimodal:
+            raise NotImplementedError(
+                "continuous batching supports text-only checkpoints; "
+                "use LLM.generate() for vision-language models"
             )
 
-        room = limit - request.prompt_len
-        requested = request.params.max_gen_len
-        request.max_new_tokens = min(requested, room) if requested else room
-        self._requests[request.request_id] = request
-        self._waiting[request.request_id] = request
+        self.engine = engine
+        self.device = engine.device
+        self.tokenizer = engine.tokenizer
+        self.stop_token_ids = engine.stop_token_ids
 
-    def has_request_id(self, request_id: str) -> bool:
-        """Whether ``request_id`` belongs to a live scheduler request.
+        config = config or SchedulerConfig(max_seq_len=engine.max_seq_len)
+        if config.max_seq_len > engine.max_seq_len:
+            raise ValueError(
+                f"scheduler max_seq_len {config.max_seq_len} exceeds the engine's "
+                f"{engine.max_seq_len}"
+            )
+        self.config = config
 
-        The engine owns a few request states that have not reached the
-        scheduler yet (notably background tokenisation), but the scheduler is
-        authoritative once admission succeeds.  Exposing this narrow query
-        keeps callers from reaching into ``_requests`` merely to protect the
-        public request-id namespace.
+        self._pipeline = pipeline_enabled() if pipeline is None else pipeline
+        self._pipeline_depth = max(1, pipeline_depth) if self._pipeline else 1
+        if self._pipeline and config.enable_preemption:
+            raise ValueError(
+                "the launch/harvest pipeline cannot plan one token ahead for a "
+                "request preemption is about to recompute from scratch; drop "
+                "enable_preemption or leave the pipeline off"
+            )
+
+        # Resumed chunks route by row count (see ``_prefill_work``): a short
+        # remainder extends as rows that replay a decode graph, a longer one
+        # runs through the chunked prefill kernel, whose tensor-core tiling
+        # beats paying one decode-style row per token — the per-token cost
+        # that kept prefix-cache hits from lowering TTFT. An fp8 cache routes
+        # the same way: the chunk kernel dequantises the e4m3 rows it reads.
+        fused = getenv(_FUSED_CHUNK_ENV, "1") != "0"
+
+        self._executor: Executor = executor or UniProcExecutor(
+            engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
+        )
+        # The replay cap reads the runner's live graph manager, so it is
+        # settled after the executor; ``math.inf`` disables the chunked route.
+        # With graphs off the cap falls back to the *configured* batch sizes:
+        # EXTEND (fp32 vector sums) and the chunked kernel (``tl.dot``) are not
+        # numerically equivalent, so a threshold that flipped with the graph
+        # switch made eager and graph diverge from the first token. Replay is
+        # bit-identical (verified at capture), so a switch-invariant threshold
+        # suffices -- measured: 9 output mismatches removed at no TTFT/TPOT cost.
+        manager = self._graph_manager()
+        cap = max(manager.batch_sizes, default=0) if manager else max(DEFAULT_BATCH_SIZES)
+        self._chunked_min_rows = cap + 1 if fused else math.inf
+        # The executor owns the cache, so it decides how many requests can be in
+        # flight; the scheduler hands out exactly those slots, and pages out of a
+        # pool sized by the cache the executor actually profiled.
+        self.planner = BatchPlanner(
+            config, self._executor.num_slots, self._executor.num_kv_blocks or None, offloading
+        )
+        self._offloading = offloading
+
+        self._detokenizers: dict[str, IncrementalDetokenizer] = {}
+        self._request_ids = itertools.count()
+        self._step_count = 0
+        # O5 ngram speculative decoding: proposer scans prompt + generated
+        # tokens for repeated n-grams and proposes draft continuations.
+        # Enabled via LITE_LLAMA_SPECULATE=1; off by default because the
+        # verify pass adds a forward per step and only pays off when the
+        # workload has repetitive structure (code, repeated templates).
+        self._speculate = os.environ.get(_SPECULATE_ENV, "0").strip().lower() in ("1", "true", "on")
+        if self._speculate and dp_attention_enabled():
+            raise ValueError(
+                "DP attention does not support speculative decoding yet: verify passes "
+                "must be coordinated across DP replicas"
+            )
+        self._proposer = NgramProposer(max_ngram_size=5, max_draft=6) if self._speculate else None
+        # O10 background tokenize: pool created on first use, jobs collected at
+        # the top of every step (same thread that calls add_request, so the
+        # dict needs no lock).
+        self._async_tokenize = async_tokenize
+        self._tokenize_pool: ThreadPoolExecutor | None = None
+        self._tokenizing: dict[str, _TokenizeJob] = {}
+        # Launched-but-unharvested passes, when pipelined: each entry is the
+        # launched list of (work, host tokens, event, records).  Depth is
+        # ``self._pipeline_depth`` — every step harvests the oldest entry when
+        # enough are in flight, so the D2H copy of step N-*depth* has landed.
+        self._inflight: deque[
+            list[tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]]
+        ] = deque()
+
+        # Observability: metrics and tracing are cheap no-ops when disabled,
+        # so the hot loop never branches on them.
+        self.metrics = EngineMetrics.from_env()
+        self.tracer = Tracer.from_env()
+        self._spans: dict[str, object] = {}
+
+    # ------------------------------------------------------------------ build #
+    @classmethod
+    def from_pretrained(
+        cls,
+        model: str,
+        *,
+        tokenizer: str | None = None,
+        max_seq_len: int = 2048,
+        max_num_seqs: int = DEFAULT_MAX_NUM_SEQS,
+        max_num_batched_tokens: int = DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        enable_chunked_prefill: bool = True,
+        max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
+        max_gpu_num_blocks: int | None = None,
+        device: str = "cuda",
+        use_cuda_graph: bool = True,
+        quantization: str | None = None,
+        tensor_parallel_size: int = 1,
+        enable_expert_parallel: bool = False,
+        kv_cache_dtype: str = "auto",
+        enable_prefix_cache: bool = False,
+        prefix_cache_blocks: int | None = None,
+        enable_preemption: bool = False,
+        decode_window_steps: int = 0,
+        cuda_graph_lazy: bool = False,
+        async_tokenize: bool = False,
+        pipeline: bool | None = None,
+        pipeline_depth: int = 1,
+        hf_overrides: dict[str, object] | None = None,
+    ) -> Scheduler:
+        """Load a checkpoint and wrap it in a continuous-batching engine.
+
+        Args:
+            model: HuggingFace checkpoint directory.
+            tokenizer: Tokenizer location; defaults to ``model``.
+            max_seq_len: Context window, and the per-slot cache size.
+            max_num_seqs: Concurrency ceiling.
+            max_num_batched_tokens: Padded token budget for one prefill group.
+            enable_chunked_prefill: Whether a prompt may prefill across steps
+                (vLLM's default: on). Off prefills each prompt in one pass and
+                needs ``max_num_batched_tokens >= max_seq_len``.
+            max_chunk_size: Maximum tokens a request may prefill in one step;
+                ``0`` disables chunking.
+            max_gpu_num_blocks: Manual KV-cache size in tokens; profiled when ``None``.
+            device: Torch device string.
+            use_cuda_graph: Capture decode graphs. Worth keeping on: continuous
+                batching pads odd batch sizes onto the captured grid, so most
+                steps stay on the graph path. Also honoured above
+                ``tensor_parallel_size`` 1, where the capture takes the sharded
+                layers' all-reduce with it — see
+                :meth:`~rapid_llm.executor.model_runner.ModelRunner.enable_cuda_graph`
+                for the checks that decide whether those graphs are kept.
+            quantization: Runtime weight quantisation, forwarded to the engine.
+                Orthogonal to batching -- it changes the linear layers, not the
+                KV cache or the schedule.
+            tensor_parallel_size: GPUs this replica's weights are split over.
+                Above 1, ranks 1.. spawn as followers and every step's plan is
+                broadcast to them; this process stays rank 0. If this process
+                already sits in a TP group (the CLI, a DP controller), that group
+                is reused and the value only has to agree with it.
+            enable_expert_parallel: Split MoE experts whole-across-ranks over
+                the TP group instead of TP-splitting each expert's intermediate
+                dim (vLLM semantics). Attention and shared experts stay TP;
+                routed tokens travel by all-to-all. Decode keeps its CUDA
+                graphs — the a2a exchanges capture with the same comm-stream
+                discipline the deferred all-reduce uses, and EP defaults to
+                lazy capture so the larger exchange buffers fit.
+            kv_cache_dtype: KV-cache element type, forwarded to the engine
+                (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
+            enable_prefix_cache: Reuse the K/V of prompt prefixes already
+                resident in the cache. Off by default: it only pays when prompts
+                share a prefix, and otherwise costs a hash per block. See
+                :mod:`rapid_llm.engine.prefix_cache`.
+            prefix_cache_blocks: Optional physical prefix-cache capacity in
+                16-token blocks.  ``None`` uses the profiled KV capacity.
+            enable_preemption: Allow the scheduler to recompute and evict a
+                young decode request when logical concurrency exceeds slots.
+            decode_window_steps: O9 decode window — how many pure-decode steps
+                a fresh prompt waits at most before it may interrupt them.
+                ``0`` (default) admits immediately; ``N > 0`` trades a little
+                TTFT for TPOT smoothness under bursty arrivals.
+            cuda_graph_lazy: O13 lazy graph capture — seed pair at startup,
+                remaining shapes captured on first use. Pairs with
+                ``use_cuda_graph``; ignored when graphs are off or TP > 1.
+            async_tokenize: O10 — encode prompts on a background thread pool
+                so a large prompt's tens of milliseconds of tokenization stop
+                serialising against the engine loop and every step it would
+                have delayed. ``add_request`` returns immediately; the request
+                joins the scheduler once its tokens are ready.
+            pipeline: Run the launch/harvest engine loop (O2): launches run
+                ``pipeline_depth`` steps ahead of harvests so the host's
+                bookkeeping overlaps compute, and decode inputs stay on the
+                device. ``None`` reads
+                :data:`~rapid_llm.executor.worker.PIPELINE_ENV`. Stop handling
+                runs ``pipeline_depth`` tokens late, and a request asking for
+                logprobs pays its synchronisation inside the pass as usual.
+            pipeline_depth: How many steps the launch/harvest loop keeps in
+                flight.  At depth N the D2H copy of step M has landed by the
+                time step M+N is harvested, so ``event.synchronize()`` in the
+                harvest path returns with zero wait in steady state.  The
+                overhead is stop handling delayed by N tokens instead of 1,
+                and ``pending_tokens`` on each request ``N-1`` higher.
+            hf_overrides: Fields applied over the checkpoint's ``config.json``
+                (vLLM ``--hf-overrides`` semantics), e.g.
+                ``{"num_hidden_layers": 1}`` to run a trimmed stack — the
+                supported way to exercise one family's layer arithmetic
+                without paying for the whole model. Passed to every rank.
+
+        Raises:
+            NotImplementedError: The checkpoint is multimodal.
+            ValueError: ``tensor_parallel_size`` contradicts a group this process
+                is already a member of.
         """
-        return request_id in self._requests
+        # Keep CPU-only planning and fake-executor tests importable without
+        # Triton. A real model is the only path that needs the GPU engine.
+        from .llm_engine import LLMEngine
 
-    def abort(self, request_id: str) -> Request | None:
-        """Drop a request wherever it is; returns it, or ``None`` if unknown.
+        spec = ModelRegistry.resolve(read_model_type(model))
+        if spec.is_multimodal:
+            raise NotImplementedError(
+                "continuous batching supports text-only checkpoints; "
+                "use LLM.generate() for vision-language models"
+            )
 
-        A running request releases its slot immediately, so an abandoned HTTP
-        connection frees capacity on the next step rather than at its length cap.
+        engine_kwargs = {
+            "checkpoints_dir": model,
+            "tokenizer_path": tokenizer,
+            "max_seq_len": max_seq_len,
+            "max_gpu_num_blocks": max_gpu_num_blocks,
+            # Above tensor_parallel_size 1 the captured all-reduce is only
+            # replayed once the startup gates in ``ModelRunner`` accept it.
+            "use_cuda_graph": use_cuda_graph,
+            "quantization": quantization,
+            "kv_cache_dtype": kv_cache_dtype,
+            "cuda_graph_lazy": cuda_graph_lazy,
+            "hf_overrides": hf_overrides,
+        }
+
+        resolved_pipeline = pipeline_enabled() if pipeline is None else pipeline
+
+        # Followers must exist before this rank builds its engine: sharded
+        # layers read their width from the process group.
+        followers: tuple[BaseProcess, ...] = ()
+        joined = get_tensor_model_parallel_world_size()
+        if joined > 1 and joined != tensor_parallel_size:
+            raise ValueError(
+                f"this process is already rank {get_tensor_model_parallel_rank()} of a {joined}-way "
+                f"tensor-parallel group, but tensor_parallel_size={tensor_parallel_size}"
+            )
+        if joined == 1 and tensor_parallel_size > 1:
+            followers = launch_tensor_parallel(
+                tensor_parallel_size,
+                engine_kwargs,
+                max_num_seqs,
+                enable_expert_parallel=enable_expert_parallel,
+                device=device,
+                pipeline=resolved_pipeline,
+            )
+
+        # From here on this process is rank 0 of a group it owns (when it
+        # launched followers). Any failure in the build — an OOM loading the
+        # weight shard is the common one — must hand that group back before
+        # the exception escapes: a leftover half-dead parallel state re-shards
+        # the next engine this process builds and turns every later test in
+        # it into an all_reduce against a process group that no longer exists.
+        try:
+            engine = LLMEngine(
+                device=device,
+                tensor_parallel_size=tensor_parallel_size,
+                enable_expert_parallel=enable_expert_parallel,
+                **engine_kwargs,
+            )
+            config = SchedulerConfig(
+                max_seq_len=engine.max_seq_len,
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
+                max_chunk_size=max_chunk_size,
+                enable_prefix_cache=enable_prefix_cache,
+                prefix_cache_blocks=prefix_cache_blocks,
+                enable_preemption=enable_preemption,
+                decode_window_steps=decode_window_steps,
+            )
+            executor: Executor | None = None
+            if get_tensor_model_parallel_world_size() > 1:
+                executor = MultiprocExecutor(
+                    engine,
+                    config.max_num_seqs,
+                    config.max_seq_len,
+                    followers,
+                    pipeline=resolved_pipeline,
+                )
+            return cls(
+                engine,
+                config,
+                executor,
+                pipeline=resolved_pipeline,
+                pipeline_depth=pipeline_depth,
+                async_tokenize=async_tokenize,
+            )
+        except BaseException:
+            if followers:
+                reclaim_tensor_parallel_followers(followers)
+            raise
+
+    # ------------------------------------------------------------- public API #
+    def add_request(
+        self,
+        prompt: str,
+        sampling_params: SamplingParams | None = None,
+        request_id: str | None = None,
+        prompt_token_ids: list[int] | None = None,
+        on_error: Callable[[Request, BaseException], None] | None = None,
+    ) -> Request:
+        """Queue a request and return the handle that tracks it.
+
+        The handle is updated in place by :meth:`step`, so a caller can read
+        ``delta``, ``text`` and ``finish_reason`` as generation proceeds.
+
+        Args:
+            prompt: Prompt text, already chat-templated if the model wants that.
+            sampling_params: Per-request knobs; defaults to :class:`SamplingParams`.
+            request_id: Caller-supplied id; generated when omitted.
+            prompt_token_ids: Pre-tokenised prompt, to skip re-encoding.
+            on_error: O10 — fired (on the engine thread, from :meth:`step`)
+                when a background encode fails or the tokenised prompt is
+                rejected. The synchronous path raises from here instead.
         """
-        request = self._requests.get(request_id)
-        if request is None:
-            return None
-        if request.status is RequestStatus.WAITING:
-            self._waiting.pop(request_id, None)
-            request.status = RequestStatus.FINISHED
-            request.finish_reason = "abort"
-            request.finish_time = time.monotonic()
-            if not self._retire_promotion(request):
-                self._prefix_cache.free(request_id)
-            self._requests.pop(request_id, None)
-        else:
-            self.finish(request, "abort")
+        if request_id is None:
+            request_id = f"req-{next(self._request_ids)}"
+            while self._request_id_in_use(request_id):
+                request_id = f"req-{next(self._request_ids)}"
+        elif self._request_id_in_use(request_id):
+            raise ValueError(f"request id {request_id!r} is already active")
+
+        if prompt_token_ids is None and self._async_tokenize:
+            # O10: encode off this thread. The request joins the scheduler (or
+            # fails, firing ``on_error``) at the top of the next step, so a
+            # large prompt never stalls the loop that drives every other
+            # request's steps.
+            request = Request(
+                request_id=request_id,
+                prompt=prompt,
+                prompt_token_ids=[],
+                params=sampling_params or SamplingParams(),
+            )
+            future = self._ensure_tokenize_pool().submit(
+                self.tokenizer.encode, prompt, add_special_tokens=True
+            )
+            self._tokenizing[request_id] = _TokenizeJob(request, future, on_error)
+            return request
+
+        request = Request(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=(
+                prompt_token_ids
+                if prompt_token_ids is not None
+                else self.tokenizer.encode(prompt, add_special_tokens=True)
+            ),
+            params=sampling_params or SamplingParams(),
+        )
+        self._register_request(request)
         return request
 
-    # -------------------------------------------------------------- scheduling #
-    def schedule(self) -> SchedulerOutput:
-        """Decide this step's work: chunked prefill + decode batch.
+    def _request_id_in_use(self, request_id: str) -> bool:
+        """Check every live phase of the engine's request-id namespace.
 
-        Prefill and decode coexist: partial prefill chunks for some requests
-        and decode tokens for the rest run in the same step, so a long prompt
-        stretches over several steps without freezing anyone's decode. Chunk
-        progress is committed here — the returned output describes work already
-        accounted for in each request's ``num_computed_tokens``.
+        A tokenisation job is not yet visible to :class:`Scheduler`, so the
+        scheduler's duplicate check alone used to let a second explicit id
+        overwrite the first job in ``_tokenizing``.  Keep this check at the
+        public admission boundary so all backends observe one namespace.
         """
-        prefill: list[Request] = []
-        chunk_lens: list[int] = []
-        preempted: list[Request] = []
-
-        # Offload plumbing comes first: events that landed since the last step
-        # become readable blocks, and promotions with capacity free join the
-        # running set in time for Stage 1 to resume their chunk.
-        self._drain_offload_events()
-        self._promote_ready()
-
-        # Stage 0: last step's passes have executed by now, so the blocks they
-        # filled really hold their K/V and may be offered to other requests.
-        self._commit_pending_blocks()
-
-        # Stage 1: resume requests whose prefill is still in flight. Their
-        # slot and blocks are held, so they come before new admissions — FCFS by
-        # arrival, and re-admitting a new request first would starve them.
-        for request in self._running:
-            if request.prefill_done:
-                continue
-            # A mapping belongs to the step that created it; a resumed chunk
-            # emits only whatever blocks it just grew into.
-            request.block_plan = ()
-            chunk = self._chunk_of(request)
-            reach = request.num_computed_tokens + chunk
-            if not self._reserve(request, reach, prefill, preempted):
-                # No blocks for the next chunk and nobody left to evict: the
-                # request keeps its slot and its progress, and retries next step.
-                continue
-            prefill.append(request)
-            chunk_lens.append(chunk)
-            request.num_computed_tokens = reach
-            self._map_blocks(request)
-            self._track_pending(request, reach)
-
-        # Stage 2: admit queued requests into the remaining budget and slots.
-        self._admit(prefill, chunk_lens, preempted)
-
-        # Stage 3: decode every request that finished prefill before this
-        # step. A prompt completed *this* step is sampled in its prefill pass
-        # and joins decode on the next one; partial prefills never pass the
-        # ``prefill_done`` gate.
-        just_prefilled = {id(request) for request in prefill if request.prefill_done}
-        decode = [
-            request
-            for request in self._running
-            if request.prefill_done and id(request) not in just_prefilled
-        ]
-        self._grow_decode(decode, prefill, preempted)
-
-        return SchedulerOutput(
-            prefill=prefill, decode=decode, prefill_chunk_lens=chunk_lens, preempted=preempted
+        return (
+            request_id in self._tokenizing
+            or request_id in self._detokenizers
+            or self.planner.has_request_id(request_id)
         )
 
-    def _grow_decode(
-        self, decode: list[Request], prefill: list[Request], preempted: list[Request]
-    ) -> None:
-        """Reserve the block each decode row's token will be written into.
-
-        A decode step writes one row per request, and every sixteenth of them
-        starts a new block — so this is where a running sequence grows its
-        allocation, and where a full pool is felt. Requests that cannot be grown
-        are preempted and dropped from the batch (``decode`` is filtered in
-        place), because a row with nowhere to write is not a step it can take.
-        """
-        limit = self.config.max_seq_len
-        granted = list(prefill)
-        for request in list(decode):
-            if request.status is not RequestStatus.RUNNING:
-                continue
-            request.block_plan = ()
-            # The token this step produces lands at position ``seq_len``, plus
-            # whatever the pipeline launched and the host has not harvested.
-            # Clamped: a request at the context limit writes no further row.
-            reach = min(request.seq_len + request.pending_tokens + 1, limit)
-            if self._reserve(request, reach, granted, preempted):
-                self._map_blocks(request)
-                self._track_pending(request, min(request.seq_len, limit))
-                granted.append(request)
-                continue
-            self._preempt(request)
-            preempted.append(request)
-        if preempted:
-            decode[:] = [r for r in decode if r.status is RequestStatus.RUNNING]
-
-    def reserve_speculative(self, request: Request, draft_rows: int) -> int:
-        """Grow a decode request's blocks over a speculative verify stretch.
-
-        The decode plan already reserved through the row its sampled token
-        will write (``seq_len``); a verify stretch puts ``draft_rows`` draft
-        tokens after that. Returns how many rows fit — the caller truncates
-        its draft to that — because rows past ``max_seq_len`` never fit and an
-        exhausted pool truncates rather than evicts: speculative decoding is
-        an optimisation whose fallback is the plain decode the pool already
-        serves.
-        """
-        limit = self.config.max_seq_len
-        fit = min(draft_rows, limit - request.seq_len)
-        while fit > 0:
-            if self._prefix_cache.allocate(request.request_id, request.seq_len + fit):
-                # Append, never replace: the mappings the decode plan staged
-                # have not reached the device yet, and take_table_writes will
-                # not repeat them — only the newly covered blocks emit.
-                request.block_plan += self._prefix_cache.take_table_writes(request.request_id)
-                return fit
-            fit -= 1
-        return 0
-
-    def _admit(
-        self, prefill: list[Request], chunk_lens: list[int], preempted: list[Request]
-    ) -> None:
-        """Admit waiting requests, committing their first chunk (or whole prompt).
-
-        A newly admitted request's first chunk is its uncached remainder capped
-        at ``max_chunk_size``; short prompts therefore finish prefill in this
-        very step, while long ones re-enter through Stage 1 on later steps.
-
-        Every candidate is first offered a CPU-tier promotion, which consumes
-        no seat, slot or batch width and therefore precedes those gates.
-        Preempted victims are appended to *preempted*, for reporting.
-        """
-        longest = max(chunk_lens, default=0)
-
-        if self._defer_admission(prefill):
-            self._deferred_steps += 1
-            return
-        self._deferred_steps = 0
-
-        while self._waiting:
-            candidate = next(iter(self._waiting.values()))
-
-            # Prefix cache: find the longest prefix already sitting in physical
-            # blocks, then take a *reference* on those very blocks — reuse is a
-            # shared block, not a copy of its rows. Never the whole prompt: at
-            # least one token must run to produce the first logits, exactly as
-            # vLLM keeps the last block uncached.
-            rid = candidate.request_id
-            hashes = self._prefix_cache.track(rid, candidate.prompt_token_ids)
-            match = self._prefix_cache.lookup(hashes, candidate.prompt_len)
-            if self._offloading is not None and match.num_tokens:
-                # The blocks a GPU hit serves sit on the CPU as well: bump their
-                # recency without pinning, so the tier still holds them if the
-                # pool evicts them and a later request promotes them back.
-                self._offloading.touch(hashes[: match.num_tokens // PREFIX_CACHE_BLOCK_SIZE])
-            if self._try_start_promotion(candidate, hashes, match):
-                # The CPU tier extends the prefix past what the pool holds. The
-                # copy runs on its own stream while the request consumes no
-                # seat, slot or token budget — so this offer precedes the gates
-                # below, which exist because a *chunk* consumes the step. The
-                # request waits on the copy's event; nothing about it runs this
-                # step.
-                self._waiting.pop(rid)
-                if preempted:
-                    break
-                continue
-
-            if len(self._running) >= self.max_num_seqs:
-                break
-            chunk = self._chunk_of(candidate, computed=0)
-            padded = max(longest, chunk) * (len(prefill) + 1)
-            if prefill and padded > self.config.max_num_batched_tokens:
-                break
-
-            if not self._free_slots:
-                victim = self._maybe_preempt(prefill)
-                if victim is None:
-                    break
-                preempted.append(victim)
-
-            chunk = self._chunk_of(candidate, computed=match.num_tokens)
-            if not self._prefix_cache.allocate(rid, match.num_tokens + chunk, match):
-                # Nothing was allocated, so admission simply waits for the pool
-                # to drain — having first offered a victim towards that.
-                self._prefix_cache.free(rid)
-                victim = self._maybe_preempt(prefill)
-                if victim is not None:
-                    preempted.append(victim)
-                break
-
-            self._waiting.pop(rid)
-            candidate.slot = self._free_slots.pop()
-            candidate.status = RequestStatus.RUNNING
-            candidate.scheduled_time = time.monotonic()
-            self._running.append(candidate)
-
-            candidate.num_cached_tokens = match.num_tokens
-            candidate.num_computed_tokens = match.num_tokens + chunk
-            self._map_blocks(candidate)
-
-            prefill.append(candidate)
-            chunk_lens.append(chunk)
-            self._track_pending(candidate, candidate.num_computed_tokens)
-            longest = max(longest, chunk)
-
-            if preempted:
-                break
-
-    def _defer_admission(self, resume_prefill: list[Request]) -> bool:
-        """Whether this step stays pure-decode instead of admitting new prefills.
-
-        Only a step that would otherwise be pure decode is worth protecting:
-        someone is mid-generation and a fresh prefill would stretch their step.
-        With no decode in flight, or a chunk already resuming this step, waiting
-        would only delay the first token with nothing to smooth.
-        """
-        window = self.config.decode_window_steps
-        if window <= 0 or not self._waiting or resume_prefill:
-            return False
-        if self._deferred_steps >= window:
-            return False
-        return any(request.prefill_done for request in self._running)
-
-    def _chunk_of(self, request: Request, computed: int | None = None) -> int:
-        """Next chunk to run, chunk- and budget-capped.
-
-        ``computed=0`` prices a fresh admission from progress zero — an upper
-        bound, since how much the prefix cache will cover is only known once
-        the request holds a slot. Under-pricing would admit a group that
-        overflows ``max_num_batched_tokens``.
-        """
-        progress = request.num_computed_tokens if computed is None else computed
-        remaining = request.prompt_len - progress
-        if not self.config.enable_chunked_prefill:
-            return remaining
-        size = self.config.max_chunk_size
-        # vLLM's chunked prefill consumes at most the iteration token budget.
-        # Without this cap, one long request violates the advertised ceiling.
-        return min(remaining, size, self.config.max_num_batched_tokens)
-
-    # ------------------------------------------------------------ offloading #
-    def _try_start_promotion(
-        self, candidate: Request, hashes: list[int], match: PrefixMatch
-    ) -> bool:
-        """Park *candidate* while its CPU-tier prefix is copied into fresh blocks.
-
-        The GPU pool and the CPU tier hold overlapping but not equal prefixes:
-        the pool evicts, the tier mirrors every commit. So once the pool's
-        lookup stops, the tier may still extend the run — those blocks sit on
-        the CPU and would be prefilled, and promoting them copies the prefix
-        back instead. Returns whether a promotion started; when it did, the
-        request has left the waiting queue and nothing about it runs this step.
-        Every failure degrades to the plain GPU path — the pool cannot hold the
-        promoted prefix, or the tier lost a block between the probe and the pin
-        — so an offer that cannot be taken costs only the probe.
-
-        Args:
-            candidate: The request being admitted.
-            hashes: Its tracked block-hash chain.
-            match: The longest prefix the GPU pool can already serve.
-        """
-        if self._offloading is None:
-            return False
-        block_size = PREFIX_CACHE_BLOCK_SIZE
-        start = match.num_tokens // block_size
-        # At least one token must still run: it produces the first logits, and
-        # the GPU lookup caps its hit the same way, one block short.
-        limit = (candidate.prompt_len - 1) // block_size
-        keys: list[int] = []
-        for index in range(start, limit):
-            key = hashes[index]
-            if self._offloading.lookup(key) is not LookupResult.HIT:
-                break
-            keys.append(key)
-        if not keys:
-            return False
-
-        num_tokens = (start + len(keys)) * block_size
-        rid = candidate.request_id
-        if not self._prefix_cache.allocate(rid, num_tokens, match):
-            return False
-        resident = self._prefix_cache.block_ids(rid)[0]
-        gpu_blocks = tuple(resident[start : start + len(keys)])
-        if self._offloading.prepare_load(keys, gpu_blocks) is None:
-            # A block was evicted between the probe and the pin. Undo the
-            # allocation and hand the request back to the plain path; free()
-            # drops the tracked chain with the blocks, so re-track — the plain
-            # path reports its table writes off that chain.
-            self._prefix_cache.free(rid)
-            self._prefix_cache.track(rid, candidate.prompt_token_ids)
-            return False
-        self._pending_promotes[rid] = _Promotion(
-            request=candidate,
-            gpu_blocks=gpu_blocks,
-            num_tokens=num_tokens,
+    def _register_request(self, request: Request) -> None:
+        """Hand a fully tokenised request to the scheduler and open its buffers."""
+        self.planner.add_request(request)
+        self._detokenizers[request.request_id] = IncrementalDetokenizer(self.tokenizer, 1)
+        self._spans[request.request_id] = self.tracer.start_span(
+            "request", request_id=request.request_id, prompt_tokens=request.prompt_len
         )
-        self._promotion_by_blocks[gpu_blocks] = rid
-        return True
 
-    def _drain_offload_events(self) -> None:
-        """Land offloaded copies that completed since the last step.
+    def _ensure_tokenize_pool(self) -> ThreadPoolExecutor:
+        """The shared encode pool, created on first background tokenize."""
+        if self._tokenize_pool is None:
+            self._tokenize_pool = ThreadPoolExecutor(
+                max_workers=_TOKENIZE_WORKERS, thread_name_prefix="rapid-llm-tokenize"
+            )
+        return self._tokenize_pool
 
-        The manager resolves its events lazily, so polling once per step is the
-        whole protocol. A ``load`` event means a promotion's prefix is readable:
-        index its blocks so the pool serves them to later requests too, and
-        queue the request for a slot. A ``load`` for a request that died in
-        flight is that request's deferred free. ``store`` events need nothing
-        here — the manager already made their keys loadable.
+    def _collect_tokenized(self) -> None:
+        """Fold finished background encodes into the queue (O10).
+
+        Runs at the top of every step, on the engine thread — the same one
+        that called ``add_request``, so the dict needs no lock. A finished
+        job's tokens join the scheduler; a failed one (encode error, empty or
+        over-long prompt) finishes its request with ``finish_reason="invalid"``
+        and the exception on ``request.error``, and fires the caller's
+        ``on_error`` — exactly what the synchronous path would have raised.
         """
-        if self._offloading is None:
+        if not self._tokenizing:
             return
-        for event in self._offloading.take_events():
-            if event.kind != "load":
+        for request_id, job in [*self._tokenizing.items()]:
+            if not job.future.done():
                 continue
-            promotion = self._take_promotion(event.gpu_blocks)
-            if promotion is None:
-                continue
-            request = promotion.request
-            if request.status is RequestStatus.FINISHED:
-                # Died mid-copy: its blocks were held back exactly so this
-                # free could wait for the landing.
-                self._prefix_cache.free(request.request_id)
-                continue
-            # The copy landed, so the rows are readable: index the blocks now
-            # and the pool serves this prefix to later requests directly.
-            self._prefix_cache.commit(request.request_id, promotion.num_tokens)
-            request.num_computed_tokens = promotion.num_tokens
-            request.num_cached_tokens = promotion.num_tokens
-            self._ready_promotes.append(request)
+            del self._tokenizing[request_id]
+            request = job.request
+            try:
+                request.prompt_token_ids = job.future.result()
+                self._register_request(request)
+            except Exception as exc:
+                request.error = exc
+                request.status = RequestStatus.FINISHED
+                request.finish_reason = "invalid"
+                self.metrics.finished.inc(finish_reason="invalid")
+                if job.on_error is not None:
+                    job.on_error(request, exc)
 
-    def _take_promotion(self, gpu_blocks: tuple[int, ...]) -> _Promotion | None:
-        """Pop the promotion a load event belongs to, by its destination blocks.
-
-        Block ids are unique while a promotion holds them — the pool cannot
-        hand out a block that is still referenced — so the reverse-index
-        match is exact and O(1).
-        """
-        if not gpu_blocks:
-            return None
-        rid = self._promotion_by_blocks.pop(gpu_blocks, None)
-        if rid is None:
-            return None
-        promotion = self._pending_promotes.pop(rid, None)
-        if promotion is not None:
-            return promotion
-        return self._dying_promotes.pop(rid, None)
-
-    def _promote_ready(self) -> None:
-        """Seat landed promotions as capacity frees up, oldest first.
-
-        A promotion needs both a slot and a seat under ``max_num_seqs``; until
-        both exist it waits here rather than back in the queue, because
-        re-admission would allocate a second set of blocks for the same prefix.
-        Seating is all it takes: Stage 1 resumes the request's next chunk in
-        this very step. Its ``scheduled_time`` is set here, not when the copy
-        started, so queue-wait accounting includes the promotion itself.
-        """
-        while self._ready_promotes and self._free_slots:
-            if len(self._running) >= self.max_num_seqs:
-                break
-            request = self._ready_promotes.popleft()
-            request.slot = self._free_slots.pop()
-            request.status = RequestStatus.RUNNING
-            request.scheduled_time = time.monotonic()
-            self._running.append(request)
-
-    def _retire_promotion(self, request: Request) -> bool:
-        """Detach a dying request from its promotion; True if its free must wait.
-
-        A pending promotion's copy is still in flight into blocks the request
-        holds, so freeing them now would let the pool hand them out while the
-        DMA lands. Its descriptor moves to ``_dying_promotes`` and the free
-        runs from the event drain. A ready promotion has no copy in flight:
-        it is simply unseated, and the caller frees it now.
-        """
-        rid = request.request_id
-        promotion = self._pending_promotes.pop(rid, None)
-        if promotion is not None:
-            self._dying_promotes[rid] = promotion
-            # gpu_blocks won't collide: a dying promotion's blocks are still
-            # in flight, so no new allocation has the same id yet.
-            self._promotion_by_blocks[promotion.gpu_blocks] = rid
-            return True
-        self._ready_promotes = deque(
-            candidate for candidate in self._ready_promotes if candidate is not request
-        )
-        return False
-
-    # ---------------------------------------------------------------- blocks #
-    def _reserve(
-        self,
-        request: Request,
-        num_tokens: int,
-        protect: list[Request],
-        victims: list[Request],
-    ) -> bool:
-        """Grow *request*'s block coverage to *num_tokens*, evicting if it must.
-
-        Preemption here is a mechanism rather than the ``enable_preemption``
-        policy: a request that already holds a slot has nowhere else to put the
-        rows its next tokens need, so evicting somebody is the only alternative
-        to deadlock. It stays unreachable while the pool is sized for every slot
-        to hold a full context, which is the default.
-
-        Args:
-            request: The request to grow. Never itself a victim.
-            num_tokens: Tokens its blocks must cover after this call.
-            protect: Requests already granted work this step; evicting one would
-                pull the blocks out from under a pass that is about to run.
-            victims: Extended with whoever was evicted, for reporting.
-
-        Returns:
-            Whether the request's blocks now cover ``num_tokens``.
-        """
-        # Fast path: the pool is normally sized for every slot to hold a full
-        # context, so the first allocation succeeds and the protected set --
-        # O(in-flight requests) -- is never built. Only a refused allocation
-        # has victims to choose between.
-        if self._prefix_cache.allocate(request.request_id, num_tokens):
-            return True
-        protected = {id(candidate) for candidate in protect}
-        protected.add(id(request))
-        while True:
-            victim = self._preempt_victim(protected)
-            if victim is None:
-                return False
-            victims.append(victim)
-            if self._prefix_cache.allocate(request.request_id, num_tokens):
-                return True
-
-    def _map_blocks(self, request: Request) -> None:
-        """Record the block-table entries the executor owes this request.
-
-        This is the whole device-side cost of prefix reuse: pointing table rows
-        at blocks somebody else filled, with no K/V moved. The cache emits each
-        block once, so a steady decode carries an empty plan fifteen steps out of
-        sixteen and a boundary-crossing one carries a single block.
-        """
-        request.block_plan = self._prefix_cache.take_table_writes(request.request_id)
-
-    def _commit_pending_blocks(self) -> None:
-        """Index the blocks last step's passes actually filled.
-
-        Registration deliberately lags one step behind planning:
-        ``num_computed_tokens`` advances when a chunk is *planned*, and a block
-        offered to the next admission before the model wrote its K/V would be
-        read as though it held the prefix. Generated tokens ride the same path,
-        which is what makes a finished answer reusable by its own follow-up turn.
-        """
-        for request, upto in self._pending_blocks:
-            if request.status is RequestStatus.RUNNING:
-                self._commit(request, upto)
-        self._pending_blocks.clear()
-
-    def _commit(self, request: Request, upto: int) -> None:
-        """Hash, index, and mirror down whatever full blocks are now computed."""
-        rid = request.request_id
-        if upto // PREFIX_CACHE_BLOCK_SIZE > len(self._prefix_cache.block_hashes(rid)):
-            # Generated tokens completed a block: extend the chain over them.
-            # Skipped fifteen steps out of sixteen, which is what keeps decode
-            # caching close to free.
-            self._prefix_cache.observe(rid, request.prompt_token_ids + request.output_token_ids)
-        fresh = self._prefix_cache.commit(rid, upto)
-        if fresh and self._offloading is not None:
-            # The blocks are committed, which is as durable as their rows get;
-            # mirror them down while a store can still read the live cache.
-            self._offloading.prepare_store(fresh)
-
-    def _track_pending(self, request: Request, upto: int) -> None:
-        """Queue a registration for the rows the step just planned will write.
-
-        Per chunk, not per completed prompt: a shareable prefix is usually long
-        enough to be split, and waiting for the whole prompt would leave its
-        blocks unindexed exactly while the requests that would reuse them arrive.
-        """
-        self._pending_blocks.append((request, upto))
-
-    def _settle_pending_blocks(self, request: Request) -> None:
-        """Cash in a retiring request's registration instead of discarding it.
-
-        Retirement runs after the step executed, so its last blocks really do
-        hold their K/V — and the request that first pays for a shared prompt
-        typically finishes before the ones that would inherit it arrive.
-        """
-        kept: list[tuple[Request, int]] = []
-        for candidate, upto in self._pending_blocks:
-            if candidate is request:
-                self._commit(request, upto)
-            else:
-                kept.append((candidate, upto))
-        self._pending_blocks = kept
-
-    def _drop_pending_blocks(self, request: Request) -> None:
-        """Cancel a queued registration, by identity.
-
-        Mandatory for preemption: it moves generated tokens into
-        ``prompt_token_ids``, so a replayed registration would hash the *new*
-        prompt onto blocks holding the old sequence's K/V.
-        """
-        self._pending_blocks = [entry for entry in self._pending_blocks if entry[0] is not request]
-
-    def _maybe_preempt(self, prefill: list[Request]) -> Request | None:
-        """Evict the youngest eligible running request, if the policy allows it.
-
-        This is the *policy* gate, used where preemption buys concurrency rather
-        than correctness: a deployment that left ``enable_preemption`` off gets
-        no eviction, and admission simply waits.
-        """
-        if not self.config.enable_preemption:
-            return None
-        return self._preempt_victim({id(request) for request in prefill})
-
-    def _preempt_victim(self, protect: set[int]) -> Request | None:
-        """Evict the youngest eligible running request, or ``None``.
-
-        Eligible = past prefill, not already granted work this step, and past
-        the progress quantum (>=1 output token) — without the quantum a
-        just-recomputed request could be evicted again before making progress.
-        """
-        for request in reversed(self._running):
-            if not request.prefill_done or id(request) in protect:
-                continue
-            if request.output_token_ids:
-                self._preempt(request)
-                return request
-        return None
-
-    def _preempt(self, request: Request) -> None:
-        """Evict a running request back to the waiting queue (recompute strategy).
-
-        The KV built so far is dropped. Generated tokens move into the prompt
-        — vLLM v1's recompute semantics — so re-admission replays them and
-        decoding continues the text the caller already saw. The generation
-        cap shrinks by the moved tokens.
-        """
-        if request.slot is not None:
-            self._free_slots.append(request.slot)
-            request.slot = None
-        request.status = RequestStatus.WAITING
-        request.num_computed_tokens = 0
-        request.num_cached_tokens = 0
-        request.block_plan = ()
-        # The optimistic ledger follows the real one: re-admission replays the
-        # prompt through prefill, so nothing is launched-and-unharvested any
-        # more. (The engine refuses pipeline + preemption together; this line
-        # is the belt to that braces.)
-        request.pending_tokens = 0
-        # The prompt changes underneath the logprob records (generated tokens
-        # move into it), so both spans restart empty for re-admission.
-        request.prompt_logprobs = None
-        request.output_logprobs = None
-        request.delta_logprobs = None
-        self._drop_pending_blocks(request)
-        # Give the blocks back. Skipping this would pin one set of rows per
-        # preempt cycle, and a referenced block never evicts.
-        self._prefix_cache.free(request.request_id)
-        moved = len(request.output_token_ids)
-        request.prompt_token_ids.extend(request.output_token_ids)
-        request.output_token_ids.clear()
-        request.max_new_tokens -= moved
-        self._discard_running(request)
-        self._waiting[request.request_id] = request
-        self._waiting.move_to_end(request.request_id, last=False)
-        self.num_preemptions += 1
-
-    def finish(self, request: Request, reason: str) -> None:
-        """Retire a request and release whatever resources it holds."""
-        if request.status is RequestStatus.FINISHED:
-            return
-        was_running = request.status is RequestStatus.RUNNING
-        request.status = RequestStatus.FINISHED
-        request.finish_reason = reason
-        request.finish_time = time.monotonic()
-        if request.slot is not None:
-            self._free_slots.append(request.slot)
-            request.slot = None
-        if was_running:
-            self._discard_running(request)
-            self._settle_pending_blocks(request)
-        else:
-            self._waiting.pop(request.request_id, None)
-        # A shared prefix survives as long as another live request references it;
-        # a queued request may still hold the hash chain of an admission the pool
-        # refused, and freeing by id leaves nothing behind either way.
-        if not self._retire_promotion(request):
-            self._prefix_cache.free(request.request_id)
-        if self._requests.get(request.request_id) is request:
-            self._requests.pop(request.request_id)
-
-    def _discard_running(self, request: Request) -> None:
-        """Remove ``request`` from the running list by identity.
-
-        :class:`Request` is value-equal, so ``list.remove`` could drop a
-        *different* request with matching fields.
-        """
-        for index, candidate in enumerate(self._running):
-            if candidate is request:
-                del self._running[index]
-                return
+    def abort(self, request_id: str) -> Request | None:
+        """Cancel a request; its slot is free for the next step."""
+        job = self._tokenizing.pop(request_id, None)
+        if job is not None:
+            # Never reached the scheduler; its encode result is garbage now.
+            request = job.request
+            request.status = RequestStatus.FINISHED
+            request.finish_reason = "abort"
+            self.metrics.finished.inc(finish_reason="abort")
+            return request
+        request = self.planner.abort(request_id)
+        if request is not None:
+            self.metrics.finished.inc(finish_reason="abort")
+            self.tracer.end_span(self._spans.pop(request.request_id, None), finish_reason="abort")
+            self._retire(request)
+        return request
 
     @property
-    def prefix_cache_hit_rate(self) -> float:
-        """Fraction of queried prompt tokens served from the prefix cache."""
-        return self._prefix_cache.hit_rate
+    def num_kv_blocks(self) -> int:
+        """KV blocks the executor allocated; ``0`` when the backend has none.
 
-    @property
-    def num_free_blocks(self) -> int:
-        """Physical KV blocks available right now."""
-        return self._prefix_cache.num_free_blocks
-
-    @property
-    def running(self) -> list[Request]:
-        """Requests in the decode batch, in admission order."""
-        return list(self._running)
-
-    @property
-    def waiting(self) -> list[Request]:
-        """Queued requests, in arrival order."""
-        return list(self._waiting.values())
-
-    @property
-    def num_waiting(self) -> int:
-        return len(self._waiting)
-
-    @property
-    def num_running(self) -> int:
-        return len(self._running)
-
-    @property
-    def num_promoting(self) -> int:
-        """Requests whose CPU promotion is in flight or waiting for a slot."""
-        return len(self._pending_promotes) + len(self._ready_promotes)
-
-    @property
-    def num_free_slots(self) -> int:
-        return len(self._free_slots)
+        Public because the engine core process handshakes this number back to
+        its parent (see :mod:`rapid_llm.engine.engine_core`).
+        """
+        return self._executor.num_kv_blocks
 
     def has_unfinished_requests(self) -> bool:
-        """Whether anything is queued, running, or still holds offloaded state."""
-        return bool(
-            self._waiting
-            or self._running
-            or self._pending_promotes
-            or self._ready_promotes
-            or self._dying_promotes
+        """Whether anything is queued, in flight, or awaiting its harvest."""
+        return (
+            self.planner.has_unfinished_requests()
+            or bool(self._inflight)
+            or bool(self._tokenizing)
         )
+
+    def _await_offloaded_stores(self) -> None:
+        """Order this step's writes behind any store still reading the cache.
+
+        A store reads GPU blocks in place, so a block the pool has just reused
+        must not be overwritten before the copy lands. The wait goes on the
+        current stream — every launch of this step queues behind it — and costs
+        nothing when offloading is off or no store is in flight.
+        """
+        if self._offloading is None:
+            return
+        for event in self._offloading.pending_store_events():
+            torch.cuda.current_stream().wait_event(event)
+
+    @torch.inference_mode()
+    def step(self) -> list[Request]:
+        """Run one engine step and return the requests it advanced.
+
+        Returns:
+            The requests that produced a token this step, in pass order. A
+            request that stopped on a stop token is included with an empty
+            ``delta`` — the async front end learns a request ended only from
+            this list, so leaving it out would strand its stream. Under the
+            pipeline the requests reported are those whose *previous* step's
+            tokens this step harvested: the return value is one step behind
+            the launches, which is the latency the mode trades for overlap.
+        """
+        self._collect_tokenized()
+        self._await_offloaded_stores()
+        if self._pipeline:
+            return self._step_pipelined()
+        return self._step_synchronous()
+
+    @torch.inference_mode()
+    def _step_pipelined(self) -> list[Request]:
+        """Launch step N, harvest step N-*depth* — the O2 engine loop.
+
+        Scheduling and launching happen while an earlier step's forward is
+        still on the GPU, and the host stops only to harvest the oldest
+        in-flight step's tokens — by depth ``N`` their readback has landed
+        under the forwards that completed after them, so the wait is zero
+        and the detokenise/stop work overlaps compute instead of serialising
+        against it.
+
+        What that costs, explicitly:
+
+        * Stop handling runs ``pipeline_depth`` tokens late: a request that
+          samples eos is retired ``pipeline_depth`` steps after the
+          synchronous engine would retire it, and the extra passes it rides
+          are wasted compute whose tokens are discarded here. Late, not wrong
+          — the stream hears the same finish reason, ``pipeline_depth`` steps
+          later.
+        * The host's request ledger is optimistic: between launch and
+          harvest, ``pending_tokens`` says the device is ``pipeline_depth``
+          tokens ahead, and the next decode plan adds exactly that back to
+          write the right cache row.
+        * A pass whose requests asked for logprob records already paid a host
+          synchronisation inside execute (records are host objects), so it
+          simply rides the same depth-late harvest without extra cost.
+        """
+        scheduled = self.planner.plan()
+        if scheduled.is_empty and not self._inflight and not dp_attention_enabled():
+            return []
+
+        self._step_count += 1
+        # Freshly admitted requests owe a queue-time observation (num_computed
+        # equals their first chunk); resumed chunks and preemption re-admissions
+        # are skipped or re-counted by the same test.
+        for request, chunk in zip(scheduled.prefill, scheduled.prefill_chunk_lens, strict=True):
+            if request.num_computed_tokens == chunk:
+                self.metrics.observe_queue_time(request)
+        work: list[_Work] = []
+        if scheduled.prefill:
+            work += _prefill_work(scheduled.prefill, scheduled.prefill_chunk_lens)
+        if scheduled.decode:
+            work.append(_decode_work(scheduled.decode, from_device=True))
+
+        # Detach the oldest in-flight step before this step's launches join
+        # the queue.  At depth ``D`` we harvest when ``D`` entries are in
+        # flight or when no new work remains (drain).  The oldest entry's
+        # D2H copy landed under the ``D-1`` forwards launched since, so its
+        # event has completed by now in the steady state.
+        can_pop = len(self._inflight) >= self._pipeline_depth or scheduled.is_empty
+        previous = self._inflight.popleft() if can_pop else None
+
+        # Launch only: no token is read back here. The readback rides the
+        # executor's copy stream behind the pass that produced it, and its
+        # event is honoured one step later.
+        staged = self._execute_lockstep(work)
+
+        advanced: list[Request] = []
+        # Harvest the oldest in-flight tokens *before* this step's readbacks
+        # are issued. A readback recycles whichever pinned buffer's copy
+        # event has completed, and the oldest in-flight's completed long ago
+        # — read after the new readback, its view would already hold this
+        # step's tokens (the pool's "harvest N-d strictly before launch N's
+        # readback" contract). The executes above queued this step's
+        # kernels, so the host still harvests while the GPU runs.
+        if previous is not None:
+            for work_item, host, event, logprobs in previous:
+                if logprobs is not None and any(logprobs.prompt):
+                    self._attribute_prompt_logprobs(work_item, logprobs.prompt)
+                records = (
+                    logprobs.sampled
+                    if logprobs is not None and logprobs.sampled
+                    else (None,) * len(work_item.requests)
+                )
+                if event is not None:
+                    # Zero wait in the steady state: this copy landed
+                    # under the forwards launched since.  Only a drained
+                    # queue's final harvest pays.  The wait is measured —
+                    # its share of the wall clock is the acceptance number
+                    # for the pipeline depth (see EngineMetrics).
+                    wait_started = time.perf_counter()
+                    event.synchronize()
+                    self.metrics.kv_pipeline_sync_wait.inc(time.perf_counter() - wait_started)
+                values = host.tolist()
+                # The buffer goes back only now. This step's launches already
+                # ran above, so releasing earlier would have let their copies
+                # overwrite the tokens being read here.
+                self._executor.release_readback(host)
+                emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+                for request, token, record in zip(work_item.requests, values, records, strict=True):
+                    # The token is spent either way — the ledger closes for
+                    # retired requests too, so it drains to exactly zero.
+                    request.pending_tokens -= 1
+                    if request.is_finished:
+                        # The request stopped at an earlier harvest; this pass
+                        # is the one extra token the late stop costs, and its
+                        # output is discarded, not appended.
+                        continue
+                    emitted.append((request, token, record))
+                advanced += self._harvest(emitted)
+
+        if staged:
+            launched: list[
+                tuple[_Work, torch.Tensor, torch.cuda.Event | None, PassLogprobs | None]
+            ] = []
+            for work_item, tokens, logprobs in staged:
+                host, event = self._executor.readback_async(tokens)
+                launched.append((work_item, host, event, logprobs))
+            # Optimistic advance: every request this step samples for owes one
+            # token the host has not harvested; the next plan adds it back.
+            for work_item, *_ in launched:
+                for request in work_item.requests:
+                    request.pending_tokens += 1
+            self._inflight.append(launched)
+        # Counter properties, not len(running): those copy the lists.
+        self.metrics.observe_load(self.planner.num_running, self.planner.num_waiting)
+        return advanced
+
+    def _execute_lockstep(
+        self, work: list[_Work]
+    ) -> list[tuple[_Work, torch.Tensor, PassLogprobs | None]]:
+        """Execute local passes and fill missing DPA passes with inert forwards."""
+        target = coordinate_forward_count_across_dp(len(work))
+        completed: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
+        for index in range(target):
+            if index >= len(work):
+                self._executor.execute_dummy()
+                continue
+            work_item = work[index]
+            tokens, logprobs = self._executor.execute(work_item.plan)
+            completed.append((work_item, tokens, logprobs))
+        return completed
+
+    @torch.inference_mode()
+    def _step_synchronous(self) -> list[Request]:
+        """Plan, execute, and harvest in one step — the synchronous loop."""
+        scheduled = self.planner.plan()
+        if scheduled.is_empty and not dp_attention_enabled():
+            return []
+
+        self._step_count += 1
+        # Freshly admitted requests owe a queue-time observation (num_computed
+        # equals their first chunk); resumed chunks and preemption re-admissions
+        # are skipped or re-counted by the same test.
+        for request, chunk in zip(scheduled.prefill, scheduled.prefill_chunk_lens, strict=True):
+            if request.num_computed_tokens == chunk:
+                self.metrics.observe_queue_time(request)
+        work: list[_Work] = []
+        if scheduled.prefill:
+            work += _prefill_work(
+                scheduled.prefill, scheduled.prefill_chunk_lens, self._chunked_min_rows
+            )
+
+        # O5 speculative decoding: before the normal decode pass, propose draft
+        # tokens for decode requests and verify them in one EXTEND forward.
+        # Requests the verify pass could not serve fall through to the normal
+        # decode pass below; that pass harvested its own tokens, so its
+        # requests join the return value directly instead of re-entering this
+        # one's harvest.
+        spec_advanced: list[Request] = []
+        remaining_decode = list(scheduled.decode)
+        if self._speculate and self._proposer and remaining_decode:
+            spec_advanced, remaining_decode = self._speculate_verify(remaining_decode)
+
+        if remaining_decode:
+            work.append(_decode_work(remaining_decode))
+
+        # Execute every pass before reading any tokens back: a step's passes
+        # are slot-disjoint, so one synchronisation per step suffices, and a
+        # later pass's input prep rides the copy stream while an earlier pass's
+        # forward is still on the GPU (the L1 overlap site).
+        pending = self._execute_lockstep(work)
+
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        for work_item, tokens, logprobs in pending:
+            # ``prompt`` is uniformly None for a decode pass.
+            if logprobs is not None and any(logprobs.prompt):
+                self._attribute_prompt_logprobs(work_item, logprobs.prompt)
+            records = (
+                logprobs.sampled
+                if logprobs is not None and logprobs.sampled
+                else (None,) * len(work_item.requests)
+            )
+            emitted += [
+                (request, token, record)
+                for (request, token), record in zip(
+                    zip(work_item.requests, tokens.tolist(), strict=True), records, strict=True
+                )
+            ]
+        # Counter properties, not len(running): those copy the lists.
+        advanced = self._harvest(emitted) + spec_advanced
+        self.metrics.observe_load(self.planner.num_running, self.planner.num_waiting)
+        return advanced
+
+    def _speculate_verify(
+        self, decode_requests: list[Request]
+    ) -> tuple[list[Request], list[Request]]:
+        """O5 ngram speculative decoding: propose, verify, accept.
+
+        For each decode request, proposes draft tokens from ngram lookup in
+        the prompt + generated text, then verifies them in one EXTEND pass
+        whose stretch is anchored on the last generated token: the anchor
+        writes the KV row the decode pass it replaces would have written,
+        and draft ``j`` lands at row ``seq_len + j``. Row ``j`` of the
+        returned logits is the prediction after stretch row ``j``, so
+        ``logits[j]`` is exactly where draft ``j`` is checked; a mismatch at
+        ``j`` keeps drafts ``0..j-1`` and the argmax at ``j`` is the bonus
+        token. Accepted drafts and the bonus all flow through
+        :meth:`_harvest`, which owns detokenising, stop handling and the
+        length cap — an eos draft retires the request, and tokens past a
+        stop belong to nobody.
+
+        Returns:
+            ``(advanced, remaining)``: the requests the pass emitted tokens
+            for, and requests that need normal decode (no drafts found, no
+            block rows for the stretch, a logprob request the pass cannot
+            record for, or the executor returned no logits).
+        """
+        assert self._proposer is not None
+        # Phase 1: propose drafts, keeping only what the pool has rows for.
+        # logprob requests keep the decode path: the verify pass returns raw
+        # logits, not the per-token records the sampler's path produces, so
+        # their records would skip every draft.
+        drafts: list[tuple[Request, list[int]]] = []
+        remaining: list[Request] = []
+        for req in decode_requests:
+            if req.params.logprobs is not None:
+                remaining.append(req)
+                continue
+            all_ids = list(req.prompt_token_ids) + list(req.output_token_ids)
+            proposed = self._proposer.propose(all_ids)
+            fit = self.planner.reserve_speculative(req, len(proposed)) if proposed else 0
+            if fit:
+                drafts.append((req, proposed[:fit]))
+            else:
+                remaining.append(req)
+
+        if not drafts:
+            return [], remaining
+
+        # Phase 2: build a verify EXTEND ModelInput. Each speculative request
+        # contributes one stretch: the anchor (its last generated token) plus
+        # its drafts, one contiguous span of cache rows the extend pass writes.
+        slots, seq_starts, seq_lens, tokens = [], [], [], []
+        block_writes: list[tuple[int, int, int, tuple[int, ...]]] = []
+        for req, draft_ids in drafts:
+            cur_seq_len = req.seq_len
+            slots.append(req.slot)
+            # The anchor's row, then one row per draft: rows seq_len-1 ..
+            # seq_len+n-1, all of them this pass's to write.
+            seq_starts.append(cur_seq_len - 1)
+            seq_lens.append(cur_seq_len + len(draft_ids))
+            tokens.append(req.output_token_ids[-1])
+            tokens.extend(draft_ids)
+            block_writes += [
+                (req.slot, group_id, start_block, block_ids)
+                for group_id, start_block, block_ids in req.block_plan
+            ]
+
+        verify_plan = ModelInput(
+            kind=PassKind.EXTEND,
+            slots=tuple(slots),
+            seq_starts=tuple(seq_starts),
+            seq_lens=tuple(seq_lens),
+            tokens=tuple(tokens),
+            # No sampled rows: the bonus comes from the argmax below, and a
+            # sampled row here would drop a token nobody asked for into the
+            # generation grid the repetition penalty reads.
+            sampling=(),
+            sampled=(),
+            gen_counts=(),
+            block_writes=tuple(block_writes),
+            return_logits=True,
+        )
+
+        # Phase 3: execute the verify pass.
+        _tokens, _records, all_logits = self._executor.execute_verify(verify_plan)
+
+        if all_logits is None:
+            # Executor produced no logits; fall back to normal decode.
+            return [], decode_requests
+
+        # Phase 4: check each draft against the model's argmax, then hand the
+        # accepted span plus the bonus to _harvest — the same stop, length and
+        # detokenise treatment a decode token gets.
+        emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
+        logits_offset = 0
+        for req, draft_ids in drafts:
+            n_draft = len(draft_ids)
+            # The anchor's row is logits[0]; draft j's row is logits[j + 1],
+            # so the whole span needs n_draft + 1 rows of predictions.
+            req_logits = all_logits[logits_offset : logits_offset + n_draft + 1]
+            logits_offset += n_draft + 1
+
+            accepted = 0
+            for j in range(n_draft):
+                if req_logits[j].argmax().item() != draft_ids[j]:
+                    break
+                accepted += 1
+            bonus = req_logits[accepted].argmax().item()
+            emitted.extend((req, token, None) for token in (*draft_ids[:accepted], bonus))
+
+        # One entry per request: the stream layer publishes a chunk per
+        # returned request, and this pass produces each request's whole step
+        # in one delta. Request is not hashable (a mutable dataclass), so
+        # dedup by identity — the same object appears once per token it
+        # emitted.
+        advanced = self._harvest(emitted)
+        seen: set[int] = set()
+        unique: list[Request] = []
+        for request in advanced:
+            if id(request) not in seen:
+                seen.add(id(request))
+                unique.append(request)
+        return unique, remaining
+
+    def generate(
+        self,
+        prompts: Sequence[str],
+        sampling_params: SamplingParams | None = None,
+    ) -> list[RequestOutput]:
+        """Run a whole prompt set through the scheduler and return the completions.
+
+        Offline convenience wrapper: submits every prompt at once and drives
+        :meth:`step` to exhaustion. A set exceeding ``max_num_seqs`` is admitted
+        in waves, and short answers free their slots early.
+
+        Returns:
+            One :class:`~rapid_llm.engine.outputs.RequestOutput` per prompt, in
+            submission order.
+        """
+        params = sampling_params or SamplingParams()
+        if self._async_tokenize and len(prompts) > 1:
+            # O10: encode releases the GIL, so the batch tokenises in parallel
+            # — sum(encode_i) collapses to max(encode_i) before the first step.
+            pool = self._ensure_tokenize_pool()
+            futures = [
+                pool.submit(self.tokenizer.encode, p, add_special_tokens=True) for p in prompts
+            ]
+            requests = [
+                self.add_request(prompt, params, prompt_token_ids=future.result())
+                for prompt, future in zip(prompts, futures, strict=True)
+            ]
+        else:
+            requests = [self.add_request(prompt, params) for prompt in prompts]
+        while self.has_unfinished_requests():
+            self.step()
+        return [
+            RequestOutput(
+                prompt=request.prompt,
+                outputs=[
+                    CompletionOutput(
+                        0, request.text, request.finish_reason, logprobs=request.output_logprobs
+                    )
+                ],
+                prompt_logprobs=request.prompt_logprobs,
+            )
+            for request in requests
+        ]
+
+    def shutdown(self) -> None:
+        """Release the executor. The engine cannot serve any more steps after this."""
+        # Unharvested passes are gone with the executor; their pinned buffers
+        # belong to it, and their requests are nobody's to advance any more.
+        self._inflight.clear()
+        self._tokenizing.clear()
+        if self._tokenize_pool is not None:
+            self._tokenize_pool.shutdown(wait=False)
+        self._executor.shutdown()
+        # Break every reference this shell still holds into the engine's object
+        # graph (executor -> worker -> model runner -> weights and KV cache).
+        # The caller usually drops its last reference right after shutdown, but
+        # a reference cycle would then wait for a gc pass: a second engine
+        # built in this process would profile a KV budget of zero cache tokens
+        # and crash on its first step. Nulling the links frees the weights and
+        # the cache by refcount alone; empty_cache hands them back to the
+        # driver so the profiler sees them as free.
+        import gc
+
+        self._executor = None
+        self.engine = None
+        gc.collect()
+        if torch.device(self.device).type == "cuda":
+            torch.cuda.empty_cache()
+
+    def timeline_summary(self) -> str:
+        """Stream region table of the steps run so far; empty unless tracing is on."""
+        if self._executor is None:
+            return ""
+        return self._executor.timeline_summary()
+
+    def _graph_manager(self):
+        """The driver-side CUDA-graph manager, or ``None`` when absent.
+
+        Test doubles stand in for the executor without a worker, so every hop
+        of the chain is optional.
+        """
+        worker = getattr(self._executor, "_worker", None)
+        runner = getattr(worker, "_runner", None)
+        return getattr(runner, "_graph_manager", None)
+
+    # ---------------------------------------------------------------- harvest #
+    def _attribute_prompt_logprobs(
+        self, work: _Work, prompt: tuple[tuple[PositionLogprobs, ...] | None, ...]
+    ) -> None:
+        """Place a chunk pass's prompt records on their requests, by position.
+
+        Entry ``j`` of sequence ``i`` covers position ``seq_starts[i] + j + 1``.
+        Position 0 and prefix-cache hits stay ``None``; the list is allocated
+        at full prompt length on first contact, so chunks may land in any order.
+        """
+        for request, start, records in zip(
+            work.chunk_requests, work.plan.seq_starts, prompt, strict=True
+        ):
+            if records is None:
+                continue
+            if request.prompt_logprobs is None:
+                request.prompt_logprobs = [None] * request.prompt_len
+            for j, record in enumerate(records):
+                request.prompt_logprobs[start + j + 1] = record
+
+    def _harvest(
+        self, emitted: list[tuple[Request, int, PositionLogprobs | None]]
+    ) -> list[Request]:
+        """Read the step's tokens back, detokenise them, and retire whoever stopped.
+
+        The only host-device synchronisation in the loop. It makes stop handling
+        exact — a stop token retires the request on the next step, and the freed
+        slot goes straight to a queued request.
+
+        A step may hand one request several tokens (speculative decoding), so
+        the loop accumulates: ``delta`` resets once per request and gathers
+        every token's text, and a stop or length finish mid-chain retires the
+        request right there — tokens after a stop belong to nobody, and are
+        skipped rather than emitted.
+        """
+        now = time.monotonic()
+        check_repeat = self._step_count % POLL_INTERVAL == 0
+        advanced: list[Request] = []
+        opened: set[str] = set()
+
+        for request, token_id, record in emitted:
+            if request.is_finished:
+                # A token past this request's stop: the chain already retired
+                # it, and nothing after a stop is output.
+                continue
+            if request.first_token_time is None:
+                request.first_token_time = now
+            if request.request_id not in opened:
+                opened.add(request.request_id)
+                request.delta = ""
+                request.delta_logprobs = None
+
+            if token_id in self.stop_token_ids:
+                # The stop token is model punctuation, not output; the request
+                # still belongs in this step's return — its stream has to hear
+                # the finish reason (see step()).
+                self._finish(request, "eos")
+                advanced.append(request)
+                continue
+
+            request.output_token_ids.append(token_id)
+            if record is not None:
+                # Parallel to output_token_ids: one record per accepted token.
+                if request.output_logprobs is None:
+                    request.output_logprobs = []
+                request.output_logprobs.append(record)
+                request.delta_logprobs = record
+            piece = self._detokenizers[request.request_id].append(0, token_id)
+            request.delta += piece
+            request.text += piece
+            advanced.append(request)
+
+            if not request.has_room or request.seq_len >= self.config.max_seq_len:
+                self._finish(request, "length")
+            elif check_repeat and request.params.stop_on_repeat and detect_repetition(request.text):
+                self._finish(request, "repeat")
+
+        return advanced
+
+    def _finish(self, request: Request, reason: str) -> None:
+        self.planner.finish(request, reason)
+        self.metrics.observe_finish(request)
+        self.tracer.end_span(
+            self._spans.pop(request.request_id, None),
+            finish_reason=reason,
+            output_tokens=len(request.output_token_ids),
+        )
+        self._retire(request)
+
+    def _retire(self, request: Request) -> None:
+        """Drop the per-request state the engine owns; the caller keeps the handle."""
+        self._detokenizers.pop(request.request_id, None)

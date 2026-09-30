@@ -2,7 +2,7 @@
 
 ROADMAP v0.12.0 acceptance: the CPU tier must produce the same greedy tokens
 as the GPU-only path, and actual store/load transfers must happen.  The test
-drives a full engine (``ContinuousBatchingEngine`` via ``build_engine``), uses
+drives a full engine (``Scheduler`` via ``build_engine``), uses
 ``build_cpu_tier`` from the executor package, and compares token sequences.
 
 The single-engine approach (not a ref/eq build pair) means both arms share the
@@ -15,9 +15,8 @@ import pytest
 import torch
 
 from rapid_llm import SamplingParams
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.llm_engine import LLMEngine
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
 from rapid_llm.executor.executor import UniProcExecutor
 from rapid_llm.executor.kv_offload import build_cpu_tier
 
@@ -70,7 +69,7 @@ def _build_engine(tier: bool, *, gpu_blocks: int = BLOCKS, cpu_blocks: int = CPU
     )
     executor = UniProcExecutor(llm, config.max_num_seqs, config.max_seq_len)
     manager = build_cpu_tier(llm.model_runner.kv_cache_manager, cpu_blocks) if tier else None
-    return ContinuousBatchingEngine(llm, config, executor, offloading=manager), manager
+    return Scheduler(llm, config, executor, offloading=manager), manager
 
 
 def _long_shared_prompts() -> list[str]:

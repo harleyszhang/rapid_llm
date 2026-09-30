@@ -43,7 +43,7 @@ def test_engine_submodule_import_does_not_load_implementations() -> None:
 
     assert "rapid_llm.engine.scheduler" in modules
     assert "rapid_llm.engine.llm_engine" not in modules
-    assert "rapid_llm.engine.continuous_engine" not in modules
+    assert "rapid_llm.engine.batch_planner" in modules
 
 
 def test_model_components_do_not_eagerly_import_triton_kernels() -> None:
