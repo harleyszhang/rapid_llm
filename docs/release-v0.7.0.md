@@ -104,7 +104,7 @@ print(f"prefix cache hit rate: {sched.prefix_cache_hit_rate:.1%}")
 ![preemption](images/preemption.gif)
 
 > GIF 由 `scripts/gen_preemption_gif.py` 驱动**真实 Scheduler**（`enable_preemption=True`,
-> `max_num_seqs=3 > num_slots=2`）录制，每个 id 都是真实 `SchedulerOutput.preempted` /
+> `max_num_seqs=3 > num_slots=2`）录制，每个 id 都是真实 `StepPlan.preempted` /
 > `.decode` / `.prefill` 与 `Scheduler.num_preemptions`。
 
 ### 实测数据（真实 scheduler 输出）
@@ -121,29 +121,29 @@ print(f"prefix cache hit rate: {sched.prefix_cache_hit_rate:.1%}")
 
 ```python
 config = SchedulerConfig(max_num_seqs=3, enable_preemption=True)
-sched = Scheduler(config, num_slots=2)   # 3 请求超订 2 slot
+planner = BatchPlanner(config, num_slots=2)   # 3 请求超订 2 slot
 # ... 引擎循环 ...
-print(f"total preemptions: {sched.num_preemptions}")
+print(f"total preemptions: {planner.num_preemptions}")
 ```
 
 对标 vLLM 的 `PreemptionMode.RECOMPUTE`。
 
-## 4. Feature: SchedulerOutput 增强
+## 4. Feature: StepPlan 增强
 
-`SchedulerOutput` 新增字段支持 chunked prefill 与抢占：
+`StepPlan` 新增字段支持 chunked prefill 与抢占：
 
 - `prefill_chunk_lens: list[int]` — 每个 prefill 请求本步处理的 token 数
 - `preempted: list[Request]` — 本步被抢占的请求（用于日志/监控）
 - prefill + decode 可同时非空（v0.6 两者互斥）
 
-调度器新增 `advance_chunks()` 方法用于推进 chunk 进度。
+`BatchPlanner.plan()` 在生成计划时同步提交 chunk 进度。
 
-### 可视化：每一步 schedule() 返回对象的字段
+### 可视化：每一步 plan() 返回对象的字段
 
 ![scheduler output](images/scheduler_output.gif)
 
-> GIF 由 `scripts/gen_scheduler_output_gif.py` 驱动**真实 Scheduler** 录制，逐字段渲染
-> `schedule()` 返回的真实对象。场景：两个短请求 decode 的同时，一个 600-token 长 prompt
+> GIF 由 `scripts/visualize/gen_scheduler_output_gif.py` 驱动真实 `BatchPlanner` 录制，逐字段渲染
+> `plan()` 返回的真实对象。场景：两个短请求 decode 的同时，一个 600-token 长 prompt
 > 分片 prefill（`chunk_lens`），最后一步超订触发抢占（`preempted` 被填充）。
 
 | step | prefill | prefill_chunk_lens | decode | preempted | prefill+decode 并存 |
@@ -154,7 +154,7 @@ print(f"total preemptions: {sched.num_preemptions}")
 | 4 | [long-c] | [88] | [short-a, short-b] | [] | **是** |
 | 5 | [short-d] | [20] | [short-a, long-c] | [short-b] | **是** |
 
-**关键结论：** v0.6 里 prefill 与 decode 互斥（一个 step 只能二选一）；v0.7 的 `SchedulerOutput` 让它们在同一 step 并存（step 2-5），并用 `prefill_chunk_lens` 和 `preempted` 携带分片与抢占元数据。
+**关键结论：** v0.6 里 prefill 与 decode 互斥（一个 step 只能二选一）；v0.7 的 `StepPlan` 让它们在同一 step 并存（step 2-5），并用 `prefill_chunk_lens` 和 `preempted` 携带分片与抢占元数据。
 
 ## 5. SchedulerConfig 新增参数
 
@@ -180,9 +180,9 @@ print(f"total preemptions: {sched.num_preemptions}")
 | ----------------- | ----------- | ------ |
 | `SchedulerConfig.max_chunk_size` | `SchedulerConfig.max_num_batched_tokens` | 控制 prefill 粒度 |
 | `PrefixCache` (block-hash 链式) | `BlockHashType` + `KVCacheManager` prefix cache | 共享前缀 KV 复用 |
-| `Scheduler._preempt()` | `Scheduler._preempt()` | recompute 策略 |
-| `SchedulerOutput.prefill_chunk_lens` | `SchedulerOutput.num_prefill_groups` | 分片元数据 |
-| `advance_chunks()` | 内置在 `_schedule_running()` | 推进 chunk 状态 |
+| `BatchPlanner._preempt()` | `BatchPlanner._preempt()` | recompute 策略 |
+| `StepPlan.prefill_chunk_lens` | executor prefill groups | 分片元数据 |
+| `BatchPlanner.plan()` | 内置在 `_schedule_running()` | 推进 chunk 状态 |
 
 ## Upgrade
 

@@ -27,9 +27,9 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 Or drive the engine directly — every prompt is an independent request, and each carries its own sampling parameters:
 
 ```python
-from rapid_llm import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import SamplingParams, Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen2.5-1.5B-Instruct", max_num_seqs=16
 )
 engine.add_request("Name the capital of Japan.", SamplingParams(max_gen_len=32))
@@ -100,9 +100,9 @@ python -m rapid_llm.cli chat \
 ```
 
 ```python
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.scheduler import Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained("my_weight/Qwen3-8B", tensor_parallel_size=2)
+engine = Scheduler.from_pretrained("my_weight/Qwen3-8B", tensor_parallel_size=2)
 ```
 
 The engine never learns how many processes run its model: it hands a plan to an `Executor` (`UniProcExecutor` for one GPU, `MultiprocExecutor` for many) and gets sampled tokens back. Because the plan is pure data, driver and follower ranks run one code path rather than two — no mirror process re-deriving the batch from a broadcast prompt, which is what used to turn any disagreement into an NCCL hang. Plans travel on a CPU (gloo) group so the control plane never stages through GPU memory, while the vocabulary-parallel sampler exchanges **two scalars per row** instead of gathering logits, keeping per-step traffic independent of vocabulary size.

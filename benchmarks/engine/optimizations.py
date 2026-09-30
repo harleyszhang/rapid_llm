@@ -263,7 +263,7 @@ def measure_cell(
     would leave its blocks in a prefix cache and credit the measured run with a
     hit rate the workload never earned.
     """
-    from rapid_llm import ContinuousBatchingEngine, SamplingParams
+    from rapid_llm import SamplingParams, Scheduler
 
     kwargs = dict(BASELINE)
     for name in features:
@@ -271,7 +271,7 @@ def measure_cell(
 
     label = "+".join(features) if features else "baseline"
     with _side_effects(features):
-        engine = ContinuousBatchingEngine.from_pretrained(
+        engine = Scheduler.from_pretrained(
             model=model_dir,
             max_seq_len=args.max_seq_len,
             max_num_seqs=args.max_num_seqs,

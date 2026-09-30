@@ -135,7 +135,7 @@ def run_workload(engine, label: str, prompts: list[str], gen_len: int) -> Worklo
     """Submit all prompts, drive step() to exhaustion, count the schedule mix."""
     stats = WorkloadStats(workload=label, requests=len(prompts), total_s=0.0, gen_tokens=0)
 
-    schedule = engine.scheduler.schedule
+    schedule = engine.planner.plan
 
     def counted_schedule():
         out = schedule()
@@ -147,9 +147,9 @@ def run_workload(engine, label: str, prompts: list[str], gen_len: int) -> Worklo
         stats.chunk_tokens += sum(out.prefill_chunk_lens)
         return out
 
-    engine.scheduler.schedule = counted_schedule
+    engine.planner.plan = counted_schedule
 
-    cache = engine.scheduler._prefix_cache
+    cache = engine.planner._prefix_cache
     queried_before = getattr(getattr(cache, "stats", None), "queried_tokens", 0)
     hit_before = getattr(getattr(cache, "stats", None), "hit_tokens", 0)
 
@@ -158,7 +158,7 @@ def run_workload(engine, label: str, prompts: list[str], gen_len: int) -> Worklo
 
     run = run_requests(engine, prompts, sampling_params(gen_len))
 
-    engine.scheduler.schedule = schedule  # restore
+    engine.planner.plan = schedule  # restore
 
     stats.total_s = run.total_s
     stats.gen_tokens = run.gen_tokens
@@ -193,7 +193,7 @@ def _write_texts(json_path: str, results: dict[str, WorkloadStats]) -> None:
 # matrix — the feature matrix, in-process
 # --------------------------------------------------------------------------- #
 def _matrix_main(args: argparse.Namespace) -> int:
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.scheduler import Scheduler
 
     require_gpus(args.tp)
 
@@ -215,7 +215,7 @@ def _matrix_main(args: argparse.Namespace) -> int:
     )
     print(f"=== {label} ===")
 
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         args.model_dir,
         max_seq_len=args.max_seq_len,
         max_num_seqs=args.max_num_seqs,
@@ -538,7 +538,7 @@ def _offline_child(payload: dict[str, Any], out: mp.Queue) -> None:
     """The in-process reference: same scheme, batch of one, plus one duplicate batch."""
     try:
         from rapid_llm import SamplingParams
-        from rapid_llm.engine import ContinuousBatchingEngine
+        from rapid_llm.engine import Scheduler
         from rapid_llm.engine.scheduler import DEFAULT_MAX_NUM_SEQS
 
         spec: ServeSpec = payload["spec"]
@@ -551,7 +551,7 @@ def _offline_child(payload: dict[str, Any], out: mp.Queue) -> None:
             kwargs["quantization"] = spec.scheme
         if spec.kv_cache_dtype != "auto":
             kwargs["kv_cache_dtype"] = spec.kv_cache_dtype
-        engine = ContinuousBatchingEngine.from_pretrained(payload["model"], **kwargs)
+        engine = Scheduler.from_pretrained(payload["model"], **kwargs)
         try:
             # Every sampling field spelled out: the CLI's defaults and the wire
             # protocol's are *not* the same, and an implicit field would make the
@@ -1002,7 +1002,7 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
     ``SlotBatch.copy_prefix`` to time KV copies and prints the stream timeline
     so forward.prefill / forward.extend / forward.decode are each accounted for.
     """
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+    from rapid_llm.engine.scheduler import Scheduler
     from rapid_llm.executor.slot_batch import SlotBatch
 
     copy_wall_s = 0.0
@@ -1023,7 +1023,7 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
 
     SlotBatch.copy_prefix = timed_copy
     try:
-        engine = ContinuousBatchingEngine.from_pretrained(
+        engine = Scheduler.from_pretrained(
             args.model_dir,
             max_seq_len=args.max_seq_len,
             max_num_seqs=args.max_num_seqs,
@@ -1039,7 +1039,7 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
         # Admission bookkeeping: which step admitted each request.
         admitted_at: dict[str, int] = {}
         step_no = 0
-        schedule = engine.scheduler.schedule
+        schedule = engine.planner.plan
 
         def counted():
             nonlocal step_no
@@ -1049,12 +1049,12 @@ def _diag_prefix_main(args: argparse.Namespace) -> int:
                 admitted_at.setdefault(request.request_id, step_no)
             return out
 
-        engine.scheduler.schedule = counted
+        engine.planner.plan = counted
 
         run = run_requests(engine, prompts, params)
         requests, started, total = run.requests, run.started, run.total_s
 
-        engine.scheduler.schedule = schedule
+        engine.planner.plan = schedule
 
         waves = sorted(set(admitted_at.values()))
         print(
@@ -1108,9 +1108,8 @@ def _diag_preempt_main(args: argparse.Namespace) -> int:
     """
     import gc
 
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
     from rapid_llm.engine.llm_engine import LLMEngine
-    from rapid_llm.engine.scheduler import SchedulerConfig
+    from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
     from rapid_llm.executor.executor import UniProcExecutor
 
     def build(preempt: bool, max_num_seqs: int, slots_tokens: int):
@@ -1128,14 +1127,14 @@ def _diag_preempt_main(args: argparse.Namespace) -> int:
             enable_preemption=preempt,
         )
         executor = UniProcExecutor(engine_llm, config.max_num_seqs, config.max_seq_len)
-        return ContinuousBatchingEngine(engine_llm, config, executor)
+        return Scheduler(engine_llm, config, executor)
 
     prompts = build_prefix_workload(groups=4, per_group=6, sentences=32)
 
     engine = build(preempt=True, max_num_seqs=16, slots_tokens=16384)
     engine.generate(["Warm up."], sampling_params(8))
     preempted_stats = run_workload(engine, "preempted", prompts, 24)
-    n_preempt = engine.scheduler.num_preemptions
+    n_preempt = engine.planner.num_preemptions
     engine.shutdown()
     del engine
 

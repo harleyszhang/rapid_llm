@@ -20,18 +20,27 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW,
-    RUNNING, QUEUED, DONE,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    BG,
+    DIM,
+    DONE,
+    LINE_H,
+    PAD,
+    PROMPT_FG,
+    QUEUED,
+    RUNNING,
+    TEXT_FG,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.utils.prompt_templates import get_prompter
 
 # Six requests, three slots, and a different length cap each.
@@ -62,7 +71,7 @@ class Frame:
 
 def record(model_dir: str, max_gen_len: int) -> list[Frame]:
     """Drive the engine and snapshot the batch after every step."""
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir, max_seq_len=768, max_num_seqs=MAX_NUM_SEQS, max_gpu_num_blocks=24576
     )
     engine.generate([PROMPTS[0][0]], SamplingParams(temperature=0.0, max_gen_len=4))  # warm up
@@ -113,8 +122,8 @@ def record(model_dir: str, max_gen_len: int) -> list[Frame]:
                 step=step,
                 elapsed=time.perf_counter() - started,
                 tokens=sum(len(r.output_token_ids) for r in requests),
-                running=engine.scheduler.num_running,
-                queued=engine.scheduler.num_waiting,
+                running=engine.planner.num_running,
+                queued=engine.planner.num_waiting,
                 rows=rows,
             )
         )

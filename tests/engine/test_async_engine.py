@@ -17,8 +17,8 @@ import pytest
 import torch
 
 from rapid_llm.engine.async_engine import AsyncLLMEngine
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 _TIMEOUT = 20.0
 
@@ -26,14 +26,16 @@ _TIMEOUT = 20.0
 class StubEngine:
     """Counts down a fixed number of tokens per request, no model involved.
 
-    Mimics the parts of :class:`ContinuousBatchingEngine` the async layer uses:
-    a scheduler to hold requests, ``step()`` returning whoever advanced, and
+    Mimics the parts of :class:`Scheduler` the async layer uses:
+    a planner to hold requests, ``step()`` returning whoever advanced, and
     per-request ``delta`` / ``text`` / ``finish_reason``.
     """
 
     def __init__(self, tokens: int = 4, fail_on_step: int | None = None) -> None:
         self.tokenizer = None
-        self.scheduler = Scheduler(SchedulerConfig(max_seq_len=64, max_num_seqs=4), num_slots=4)
+        self.planner = BatchPlanner(
+            SchedulerConfig(max_seq_len=64, max_num_seqs=4), num_slots=4
+        )
         self._tokens = tokens
         self._fail_on_step = fail_on_step
         self.steps = 0
@@ -46,26 +48,26 @@ class StubEngine:
         if prompt == "reject me":
             raise ValueError("prompt refused by the stub")
         request = Request(
-            request_id=request_id or f"stub-{self.scheduler.num_waiting}",
+            request_id=request_id or f"stub-{self.planner.num_waiting}",
             prompt=prompt,
             prompt_token_ids=[1, 2, 3],
             params=params or SamplingParams(),
         )
-        self.scheduler.add_request(request)
+        self.planner.add_request(request)
         return request
 
     def abort(self, request_id):
-        return self.scheduler.abort(request_id)
+        return self.planner.abort(request_id)
 
     def has_unfinished_requests(self):
-        return self.scheduler.has_unfinished_requests()
+        return self.planner.has_unfinished_requests()
 
     def step(self):
         self.steps += 1
         if self._fail_on_step is not None and self.steps >= self._fail_on_step:
             raise RuntimeError("stub step exploded")
 
-        scheduled = self.scheduler.schedule()
+        scheduled = self.planner.plan()
         batch = scheduled.prefill or scheduled.decode
         self.max_concurrent = max(self.max_concurrent, len(batch))
         for request in batch:
@@ -73,7 +75,7 @@ class StubEngine:
             request.delta = f"t{len(request.output_token_ids)} "
             request.text += request.delta
             if len(request.output_token_ids) >= self._tokens:
-                self.scheduler.finish(request, "length")
+                self.planner.finish(request, "length")
         return batch
 
     def shutdown(self):
@@ -154,11 +156,11 @@ async def test_abandoning_a_stream_aborts_the_request():
 
         for _ in range(50):
             await asyncio.sleep(0.02)
-            if stub.scheduler.num_running == 0:
+            if stub.planner.num_running == 0:
                 break
 
-        assert stub.scheduler.num_running == 0
-        assert stub.scheduler.num_free_slots == stub.scheduler.num_slots
+        assert stub.planner.num_running == 0
+        assert stub.planner.num_free_slots == stub.planner.num_slots
 
 
 async def test_an_idle_engine_does_not_spin():
@@ -192,7 +194,7 @@ async def test_a_failing_step_surfaces_and_clears_the_queue():
         with pytest.raises(RuntimeError):
             await asyncio.wait_for(collect(engine, "hi"), _TIMEOUT)
 
-        assert stub.scheduler.num_running == 0
+        assert stub.planner.num_running == 0
 
 
 async def test_shutdown_is_idempotent_and_stops_the_worker():
@@ -257,11 +259,11 @@ async def test_the_engine_serves_a_second_event_loop():
 @pytest.mark.weights
 async def test_concurrent_coroutines_get_their_own_answers(model_dir):
     """Real model, three coroutines, one batch: nobody may get another's text."""
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
     from rapid_llm.engine.llm_engine import LLMEngine
+    from rapid_llm.engine.scheduler import Scheduler
 
     engine = AsyncLLMEngine(
-        ContinuousBatchingEngine(
+        Scheduler(
             LLMEngine(
                 str(model_dir), max_seq_len=512, max_gpu_num_blocks=8192, use_cuda_graph=False
             ),

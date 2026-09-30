@@ -135,7 +135,7 @@ class TestEngineConstruction:
             seen.update(model=model, **kwargs)
             return object()
 
-        monkeypatch.setattr(cli.ContinuousBatchingEngine, "from_pretrained", fake_from_pretrained)
+        monkeypatch.setattr(cli.Scheduler, "from_pretrained", fake_from_pretrained)
         options_for(["batch", "--tensor-parallel-size", "2"], model_dir).build_engine(
             max_num_seqs=4
         )
@@ -284,7 +284,7 @@ class TestTensorParallelSurface:
             seen.update(model=model, **kwargs)
             return object()
 
-        monkeypatch.setattr(cli.ContinuousBatchingEngine, "from_pretrained", fake_from_pretrained)
+        monkeypatch.setattr(cli.Scheduler, "from_pretrained", fake_from_pretrained)
         options_for(["batch", "--enable-expert-parallel"], model_dir).build_engine()
         assert seen["enable_expert_parallel"] is True
 

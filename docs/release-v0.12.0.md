@@ -91,7 +91,7 @@
 **证据：**
 - Tests: `tests/engine/test_ngram_proposer.py` (9 passed)
 - Benchmark: `docs/benchmark_logs/kernels/speculative_o5_*.json`
-- Code: `rapid_llm/engine/ngram_proposer.py`, `continuous_engine.py::_speculate_verify`
+- Code: `rapid_llm/engine/ngram_proposer.py`, `scheduler.py::_speculate_verify`
 
 
 ### O3.1 P2P All-Reduce

@@ -119,9 +119,9 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
                 },
             }
         else:
-            from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+            from rapid_llm.engine.scheduler import Scheduler
 
-            engine = ContinuousBatchingEngine.from_pretrained(
+            engine = Scheduler.from_pretrained(
                 model=spec["model"],
                 device="cuda:0",
                 tensor_parallel_size=2,

@@ -1,11 +1,11 @@
 """End-to-end correctness of continuous batching against the one-shot batch path.
 
-The same prompts run through the static engine and the continuous engine
+The same prompts run through the static engine and the Scheduler runtime
 with arrivals spread over time; texts must match, with no foreign tail
 leaking between sequences.
 
 Usage:
-    pytest tests/engine/test_continuous_batching.py
+    pytest tests/engine/test_scheduler_gpu.py
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from dataclasses import replace
 import pytest
 import torch
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.batch_planner import SchedulerConfig
 from rapid_llm.engine.llm_engine import LLMEngine
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 
@@ -123,7 +123,7 @@ def build_engine(
     max_chunk_size=0,
     pipeline=None,
 ):
-    return ContinuousBatchingEngine(
+    return Scheduler(
         LLMEngine(
             str(model_dir),
             max_seq_len=max_seq_len,
@@ -234,7 +234,7 @@ def test_more_requests_than_slots_are_served_in_waves(model_dir, reference):
     small = build_engine(model_dir, max_num_seqs=2)
     try:
         requests = [small.add_request(prompt, GREEDY) for prompt in PROMPTS]
-        assert small.scheduler.num_waiting > 0, "the queue must actually be exercised"
+        assert small.planner.num_waiting > 0, "the queue must actually be exercised"
         drain(small)
 
         # Prompts admitted two at a time are padded to a different prefill grid
@@ -244,7 +244,7 @@ def test_more_requests_than_slots_are_served_in_waves(model_dir, reference):
         assert all(texts.values())
         assert all(r.finish_reason for r in requests)
         assert_no_foreign_tail(texts, reference)
-        assert small.scheduler.num_free_slots == small.scheduler.num_slots
+        assert small.planner.num_free_slots == small.planner.num_slots
     finally:
         del small
         _free()
@@ -447,8 +447,8 @@ def test_aborting_frees_the_slot_immediately(engine):
     engine.abort(request.request_id)
 
     assert request.finish_reason == "abort"
-    assert engine.scheduler.num_running == 0
-    assert engine.scheduler.num_free_slots == engine.scheduler.num_slots
+    assert engine.planner.num_running == 0
+    assert engine.planner.num_free_slots == engine.planner.num_slots
     assert not engine.has_unfinished_requests()
 
 
@@ -462,8 +462,8 @@ def test_repeated_waves_do_not_leak_slots_or_cache(engine):
             )
         drain(engine)
 
-    assert engine.scheduler.num_free_slots == engine.scheduler.num_slots
-    assert engine.scheduler.num_running == 0
+    assert engine.planner.num_free_slots == engine.planner.num_slots
+    assert engine.planner.num_running == 0
 
 
 def test_generate_returns_outputs_in_submission_order(engine, reference):
@@ -489,4 +489,4 @@ def test_multimodal_checkpoints_are_rejected(engine, monkeypatch):
     runner = engine.engine.model_runner
     monkeypatch.setattr(runner, "spec", replace(runner.spec, is_multimodal=True))
     with pytest.raises(NotImplementedError):
-        ContinuousBatchingEngine(engine.engine)
+        Scheduler(engine.engine)

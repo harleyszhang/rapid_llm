@@ -232,7 +232,7 @@ class EngineCoreClient:
             model: HuggingFace checkpoint directory.
             startup_timeout_s: How long the child may take to load and answer.
             **engine_kwargs: Forwarded to
-                :meth:`ContinuousBatchingEngine.from_pretrained`.
+                :meth:`Scheduler.from_pretrained`.
 
         Raises:
             RuntimeError: If the child fails to load or speaks another protocol.

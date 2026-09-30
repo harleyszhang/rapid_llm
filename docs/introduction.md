@@ -23,7 +23,7 @@ rapid_llm 是一个基于 Triton 内核的轻量级 LLM 推理框架。本文按
   - [五、初始化流程（端到端）](#五初始化流程端到端)
   - [六、推理流程](#六推理流程)
     - [6.1 一次性批处理（`LLM.generate`，离线）](#61-一次性批处理llmgenerate离线)
-    - [6.2 连续批处理（`ContinuousBatchingEngine`，在线，核心路径）](#62-连续批处理continuousbatchingengine在线核心路径)
+    - [6.2 连续批处理（`Scheduler`，在线，核心路径）](#62-连续批处理scheduler在线核心路径)
     - [6.3 三种 KV 布局的取舍](#63-三种-kv-布局的取舍)
   - [七、基准测试体系](#七基准测试体系)
     - [7.1 两层测量口径](#71-两层测量口径)
@@ -37,7 +37,7 @@ rapid_llm 是一个基于 Triton 内核的轻量级 LLM 推理框架。本文按
 
 ### 1.1 它是什么，不是什么
 
-rapid_llm 是一个**基于 Triton 内核的轻量级 LLM 推理框架**（见 [pyproject.toml](../pyproject.toml)），支持 LLaMA3 / Qwen2.5 / Qwen3 / Qwen3-MoE / LLaVA-1.5 / Qwen3-VL，要求 Python 3.13+，运行依赖只有 torch、triton、transformers、safetensors 四项。文件与类命名对齐 vLLM（`model_runner.py` ↔ `v1/worker/gpu_model_runner.py`、`continuous_engine.py` + `scheduler.py` ↔ `v1/engine/` + `v1/core/sched/`、`entrypoints/` ↔ `entrypoints/openai/`），量化子包的文件布局对齐 sglang，两个项目的代码可以对照阅读。整个框架约 2.3 万行 Python，从 HTTP 请求到 Triton kernel 是同一条代码路径：没有为多进程重写一份逻辑，也没有按运行模式切换的隐藏分支。
+rapid_llm 是一个**基于 Triton 内核的轻量级 LLM 推理框架**（见 [pyproject.toml](../pyproject.toml)），支持 LLaMA3 / Qwen2.5 / Qwen3 / Qwen3-MoE / LLaVA-1.5 / Qwen3-VL，要求 Python 3.13+，运行依赖只有 torch、triton、transformers、safetensors 四项。连续批处理由 `Scheduler` 驱动，纯主机排程状态集中在 `BatchPlanner`，HTTP 请求到 Triton kernel 复用同一条执行路径，没有为多进程重写模型执行逻辑。
 
 它不是训练框架，也不是内核研究框架，而是把「服务一个 LLaMA 结构的模型」这条路径走完整：调度、分页 KV、量化、多卡、可观测。一个推理框架该有的组件它都有，每个组件的体量也小到可以通读。
 
@@ -96,9 +96,9 @@ graph TB
         CLI["rapid-llm CLI<br/>chat / serve / batch"]
         API["OpenAI 兼容 FastAPI<br/>/v1/chat/completions"]
     end
-    subgraph L2["engine/ 引擎层 — 纯 Python，不持有设备资源"]
-        SCHED["Scheduler<br/>chunked prefill / 抢占 / 前缀缓存"]
-        ENG["ContinuousBatchingEngine<br/>schedule → plan → execute → harvest"]
+    subgraph L2["engine/ 引擎层"]
+        PLAN["BatchPlanner<br/>准入 / chunked prefill / 抢占 / 前缀缓存"]
+        SCHED["Scheduler<br/>plan → execute → harvest"]
     end
     subgraph L3["executor/ 执行层"]
         EXE["Executor<br/>UniProc / Multiproc（TP 广播计划）"]
@@ -114,8 +114,9 @@ graph TB
     end
     CLI -->|"prompts + SamplingParams"| SCHED
     API -->|"JSON 请求"| SCHED
-    SCHED -->|"每步准入"| ENG
-    ENG -->|"ModelInput（纯数据，可 pickle）"| EXE
+    SCHED -->|"每步请求 StepPlan"| PLAN
+    PLAN -->|"StepPlan"| SCHED
+    SCHED -->|"ModelInput（纯数据，可 pickle）"| EXE
     EXE -->|"forward + sample"| RUN
     RUN -->|"逐层调用"| MOD
     MOD -->|"dispatch(op, dtype, shape)"| DSP
@@ -127,13 +128,13 @@ graph TB
     classDef model fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
     classDef kern fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
     class CLI,API ext
-    class SCHED,ENG orch
+    class PLAN,SCHED orch
     class EXE,RUN proc
     class MOD model
     class DSP,OPS,BE kern
 ```
 
-**计划即数据**：`ContinuousBatchingEngine` 把每一步要执行的工作描述成一个纯数据的 [ModelInput](../rapid_llm/executor/worker.py)，字段全是 int 元组加冻结的 `SamplingParams`，整体可 pickle，再交给 [Executor](../rapid_llm/executor/executor.py) 执行，拿回采样出的 token。这个设计带来三个直接结果：
+**计划即数据**：`BatchPlanner` 产生不可变的 `StepPlan`，`Scheduler` 再把它翻译为纯数据的 [ModelInput](../rapid_llm/executor/worker.py)，交给 [Executor](../rapid_llm/executor/executor.py) 执行并收获采样 token。这个设计带来三个直接结果：
 
 1. **引擎层不持有设备状态**：引擎只操作 Python 数据结构，不持有任何 GPU 资源句柄；请求加入或结束时，不需要释放或失效任何设备侧对象。
 2. **TP 只有一条代码路径**：rank 0 计算一次计划，经 gloo 广播（pickle 对象，几百字节），所有 rank 执行同一份 `ModelWorker.execute`。早期方案是各 rank 从广播的 prompt 各自推导 batch，任何一处推导分歧都会让 NCCL 集合通信形状不一致而挂死，而且难以排查。现在决策只做一次、原样分发，分歧在结构上不可能发生。
@@ -151,13 +152,13 @@ graph TB
 |------|------|
 | [llm.py](../rapid_llm/engine/llm.py) | vLLM 风格门面 `LLM`（继承 LLMEngine）：prompt 规范化、多模态准备、`RequestOutput` 打包。限制：`data_parallel_size` 必须为 1，也不允许由它发起 TP 组。它的同步循环无法给 TP follower 派发计划，所以这两种配置直接报错，而不是静默退回单卡 |
 | [llm_engine.py](../rapid_llm/engine/llm_engine.py) | **一次性批处理引擎**：`_DecodeSession` 持有每次调用的 token grid `[batch, total_len]`、KV 预留空间和设备端停止状态；`run()` 驱动 prefill→decode 循环。流式模式每步 yield 文本增量，非流式每 `POLL_INTERVAL=8` 步才读回一次 |
-| [continuous_engine.py](../rapid_llm/engine/continuous_engine.py) | **连续批处理引擎**（在线服务的主引擎）：`step()` 固定为 schedule → plan → execute → harvest 四段；一步内可同时包含 PREFILL / EXTEND / DECODE 三种 pass |
-| [scheduler.py](../rapid_llm/engine/scheduler.py) | 调度器：按到达顺序准入 + chunked prefill（`max_chunk_size=512`，`DEFAULT_MAX_NUM_BATCHED_TOKENS=8192`、`DEFAULT_MAX_NUM_SEQS=32` 见 scheduler.py:134）+ **提交式调度**（计划某个 chunk 时立即推进 `num_computed_tokens`，不等待执行回报）+ 可选抢占（重计算策略）+ prefix cache 准入 |
+| [scheduler.py](../rapid_llm/engine/scheduler.py) | **连续批处理运行时**：`step()` 固定为 plan → execute → harvest；一步内可同时包含 PREFILL / EXTEND / DECODE 三种 pass |
+| [batch_planner.py](../rapid_llm/engine/batch_planner.py) | 纯主机排程器：维护 waiting/running、slot 和 KV block 状态；`plan()` 按 token budget 完成准入、chunked prefill、decode 和可选抢占，返回不可变 `StepPlan` |
 | [sampler.py](../rapid_llm/engine/sampler.py) | 采样：temperature / top-p / repetition penalty；`BatchedSamplingParams` 把逐请求参数整理成 `[batch, 1]` 张量，整批一次采样。**词表并行采样**基于恒等式 `log_softmax(x)_i = x_i − logsumexp(x)`（4.1 节展开），每行只需在 rank 间交换 2 个标量（对比 vLLM 的 all-gather 整份 logits）；top-p 候选池取各 rank 局部 top-k 的并集，通信量为 `O(k·tp)`，与词表大小无关 |
 | [stop_criteria.py](../rapid_llm/engine/stop_criteria.py) | 设备端停止判定：`StopCriteria` 用词表大小的 bool 查表代替 `torch.isin`，因此可以进入 CUDA graph；`load_stop_token_ids` 合并 tokenizer EOS 与 generation_config.json 的 eos 列表；另有文本级重复检测（数字归一化后匹配 128 字符尾窗） |
 | [detokenizer.py](../rapid_llm/engine/detokenizer.py) | 增量解码：`prefix_offset` / `read_offset` 双偏移窗口，摊销成本 O(1)；处理 SentencePiece 的 `▁` 与跨 token 的 UTF-8 序列 |
 | [async_engine.py](../rapid_llm/engine/async_engine.py) | asyncio 前端：引擎独占一个 worker 线程；协程只投递命令、经 `call_soon_threadsafe` 接收增量，不直接操作引擎。因此 worker 线程内部不需要加锁 |
-| [data_parallel.py](../rapid_llm/engine/data_parallel.py) | DP 协调器：N 个整模型副本进程，每个副本的 worker 常驻一个 ContinuousBatchingEngine，从队列领取请求；副本之间没有 NCCL 通信 |
+| [data_parallel.py](../rapid_llm/engine/data_parallel.py) | DP 协调器：N 个整模型副本进程，每个副本常驻一个 `Scheduler`，从队列领取请求；副本之间没有 NCCL 通信 |
 | [dp_load_balancer.py](../rapid_llm/engine/dp_load_balancer.py) | 纯策略对象：round_robin / total_requests / total_tokens / cache_aware。`needs_token_estimate` / `needs_token_ids` 两个标志声明各策略的输入需求，router 只为被实际用到的字段做 tokenize |
 | [async_data_parallel.py](../rapid_llm/engine/async_data_parallel.py) | DP 的 asyncio 前端：pump 线程把 mp.Queue 的消息调度回创建它的 event loop；消费者断开连接时 abort 对应请求，释放其 KV |
 | [prefix_cache.py](../rapid_llm/engine/prefix_cache.py) | 块哈希链式前缀缓存（结构对标 vLLM BlockPool）：blake2b 哈希保证跨进程结果一致（DP router 与各副本因此能算出相同的块标识）；引用计数 + LRU，引用归零的块仍驻留供后续命中；容量上限防止缓存无限增长 |
@@ -284,7 +285,7 @@ $$\text{bytes} = N_{\text{cached}} \cdot 2 \cdot n_{kv} \cdot d_{\text{head}} \c
 
 ## 五、初始化流程（端到端）
 
-以 `ContinuousBatchingEngine.from_pretrained(..., tensor_parallel_size=2)` 为例：
+以 `Scheduler.from_pretrained(..., tensor_parallel_size=2)` 为例：
 
 ```text
 1. read_model_type() 读 config.json → ModelRegistry.resolve() 得 ModelSpec（多模态在此拦截）
@@ -307,7 +308,7 @@ $$\text{bytes} = N_{\text{cached}} \cdot 2 \cdot n_{kv} \cdot d_{\text{head}} \c
    TP 下: 预热集合通信 → 网格指纹一致检查 → graph 与 eager 数值比对 →
           任一不通过则所有 rank 一律走 eager
 5. enable_slot_kv_cache(): 槽位 KV 视图接管连续批处理路径
-6. Scheduler(config, num_slots) — num_slots = min(池容量 / max_seq_len, max_num_seqs)
+6. BatchPlanner(config, num_slots) — num_slots = min(池容量 / max_seq_len, max_num_seqs)
 7. (TP > 1) MultiprocExecutor 包住 worker
 ```
 
@@ -332,12 +333,12 @@ generate() → _DecodeSession:
   释放全部 KV 引用
 ```
 
-### 6.2 连续批处理（`ContinuousBatchingEngine`，在线，核心路径）
+### 6.2 连续批处理（`Scheduler`，在线，核心路径）
 
 ```text
-add_request: tokenize → Scheduler.add_request（max_new_tokens 对 context 收口）→ WAITING
+add_request: tokenize → Scheduler.add_request → BatchPlanner.add_request（max_new_tokens 对 context 收口）→ WAITING
 step():
-  ① scheduler.schedule() — 三阶段提交式调度:
+  ① planner.plan() — 三阶段提交式调度:
      S0 _promote_pending_owners（上一步计划的 prefix 块，此刻才允许被复制使用）
      S1 恢复在途 prefill 的下一个 chunk（按到达顺序，先于新请求，防止饿死）
      S2 准入: _admit — 网格成本按 chunk 计价，不按整个 prompt 计;

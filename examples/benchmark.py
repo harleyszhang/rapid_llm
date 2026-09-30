@@ -110,9 +110,9 @@ def bench_rapid_llm(
     greedy = dict(temperature=0.0, top_p=1.0, repetition_penalty=1.0, stop_on_repeat=False)
 
     if tensor_parallel_size > 1:
-        from rapid_llm.engine import ContinuousBatchingEngine
+        from rapid_llm.engine import Scheduler
 
-        engine = ContinuousBatchingEngine.from_pretrained(
+        engine = Scheduler.from_pretrained(
             model_dir,
             max_seq_len=2048,
             max_gpu_num_blocks=max_gpu_num_blocks,
@@ -122,7 +122,7 @@ def bench_rapid_llm(
         )
 
         def generate(params):
-            return [output.text for output in engine.generate(prompts, params)]
+            return [output.outputs[0].text for output in engine.generate(prompts, params)]
 
         tokenizer = engine.tokenizer
     else:

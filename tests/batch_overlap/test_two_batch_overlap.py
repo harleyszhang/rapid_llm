@@ -414,9 +414,9 @@ def _boot(model_dir: str, *, use_cuda_graph: bool):
     process has no business with.
     """
     os.environ.pop("MASTER_PORT", None)
-    from rapid_llm.engine import ContinuousBatchingEngine
+    from rapid_llm.engine import Scheduler
 
-    return ContinuousBatchingEngine.from_pretrained(
+    return Scheduler.from_pretrained(
         model_dir,
         tensor_parallel_size=2,
         max_seq_len=1024,

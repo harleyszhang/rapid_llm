@@ -37,7 +37,7 @@ from rapid_llm.benchmark import (
     timestamped_log_path,
     write_json_log,
 )
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.scheduler import Scheduler
 
 CKPT = "my_weight/Qwen3-0.6B"
 LOG_DIR = "docs/benchmark_logs/kv_transfer"
@@ -92,7 +92,7 @@ def measure_depth(
     use_cuda_graph: bool,
 ) -> Arm:
     """Build one depth, warm it up, and time one saturated batch."""
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir,
         max_seq_len=max_seq_len,
         max_num_seqs=max_num_seqs,

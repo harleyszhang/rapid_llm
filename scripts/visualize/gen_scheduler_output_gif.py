@@ -1,13 +1,13 @@
-"""Record the SchedulerOutput GIF: one step's decision object, field by field.
+"""Record the StepPlan GIF: one step's decision object, field by field.
 
-v0.7 widened :class:`~rapid_llm.engine.scheduler.SchedulerOutput` so a single
+The :class:`~rapid_llm.engine.batch_planner.StepPlan` lets a single
 step can carry prefill AND decode together (v0.6 made them mutually exclusive),
 plus per-request ``prefill_chunk_lens`` and a ``preempted`` list. This GIF
-renders the actual object returned by ``Scheduler.schedule()`` each step across
+renders the actual object returned by ``BatchPlanner.plan()`` each step across
 a scenario that exercises every field: a long prompt chunk-prefilling while
 short requests decode, then an oversubscribed step that also preempts.
 
-Every value shown is read straight off the real SchedulerOutput.
+Every value shown is read straight off the real StepPlan.
 
 Usage:
     python scripts/gen_scheduler_output_gif.py
@@ -23,17 +23,25 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW, AMBER,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    AMBER,
+    BG,
+    DIM,
+    GREEN,
+    LINE_H,
+    PAD,
+    PROMPT_FG,
+    RED,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 W, H = 1180, 430
 
@@ -62,7 +70,7 @@ def record() -> list[Frame]:
         max_chunk_size=256,
         enable_preemption=True,
     )
-    sched = Scheduler(config, num_slots=3)
+    sched = BatchPlanner(config, num_slots=3)
 
     def mk(rid: str, prompt_len: int) -> Request:
         return Request(
@@ -94,7 +102,7 @@ def record() -> list[Frame]:
         if step == 5:
             sched.add_request(mk("short-d", 20))  # forces oversubscription
 
-        out = sched.schedule()
+        out = sched.plan()
         frames.append(
             Frame(
                 step=step,
@@ -107,7 +115,6 @@ def record() -> list[Frame]:
         )
         for r in out.decode:
             r.output_token_ids.append(999)
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
     return frames
 
 
@@ -115,10 +122,10 @@ def render(frame: Frame, fonts) -> Image.Image:
     body, bold, small = fonts
     canvas = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(canvas)
-    draw_title_bar(draw, W, "rapid-llm  --  SchedulerOutput per step", small=fonts.small)
+    draw_title_bar(draw, W, "rapid-llm  --  StepPlan per step", small=fonts.small)
 
     y = TITLE_H + PAD
-    draw.text((PAD, y), f"out = scheduler.schedule()   # step {frame.step}", fill=PROMPT_FG, font=body)
+    draw.text((PAD, y), f"out = planner.plan()   # step {frame.step}", fill=PROMPT_FG, font=body)
     y += LINE_H + 10
     draw.line([PAD, y, W - PAD, y], fill=(52, 58, 68))
     y += 14

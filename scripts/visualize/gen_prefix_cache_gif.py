@@ -1,6 +1,6 @@
 """Record the prefix-caching GIF: a shared system prompt is prefilled once.
 
-Drives the real :class:`~rapid_llm.engine.scheduler.Scheduler` with prefix
+Drives the real :class:`~rapid_llm.engine.batch_planner.BatchPlanner` with prefix
 caching enabled: several requests arrive sharing the same long system prompt,
 differing only in the user question. The thing to look at is the CACHED column:
 the first request prefills the whole prompt and populates the cache; every later
@@ -23,17 +23,26 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, YELLOW, AMBER,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    AMBER,
+    BG,
+    DIM,
+    GREEN,
+    LINE_H,
+    PAD,
+    PROMPT_FG,
+    RED,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 #: A shared 768-token system prompt (48 blocks of 16), then a short unique tail.
 SYSTEM_PROMPT_LEN = 768
@@ -74,7 +83,7 @@ def record() -> list[Frame]:
         max_chunk_size=0,
         enable_prefix_cache=True,
     )
-    sched = Scheduler(config, num_slots=8)
+    sched = BatchPlanner(config, num_slots=8)
 
     frames: list[Frame] = []
     for i in range(4):
@@ -86,7 +95,7 @@ def record() -> list[Frame]:
             params=SamplingParams(temperature=0.0, max_gen_len=32),
         )
         sched.add_request(request)
-        out = sched.schedule()
+        out = sched.plan()
         admitted = next(r for r in out.prefill if r.request_id == f"req-{i}")
         frames.append(
             Frame(
@@ -98,7 +107,6 @@ def record() -> list[Frame]:
                 hit_rate=sched.prefix_cache_hit_rate,
             )
         )
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
     return frames
 
 

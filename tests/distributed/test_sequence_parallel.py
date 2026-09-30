@@ -524,7 +524,7 @@ def _sp_engine_probe(spec: dict[str, Any], results: mp.Queue) -> None:
     os.environ["RAPID_LLM_SEQUENCE_PARALLEL"] = spec["sp"]
     os.environ["RAPID_LLM_SP_MIN_TOKENS"] = spec["min_tokens"]
     try:
-        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+        from rapid_llm.engine.scheduler import Scheduler
         from rapid_llm.models import base as model_base
 
         # Count the regions this rank actually opened, by wrapping the entry the
@@ -539,7 +539,7 @@ def _sp_engine_probe(spec: dict[str, Any], results: mp.Queue) -> None:
 
         model_base.entry_scatter = counting_scatter
         try:
-            engine = ContinuousBatchingEngine.from_pretrained(
+            engine = Scheduler.from_pretrained(
                 model=spec["model"],
                 device="cuda:0",
                 max_seq_len=_E2E_MAX_SEQ_LEN,

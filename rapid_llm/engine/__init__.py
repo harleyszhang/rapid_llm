@@ -1,7 +1,7 @@
 """Generation engines: two batching strategies over one shared executor.
 
-:class:`ContinuousBatchingEngine` interleaves prefills and decodes step by
-step while :class:`LLMEngine` runs one-shot batches; both drive the same
+:class:`Scheduler` interleaves prefills and decodes step by step while
+:class:`LLMEngine` runs one-shot batches; both drive the same
 :class:`~rapid_llm.executor.executor.Executor`. Imports are lazy so the
 package import stays CUDA-free.
 
@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .async_data_parallel import AsyncDataParallelEngine
     from .async_engine import AsyncLLMEngine, StreamedOutput
-    from .continuous_engine import ContinuousBatchingEngine
+    from .batch_planner import BatchPlanner, Request, RequestStatus, SchedulerConfig, StepPlan
     from .data_parallel import DataParallelEngine
     from .generator import TextGenerator, VisionGenerator
     from .llm import LLM
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .outputs import CompletionOutput, RequestOutput
     from .reasoning import ReasoningSplitter
     from .sampler import BatchedSamplingParams, Sampler, SamplingParams, sample_top_p
-    from .scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
+    from .scheduler import Scheduler
     from .tool_parser import (
         DeepSeekToolParser,
         QwenToolParser,
@@ -45,19 +45,20 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "AsyncLLMEngine": (".async_engine", "AsyncLLMEngine"),
     "BatchedSamplingParams": (".sampler", "BatchedSamplingParams"),
     "CompletionOutput": (".outputs", "CompletionOutput"),
-    "ContinuousBatchingEngine": (".continuous_engine", "ContinuousBatchingEngine"),
+    "BatchPlanner": (".batch_planner", "BatchPlanner"),
     "DataParallelEngine": (".data_parallel", "DataParallelEngine"),
     "DeepSeekToolParser": (".tool_parser", "DeepSeekToolParser"),
     "LLMEngine": (".llm_engine", "LLMEngine"),
     "QwenToolParser": (".tool_parser", "QwenToolParser"),
     "ReasoningSplitter": (".reasoning", "ReasoningSplitter"),
-    "Request": (".scheduler", "Request"),
+    "Request": (".batch_planner", "Request"),
     "RequestOutput": (".outputs", "RequestOutput"),
-    "RequestStatus": (".scheduler", "RequestStatus"),
+    "RequestStatus": (".batch_planner", "RequestStatus"),
     "Sampler": (".sampler", "Sampler"),
     "SamplingParams": (".sampler", "SamplingParams"),
     "Scheduler": (".scheduler", "Scheduler"),
-    "SchedulerConfig": (".scheduler", "SchedulerConfig"),
+    "SchedulerConfig": (".batch_planner", "SchedulerConfig"),
+    "StepPlan": (".batch_planner", "StepPlan"),
     "StreamedOutput": (".async_engine", "StreamedOutput"),
     "TextGenerator": (".generator", "TextGenerator"),
     "ToolCall": (".tool_parser", "ToolCall"),
@@ -88,9 +89,9 @@ __all__ = [
     "LLM",
     "AsyncDataParallelEngine",
     "AsyncLLMEngine",
+    "BatchPlanner",
     "BatchedSamplingParams",
     "CompletionOutput",
-    "ContinuousBatchingEngine",
     "DataParallelEngine",
     "DeepSeekToolParser",
     "LLMEngine",
@@ -103,6 +104,7 @@ __all__ = [
     "SamplingParams",
     "Scheduler",
     "SchedulerConfig",
+    "StepPlan",
     "StreamedOutput",
     "TextGenerator",
     "ToolCall",

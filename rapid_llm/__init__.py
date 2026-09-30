@@ -16,14 +16,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .engine.async_data_parallel import AsyncDataParallelEngine
     from .engine.async_engine import AsyncLLMEngine, StreamedOutput
-    from .engine.continuous_engine import ContinuousBatchingEngine
+    from .engine.batch_planner import Request, SchedulerConfig
     from .engine.data_parallel import DataParallelEngine
     from .engine.generator import TextGenerator, VisionGenerator
     from .engine.llm import LLM
     from .engine.llm_engine import LLMEngine
     from .engine.outputs import CompletionOutput, RequestOutput
     from .engine.sampler import Sampler, SamplingParams, sample_top_p
-    from .engine.scheduler import Request, SchedulerConfig
+    from .engine.scheduler import Scheduler
 
 
 # Importing ``rapid_llm`` is common in CLI discovery, test collection and worker
@@ -36,14 +36,14 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "AsyncDataParallelEngine": (".engine.async_data_parallel", "AsyncDataParallelEngine"),
     "AsyncLLMEngine": (".engine.async_engine", "AsyncLLMEngine"),
     "CompletionOutput": (".engine.outputs", "CompletionOutput"),
-    "ContinuousBatchingEngine": (".engine.continuous_engine", "ContinuousBatchingEngine"),
+    "Scheduler": (".engine.scheduler", "Scheduler"),
     "DataParallelEngine": (".engine.data_parallel", "DataParallelEngine"),
     "LLMEngine": (".engine.llm_engine", "LLMEngine"),
-    "Request": (".engine.scheduler", "Request"),
+    "Request": (".engine.batch_planner", "Request"),
     "RequestOutput": (".engine.outputs", "RequestOutput"),
     "Sampler": (".engine.sampler", "Sampler"),
     "SamplingParams": (".engine.sampler", "SamplingParams"),
-    "SchedulerConfig": (".engine.scheduler", "SchedulerConfig"),
+    "SchedulerConfig": (".engine.batch_planner", "SchedulerConfig"),
     "StreamedOutput": (".engine.async_engine", "StreamedOutput"),
     "TextGenerator": (".engine.generator", "TextGenerator"),
     "VisionGenerator": (".engine.generator", "VisionGenerator"),
@@ -73,13 +73,13 @@ __all__ = [
     "AsyncDataParallelEngine",
     "AsyncLLMEngine",
     "CompletionOutput",
-    "ContinuousBatchingEngine",
     "DataParallelEngine",
     "LLMEngine",
     "Request",
     "RequestOutput",
     "Sampler",
     "SamplingParams",
+    "Scheduler",
     "SchedulerConfig",
     "StreamedOutput",
     "TextGenerator",

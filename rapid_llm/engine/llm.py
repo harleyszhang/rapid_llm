@@ -108,7 +108,7 @@ class LLM(LLMEngine):
             raise ValueError(
                 f"LLM cannot start a tensor-parallel group: its generate loop does not "
                 f"broadcast plans to follower ranks. Use "
-                f"ContinuousBatchingEngine.from_pretrained(model=..., "
+                f"Scheduler.from_pretrained(model=..., "
                 f"tensor_parallel_size={tensor_parallel_size}) instead, or construct LLM "
                 f"inside a process that has already joined the group"
             )

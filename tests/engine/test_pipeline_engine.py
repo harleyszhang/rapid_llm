@@ -23,9 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine, _decode_work
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig, _decode_work
 from rapid_llm.executor.worker import PIPELINE_ENV, PassKind
 
 _EOS = 2
@@ -85,7 +84,7 @@ class _ScriptedExecutor:
 
 def _build_engine(
     rows: list[list[int]], *, pipeline: bool | None = True, **scheduler_kwargs
-) -> tuple[ContinuousBatchingEngine, _ScriptedExecutor]:
+) -> tuple[Scheduler, _ScriptedExecutor]:
     """A pipelined engine over a fake LLMEngine and scripted passes."""
     fake = SimpleNamespace(
         model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
@@ -95,7 +94,7 @@ def _build_engine(
         max_seq_len=64,
     )
     executor = _ScriptedExecutor(rows)
-    engine = ContinuousBatchingEngine(
+    engine = Scheduler(
         fake,
         SchedulerConfig(max_seq_len=64, max_num_seqs=4, **scheduler_kwargs),
         executor=executor,
@@ -104,7 +103,7 @@ def _build_engine(
     return engine, executor
 
 
-def _drain(engine: ContinuousBatchingEngine) -> list[list]:
+def _drain(engine: Scheduler) -> list[list]:
     """The async front end's loop: step until nothing is queued or in flight."""
     steps = []
     while engine.has_unfinished_requests():
@@ -169,7 +168,7 @@ def test_every_staged_buffer_is_handed_back():
 def test_pipeline_matches_the_synchronous_token_stream():
     """Same script, both loops: the output ids and the finish must agree."""
 
-    def run(pipeline: bool) -> ContinuousBatchingEngine:
+    def run(pipeline: bool) -> Scheduler:
         engine, _ = _build_engine([[_WORD], [_WORD], [_EOS]], pipeline=pipeline)
         request = engine.add_request("hi")
         _drain(engine)
@@ -330,7 +329,7 @@ def test_pipeline_harvests_before_the_next_readback_overwrites():
     by its successor.
     """
 
-    def run(pipeline: bool) -> ContinuousBatchingEngine:
+    def run(pipeline: bool) -> Scheduler:
         fake = SimpleNamespace(
             model_runner=SimpleNamespace(spec=SimpleNamespace(is_multimodal=False)),
             device="cpu",
@@ -339,7 +338,7 @@ def test_pipeline_harvests_before_the_next_readback_overwrites():
             max_seq_len=64,
         )
         executor = _RecyclingExecutor([[_WORD + i] for i in range(5)] + [[_EOS]])
-        engine = ContinuousBatchingEngine(
+        engine = Scheduler(
             fake,
             SchedulerConfig(max_seq_len=64, max_num_seqs=4),
             executor=executor,

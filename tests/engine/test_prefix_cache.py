@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
 from rapid_llm.engine.kv_cache_spec import FullAttentionSpec, KVCacheConfig, KVCacheGroup
 from rapid_llm.engine.prefix_cache import (
     PREFIX_CACHE_BLOCK_SIZE,
@@ -24,7 +25,6 @@ from rapid_llm.engine.prefix_cache import (
     iter_block_hashes,
 )
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, Scheduler, SchedulerConfig
 
 #: Blocks in a test pool. Big enough that nothing evicts unless a test asks for
 #: pressure, small enough that exhaustion is reachable when one does.
@@ -675,27 +675,27 @@ class TestResetAndStats:
 
 
 # --------------------------------------------------------------------------- #
-# 11. Scheduler integration
+# 11. BatchPlanner integration
 # --------------------------------------------------------------------------- #
 _MAX_SEQ_LEN = 512
 
 
-class TestSchedulerIntegration:
-    """The scheduler's side: admission adopts blocks, and every exit returns them."""
+class TestBatchPlannerIntegration:
+    """The planner's side: admission adopts blocks, and every exit returns them."""
 
     @staticmethod
-    def _sched(**kwargs) -> Scheduler:
+    def _sched(**kwargs) -> BatchPlanner:
         num_slots = kwargs.pop("num_slots", 4)
         num_blocks = kwargs.pop("num_blocks", 128)
         kwargs.setdefault("max_seq_len", _MAX_SEQ_LEN)
         kwargs.setdefault("enable_prefix_cache", True)
-        return Scheduler(SchedulerConfig(**kwargs), num_slots=num_slots, num_blocks=num_blocks)
+        return BatchPlanner(SchedulerConfig(**kwargs), num_slots=num_slots, num_blocks=num_blocks)
 
     @staticmethod
-    def _run(sched: Scheduler, request: Request, steps: int = 1) -> None:
+    def _run(sched: BatchPlanner, request: Request, steps: int = 1) -> None:
         """Drive *steps* schedule/execute cycles, faking the sampled tokens."""
         for _ in range(steps):
-            out = sched.schedule()
+            out = sched.plan()
             for r in out.decode:
                 r.output_token_ids.append(999)
 
@@ -705,9 +705,9 @@ class TestSchedulerIntegration:
         first, second = _req("a", tokens), _req("b", tokens)
 
         sched.add_request(first)
-        sched.schedule()  # a admitted, prefill planned
+        sched.plan()  # a admitted, prefill planned
         sched.add_request(second)
-        sched.schedule()  # a's blocks committed; b admitted against them
+        sched.plan()  # a's blocks committed; b admitted against them
 
         assert second.num_cached_tokens == 48
         shared = 48 // PREFIX_CACHE_BLOCK_SIZE
@@ -719,10 +719,10 @@ class TestSchedulerIntegration:
         sched = self._sched()
         tokens = list(range(64))
         sched.add_request(_req("a", tokens))
-        sched.schedule()
+        sched.plan()
         second = _req("b", tokens)
         sched.add_request(second)
-        sched.schedule()
+        sched.plan()
 
         assert len(second.block_plan) == 1
         group_id, start_block, block_ids = second.block_plan[0]
@@ -740,7 +740,7 @@ class TestSchedulerIntegration:
         first, second = _req("a", tokens), _req("b", tokens)
         sched.add_request(first)
         sched.add_request(second)
-        sched.schedule()
+        sched.plan()
         assert (first.num_cached_tokens, second.num_cached_tokens) == (0, 0)
         assert set(sched._prefix_cache.block_ids("a")[0]).isdisjoint(
             sched._prefix_cache.block_ids("b")[0]
@@ -751,7 +751,7 @@ class TestSchedulerIntegration:
         tokens = list(range(64))
         for name in ("a", "b"):
             sched.add_request(_req(name, tokens))
-            sched.schedule()
+            sched.plan()
         assert sched._requests["b"].num_cached_tokens == 0
 
     def test_a_chunked_prefill_still_reuses_what_it_can(self):
@@ -760,12 +760,12 @@ class TestSchedulerIntegration:
         first = _req("a", tokens)
         sched.add_request(first)
         for _ in range(6):  # 64 tokens in 16-token chunks, plus slack
-            sched.schedule()
+            sched.plan()
         assert first.prefill_done
 
         second = _req("b", tokens)
         sched.add_request(second)
-        sched.schedule()
+        sched.plan()
         # The hit covers 3 blocks; the remaining chunk is capped at 16.
         assert second.num_cached_tokens == 48
         assert second.num_computed_tokens == 64
@@ -775,8 +775,8 @@ class TestSchedulerIntegration:
         tokens = list(range(64))
         request = _req("a", tokens)
         sched.add_request(request)
-        sched.schedule()
-        sched.schedule()  # commits a's blocks
+        sched.plan()
+        sched.plan()  # commits a's blocks
         sched.finish(request, "stop")
 
         cache = sched._prefix_cache
@@ -808,7 +808,7 @@ class TestSchedulerIntegration:
 
         cache = sched._prefix_cache
         for _ in range(10):
-            out = sched.schedule()
+            out = sched.plan()
             for r in out.decode:
                 r.output_token_ids.append(999)
             running = sum(1 for r in sched._requests.values() if r.slot is not None)
@@ -820,7 +820,7 @@ class TestSchedulerIntegration:
         for i in range(4):
             sched.add_request(_req(f"r{i}", list(range(i * 64, i * 64 + 64))))
         for _ in range(4):
-            sched.schedule()
+            sched.plan()
 
         cache = sched._prefix_cache
         assert cache.num_free_blocks >= 0
@@ -834,7 +834,7 @@ class TestSchedulerIntegration:
         sched.add_request(request)
         cache = sched._prefix_cache
 
-        sched.schedule()  # prefill: 16 tokens, 1 block
+        sched.plan()  # prefill: 16 tokens, 1 block
         assert len(cache.block_ids("a")[0]) == 1
         self._run(sched, request, steps=1)  # first decode token: position 16
         assert len(cache.block_ids("a")[0]) == 2
@@ -845,7 +845,7 @@ class TestSchedulerIntegration:
         sched = self._sched()
         request = _req("a", list(range(20)))
         sched.add_request(request)
-        sched.schedule()
+        sched.plan()
         self._run(sched, request, steps=2)
         assert request.block_plan == ()  # still inside block 1
 
@@ -855,7 +855,7 @@ class TestSchedulerIntegration:
         prompt = list(range(32))
         first = _req("a", prompt)
         sched.add_request(first)
-        sched.schedule()
+        sched.plan()
         for i in range(34):  # generate well past two block boundaries
             self._run(sched, first, steps=1)
             assert first.output_token_ids, f"no token generated by step {i}"
@@ -863,5 +863,5 @@ class TestSchedulerIntegration:
         turn_two = prompt + first.output_token_ids[:32] + [5] * 16
         second = _req("b", turn_two)
         sched.add_request(second)
-        sched.schedule()
+        sched.plan()
         assert second.num_cached_tokens >= 48  # past the prompt, into the answer

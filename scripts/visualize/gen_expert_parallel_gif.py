@@ -35,8 +35,8 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.modules.moe import SparseMoeBlock
 from rapid_llm.tools.observability import (
     Collective,
@@ -139,7 +139,7 @@ class _RoutingRecorder:
 
 def _run_engine(model_dir: str, max_gen_len: int, *, ep: bool) -> list[Frame]:
     """Drive one real two-rank engine, snapshotting ledger + routing per step."""
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir,
         max_seq_len=512,
         max_num_seqs=len(PROMPTS),

@@ -29,7 +29,7 @@ from .sampler import SamplingParams
 from .scheduler import DEFAULT_MAX_CHUNK_SIZE, DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 
 if TYPE_CHECKING:  # pragma: no cover - the worker imports these in its own process
-    from .continuous_engine import ContinuousBatchingEngine
+    from .scheduler import Scheduler
 
 _log = get_logger(__name__)
 
@@ -72,7 +72,7 @@ class _ReplicaLoop:
       path with a different grouping, which is why they share this loop.
 
     Args:
-        engine: This replica's :class:`ContinuousBatchingEngine`. Under TP it is the
+        engine: This replica's :class:`Scheduler`. Under TP it is the
             leader's, and its executor broadcasts every plan to the follower ranks.
         requests: Inbound command tuples (see above), or :data:`_SHUTDOWN`.
         results: Outbound ``("done" | "error", batch_id, payload)`` and
@@ -81,7 +81,7 @@ class _ReplicaLoop:
 
     def __init__(
         self,
-        engine: ContinuousBatchingEngine,
+        engine: Scheduler,
         requests: mp.Queue,
         results: mp.Queue,
         *,
@@ -361,10 +361,10 @@ def _dp_worker(
 
     from ..distributed.parallel_state import init_parallel
     from ..executor.executor import serve_plans
-    from .continuous_engine import ContinuousBatchingEngine
     from .llm import LLM
+    from .scheduler import Scheduler
 
-    engine: ContinuousBatchingEngine | None = None
+    engine: Scheduler | None = None
     try:
         engine_kwargs = dict(engine_kwargs)
         on_cpu = engine_kwargs.pop("device", "cuda") == "cpu"
@@ -386,7 +386,7 @@ def _dp_worker(
         if tp_rank == 0:
             # ``from_pretrained`` finds this process already in a TP group and
             # therefore spawns nothing: the grid is the coordinator's to own.
-            engine = ContinuousBatchingEngine.from_pretrained(
+            engine = Scheduler.from_pretrained(
                 device=device,
                 max_num_seqs=max_num_seqs,
                 max_num_batched_tokens=max_num_batched_tokens,
@@ -669,7 +669,7 @@ class DataParallelEngine:
         The ids must agree with what the replica itself would produce, because
         ``cache_aware`` hashes them to guess what that replica already has cached; this
         uses the same tokenizer and the same ``add_special_tokens=True`` as
-        :class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine` does on
+        :class:`~rapid_llm.engine.scheduler.Scheduler` does on
         admission.
         """
         balancer = self._balancer

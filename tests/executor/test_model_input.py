@@ -14,9 +14,8 @@ import pickle
 
 import pytest
 
-from rapid_llm.engine.continuous_engine import _chunk_work, _decode_work, _prefill_work
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request
+from rapid_llm.engine.scheduler import Request, _chunk_work, _decode_work, _prefill_work
 from rapid_llm.executor.worker import ModelInput, ModelWorker, PassKind
 
 GREEDY = SamplingParams(temperature=0.0, max_gen_len=8, repetition_penalty=1.0)

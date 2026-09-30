@@ -1,6 +1,6 @@
 """Record the L1 cross-stream overlap GIF: input uploads overlap the prior forward.
 
-Drives a real :class:`~rapid_llm.engine.continuous_engine.ContinuousBatchingEngine`
+Drives a real :class:`~rapid_llm.engine.scheduler.Scheduler`
 with ``RAPID_LLM_OVERLAP_TIMELINE=1`` over a workload built to contain mixed
 prefill/decode steps (long prompts, a small per-step token budget). Every region
 rendered is a CUDA-event measurement taken from the engine's own timeline: copy
@@ -24,10 +24,19 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, DIM, PROMPT_FG, TEXT_FG,
-    GREEN, RED, AMBER, GRID_LINE,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    AMBER,
+    BG,
+    DIM,
+    GREEN,
+    GRID_LINE,
+    LINE_H,
+    PAD,
+    RED,
+    TEXT_FG,
+    TITLE_H,
+    FontPack,
+    draw_title_bar,
+    save_gif,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,10 +61,10 @@ def record(model_dir: str):
     """Run a small mixed-step workload and return the timeline regions."""
     os.environ["RAPID_LLM_OVERLAP"] = "1"
     os.environ["RAPID_LLM_OVERLAP_TIMELINE"] = "1"
-    from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
     from rapid_llm.engine.sampler import SamplingParams
+    from rapid_llm.engine.scheduler import Scheduler
 
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model_dir,
         max_seq_len=4096,
         max_num_seqs=8,

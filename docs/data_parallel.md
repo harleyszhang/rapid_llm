@@ -38,7 +38,7 @@ if __name__ == "__main__":
 **一条线协议，两个前端。** `_ReplicaLoop` 收到的消息以打头标签区分来源：`"batch"` 是同步 `generate()` 的调度单位（整批一条应答），`"add"` / `"abort"` 是流式前端 `AsyncDataParallelEngine` 的逐请求通道（每 step 一条 `delta`、结束一条 `finished`，拒绝或失败只报那一个 id）。副本不关心自己被哪种前端持有——两条路径共享同一套记账，只是分组不同，这也是流式前端能在不动副本代码的情况下加进来的原因。
 
 - **worker**（`_dp_worker`）是网格里的**一个 cell**，不是一个副本：spawn 出的子进程里 `import torch`、按 `global_rank` 绑卡，然后按自己在副本里的位置分化成两种角色。
-  - **leader**（`tp_rank == 0`）建一个**常驻**的 `ContinuousBatchingEngine`，跑 `_ReplicaLoop`：从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch 存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
+  - **leader**（`tp_rank == 0`）建一个**常驻**的 `Scheduler`，跑 `_ReplicaLoop`：从自己的队列取请求、并进正在跑的 batch、逐 step 推进、把答案发回。引擎跨 dispatch 存活是这一层唯一的性能要点——请求随到随入，停了的序列**下一步**就把 slot 让给下一条，而不是整批陪最长的那条答案跑到底。空闲时循环阻塞在队列上，不空转 CPU。
   - **follower**（`tp_rank > 0`）建一个 `LLM` 并跑 `serve_plans`，**不读请求队列**：它每一次前向都由 leader 的 executor 通过控制面广播过来（见[张量并行](./tensor_parallel.md)）。
 
   建模失败也走结果队列（一条 `"error"` 消息），协调器因此会**报错而不是死等**一个永远
@@ -65,7 +65,7 @@ CUDA 的 TP 数据面使用 NCCL，CPU 使用 Gloo；控制面使用 Gloo。下�
 
 网格坐标是纯函数 `grid_coordinates(global_rank, tp_size, dp_size) → (dp_rank, tp_rank)`，按 `global_rank = dp_rank * tp_size + tp_rank` 布局，让一个副本的 TP ranks 连续。 `init_parallel` 只有在 `tp_size > 1` 时才真正 rendezvous 建 NCCL 进程组——纯 DP 的副本之间不共享任何张量，没什么好同步的，NCCL 完全不碰。这也是为什么纯 DP 用普通的 `multiprocessing` 队列而不是 NCCL：worker 从不读另一个 worker 的张量。
 
-**进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是 `dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次 `SchedulerOutput` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为协调器每个副本只等一条应答。
+**进程数按 cell 算，队列数按副本算。** `tp_size > 1` 时 `init_parallel` rendezvous 的是 `dp_size × tp_size` 个 rank 的世界，所以只 spawn `dp_size` 个进程会**永久挂死**在等待从未启动的 rank 上——一个协调器的任何超时都解释不了的失败。所以协调器为每个 cell 起一个进程，但**请求队列只有 `dp_size` 个**：一条请求发给一个**副本**，而不是发给副本的每个 rank。副本内的 follower 不参与路由，它们跑什么由 leader 的控制面决定（每 step 一次 `StepPlan` 广播，采样出的 token 再从 tp rank 0 广播回去）；只有 leader 回结果，因为协调器每个副本只等一条应答。
 
 这么分层的收益是**路由与同步互不知情**：换 balancer 不碰 TP 的一行代码，改 TP 的广播格式也不碰路由。早期实现里 tp ranks 是**镜像**——每个 rank 一个队列、各自收同一条请求消息——那样 "一条请求"就同时是路由单位和同步单位，两边任何一处不一致都会让某个 rank 少跑一次前向而卡死在集合通信里。
 
@@ -121,7 +121,7 @@ rapid-llm serve /path/to/moe-checkpoint \
 ```bash
 pytest tests/distributed/test_dp_attention.py \
     tests/distributed/test_data_parallel.py \
-    tests/engine/test_continuous_engine.py -q
+    tests/engine/test_scheduler.py -q
 RAPID_LLM_TEST_DPA_DIR=/path/to/moe-checkpoint \
     pytest tests/distributed/test_dp_attention_engine.py -q
 RAPID_MOE_A2A_BACKEND=all_to_all \

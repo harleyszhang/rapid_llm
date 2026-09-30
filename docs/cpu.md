@@ -14,9 +14,9 @@ uv pip install --python .venv/bin/python -e .
 明确传入 `device="cpu"`。即使机器有 GPU，CPU 请求也使用 CPU 算子和 Gloo 通信，不依据 `torch.cuda.is_available()` 切换设备。
 
 ```python
-from rapid_llm import ContinuousBatchingEngine, SamplingParams
+from rapid_llm import SamplingParams, Scheduler
 
-engine = ContinuousBatchingEngine.from_pretrained(
+engine = Scheduler.from_pretrained(
     "my_weight/Qwen2.5-0.5B",
     device="cpu",
     max_seq_len=512,

@@ -222,9 +222,9 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     """
     try:
         from rapid_llm import SamplingParams
-        from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+        from rapid_llm.engine.scheduler import Scheduler
 
-        engine = ContinuousBatchingEngine.from_pretrained(
+        engine = Scheduler.from_pretrained(
             model=spec["model"],
             device="cuda:0",
             max_seq_len=spec["max_seq_len"],

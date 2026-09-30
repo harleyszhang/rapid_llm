@@ -6,9 +6,9 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from rapid_llm import (
     LLM,
-    ContinuousBatchingEngine,
     DataParallelEngine,
     SamplingParams,
+    Scheduler,
     SchedulerConfig,
 )
 from rapid_llm.executor.model_runner import ModelRunner
@@ -137,7 +137,7 @@ def test_offline_and_continuous_generation(checkpoint, quantization, monkeypatch
     params = SamplingParams(temperature=0, max_gen_len=3, stop_on_repeat=False)
     output = llm.generate(["hello world"], params)
     assert output[0].outputs[0].finish_reason == "length"
-    engine = ContinuousBatchingEngine(
+    engine = Scheduler(
         llm, SchedulerConfig(max_seq_len=16, max_num_seqs=2, max_num_batched_tokens=4)
     )
     results = engine.generate(["hello world", "hello"], params)
@@ -173,7 +173,7 @@ def test_parallel_generation(checkpoint, dp, tp, pipeline, monkeypatch):
 @pytest.mark.parametrize("kv_dtype", ["auto", "fp8"])
 def test_chunk_prefix_preemption_combination(checkpoint, kv_dtype):
     path, _ = checkpoint
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         str(path),
         device="cpu",
         max_seq_len=32,
@@ -213,7 +213,7 @@ def test_cpu_launch_harvest_pipeline(checkpoint, monkeypatch):
 
     monkeypatch.delenv(PIPELINE_ENV, raising=False)
     path, _ = checkpoint
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         str(path),
         device="cpu",
         max_seq_len=16,

@@ -148,7 +148,7 @@ python benchmarks/kernels/bench_quant_gemm.py --tune --dry-run                  
 - **TPS 加速比** = `rapid_llm TGS / transformers TGS`（吞吐越高越好）；
 - 三列加速比都标在 rapid_llm 行（大于 1 即 rapid_llm 更快），单侧跑的组合无对照记 `—`。
 
-多模态四行（batch=serial）由 `examples/benchmark_vision.py` 测得：rapid_llm 的多模态路径逐请求串行（processor 单请求），lite 侧 decode 走 CUDA graph 重放（视觉 token 在 prefill 后已是 KV cache 行，捕获的 decode 步与纯文本同构）；TTFT/TPOT 为单请求平均、TGS 为串行循环的聚合吞吐，与纯文本行的 batch 并行口径不同，不要直接比较。TP2 行的 rapid_llm 侧走 `ContinuousBatchingEngine`（唯一带 plan 广播的执行路径），transformers 侧 `device_map=auto` 把层均摊到同样的两张卡（模型并行），两端硬件一致。
+多模态四行（batch=serial）由 `examples/benchmark_vision.py` 测得：rapid_llm 的多模态路径逐请求串行（processor 单请求），lite 侧 decode 走 CUDA graph 重放（视觉 token 在 prefill 后已是 KV cache 行，捕获的 decode 步与纯文本同构）；TTFT/TPOT 为单请求平均、TGS 为串行循环的聚合吞吐，与纯文本行的 batch 并行口径不同，不要直接比较。TP2 行的 rapid_llm 侧走 `Scheduler`（唯一带 plan 广播的执行路径），transformers 侧 `device_map=auto` 把层均摊到同样的两张卡（模型并行），两端硬件一致。
 
 | 模型 | GPU | batch | gen_len | 引擎 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | TTFT 加速比 | TPOT 加速比 | TPS 加速比 |
 | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -225,7 +225,7 @@ python examples/benchmark.py --model my_weight/Qwen2.5-1.5B-Instruct \
 # FP8 checkpoint 的 transformers 基线：--hf-dtype auto（无原生 fp8 的卡上自动 dequant 为 bf16）
 # transformers 无法加载的量化（AWQ 需 gptqmodel/autoawq）：--engine rapid_llm 单侧
 # 8B 单卡 b8 档：--max-gpu-num-blocks 16384 收缩 KV 池（profile 默认值留给 graph 捕获的空间不足）
-# 8B 双卡 TP2 b16 档（lite 走 ContinuousBatchingEngine eager，HF 走 device_map=auto）：
+# 8B 双卡 TP2 b16 档（lite 走 Scheduler eager，HF 走 device_map=auto）：
 python examples/benchmark.py --model my_weight/Qwen3-8B \
     --batch-size 16 --gen-len 128 --iters 2 --tensor-parallel-size 2
 # 多模态（llava / Qwen3-VL，逐请求串行口径，decode 走 CUDA graph）：
@@ -266,7 +266,7 @@ python examples/benchmark.py --model my_weight/Qwen3-30B-A3B-Instruct-2507-FP8 \
 - **TTFT 只领先 1.29×～1.43×**，与 A10 表同量级：prefill 是 compute-bound 的大 GEMM，两端都走 cuBLAS，差距只在调度与 KV 分配开销上，与 decode 的 launch-bound 局面不同。
 - **TGS 与 TPOT 比值接近但不相等**：TGS 的分母是整轮墙钟（含 TTFT 与采样），batch 越大、gen_len 越长，TTFT 的占比越小，两个比值越靠拢（b16/g256 档：0.5B 25.20× 对 24.26×）。
 - **30B-A3B bf16 第一次有了 transformers 对照**：A10 双卡 44 GB 装不下 60 GB 权重，H100 上 `device_map=auto` 摊到两张卡即可跑（HF TPOT 98.71 ms，rapid_llm TP2 9.97 ms）。HF 侧跑 MoE 的 128 专家是 Python 循环，这是它 TPOT 的主因，不是硬件差距。
-- **30B 级在单张 H100 上就能跑**：bf16 checkpoint 权重 56.87 GB、FP8 版 29.03 GB，所以多出两行 GPU=H100 的 TP1 档（A10 22 GiB 无此档位）；HF 侧的 allocator warmup 要 ~2× 权重，单卡放不下，所以这两行无对照（记 `—`）。TP2 买到的是 KV 容量而不是速度：bf16 从 13.3 万 token/卡 到 86.6 万 token/卡，TPOT 10.96 → 9.97 ms，与 [quantization.md](quantization.md) 的 30B-A3B 结论一致。TP2 行的 rapid_llm 侧走 `ContinuousBatchingEngine`，decode **走 graph**（TP-safe 捕获已落地），与 A10 表的 TP2 eager 口径不同。
+- **30B 级在单张 H100 上就能跑**：bf16 checkpoint 权重 56.87 GB、FP8 版 29.03 GB，所以多出两行 GPU=H100 的 TP1 档（A10 22 GiB 无此档位）；HF 侧的 allocator warmup 要 ~2× 权重，单卡放不下，所以这两行无对照（记 `—`）。TP2 买到的是 KV 容量而不是速度：bf16 从 13.3 万 token/卡 到 86.6 万 token/卡，TPOT 10.96 → 9.97 ms，与 [quantization.md](quantization.md) 的 30B-A3B 结论一致。TP2 行的 rapid_llm 侧走 `Scheduler`，decode **走 graph**（TP-safe 捕获已落地），与 A10 表的 TP2 eager 口径不同。
 - **FP8 checkpoint 的 transformers 侧仍是单侧，但原因换了**：A10 是反量化后的 ~60 GB bf16 放不下显存；H100 显存够，缺的是 transformers finegrained-fp8 kernel 的依赖（`kernels` 包，不在本项目依赖表里），加载即 ImportError。
 
 > 环境注记：transformers 的 `device_map` 需要 `accelerate`（已在 `requirement.txt`，本次补装到 `.venv`）；缺它时 `examples/benchmark.py` 的 HF 侧直接 ValueError。
@@ -420,7 +420,7 @@ DeepSeek-V2/V3 的前若干层是 dense、之后才是 MoE（V2-Lite `first_k_de
 - **DeepSeek-V2-Lite（完整 27 层 = 1 dense + 26 MoE）**：30 GB 权重单张 A10（22 GiB）放不下，走 **TP2 跨两卡**；不剪层是因为 vLLM 0.21.0 的 DeepSeek 加载器无法跳过 `num_hidden_layers` 剪掉的层（对多出来的 `layers.N..26` 直接 `KeyError`），要拿到 vLLM 三方就必须跑完整模型。完整 27 层覆盖全部 26 个 MoE 层，稀疏路由被充分 exercise。
 - **DeepSeek-V3-4layers-MTP-BF16（4 层 = 3 dense + 1 MoE）**：官方剪裁 checkpoint，13 GB 单卡可放；完整 V3（61 层 / 256 专家 / 671B）两卡远放不下，故用这个 4 层 checkpoint、跑满 4 层覆盖到层 3 的 MoE；路由用 golden 门验证过的 regroup override（`n_group=2, topk_group=1, num_experts_per_tok=2`，把 8 专家 / 8 组重组成 2 组 × 4，恢复 noaux_tc 分组语义）。
 
-batch=8、gen_len=128、iters=2、bf16。**每个框架在自己的 venv 下测**（双框架双环境口径）：rapid_llm 与 transformers 在 `rapid_llm/.venv`（torch 2.13.0+cu129、transformers 5.15），vLLM 在源码仓 venv（vllm 0.28.1rc1.dev、torch 2.13.0+cu129，PATH 需含其 bin——flashinfer JIT 要 ninja）。V2-Lite 行为历史共享 venv 口径（vLLM 0.21.0 / torch 2.11），V3 行为双 venv 重测值。**并行口径按模型而定**：V2-Lite TP2（两卡，rapid_llm 走 `ContinuousBatchingEngine`、transformers `device_map=auto`、vLLM `tensor_parallel_size=2`），V3-4layers 单卡；同一模型内三方并行一致、可直接比，跨模型（TP2 vs 单卡）不直接可比。
+batch=8、gen_len=128、iters=2、bf16。**每个框架在自己的 venv 下测**（双框架双环境口径）：rapid_llm 与 transformers 在 `rapid_llm/.venv`（torch 2.13.0+cu129、transformers 5.15），vLLM 在源码仓 venv（vllm 0.28.1rc1.dev、torch 2.13.0+cu129，PATH 需含其 bin——flashinfer JIT 要 ninja）。V2-Lite 行为历史共享 venv 口径（vLLM 0.21.0 / torch 2.11），V3 行为双 venv 重测值。**并行口径按模型而定**：V2-Lite TP2（两卡，rapid_llm 走 `Scheduler`、transformers `device_map=auto`、vLLM `tensor_parallel_size=2`），V3-4layers 单卡；同一模型内三方并行一致、可直接比，跨模型（TP2 vs 单卡）不直接可比。
 
 | 模型 | 层数（dense+MoE） | 并行 | 引擎 | TTFT (s) | TPOT (ms) | TPS (tok/s) | TGS (tok/s) | 每卡 TGS (tok/s) | TPOT 加速比 | TGS 加速比 |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

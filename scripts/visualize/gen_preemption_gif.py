@@ -1,11 +1,11 @@
 """Record the preemption GIF: 3 requests time-share 2 slots by recompute.
 
-Drives the real :class:`~rapid_llm.engine.scheduler.Scheduler` with
+Drives the real :class:`~rapid_llm.engine.batch_planner.BatchPlanner` with
 ``enable_preemption=True`` and ``max_num_seqs=3 > num_slots=2``. The row to
 watch is PREEMPTED: each step the youngest decoding request is evicted (KV
 dropped, re-queued for recompute) so a waiting request gets a slot, giving a
-fair round-robin. Every id shown is the real ``SchedulerOutput.preempted`` /
-``.decode`` / ``.prefill`` plus ``Scheduler.num_preemptions``.
+fair round-robin. Every id shown is the real ``StepPlan.preempted`` /
+``.decode`` / ``.prefill`` plus ``BatchPlanner.num_preemptions``.
 
 Usage:
     python scripts/gen_preemption_gif.py
@@ -20,12 +20,29 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, SchedulerConfig
+from rapid_llm.engine.sampler import SamplingParams
 from scripts._viz_lib import (
-    BG, TITLE_BG, TITLE_FG, PROMPT_FG, DIM, TEXT_FG, GREEN, RED, AMBER,
-    PREFILL_FG, DECODE_OK, STALLED,
-    TITLE_H, PAD, LINE_H,
-    FontPack, draw_title_bar, save_gif,
+    BG,
+    DECODE_OK,
+    DIM,
+    LINE_H,
+    PAD,
+    PREFILL_FG,
+    PROMPT_FG,
+    RED,
+    TITLE_BG,
+    TITLE_FG,
+    TITLE_H,
+    FontPack,
+    save_gif,
 )
+
+W, H = 1180, 430
+NUM_SLOTS = 2
+MAX_NUM_SEQS = 3
+DECODE_FG = DECODE_OK
+PREEMPT_FG = RED
 
 
 @dataclass
@@ -46,7 +63,7 @@ def record(steps: int = 7) -> list[Frame]:
         max_chunk_size=0,
         enable_preemption=True,
     )
-    sched = Scheduler(config, num_slots=NUM_SLOTS)
+    sched = BatchPlanner(config, num_slots=NUM_SLOTS)
     for i in range(3):
         sched.add_request(
             Request(
@@ -59,7 +76,7 @@ def record(steps: int = 7) -> list[Frame]:
 
     frames: list[Frame] = []
     for step in range(1, steps + 1):
-        out = sched.schedule()
+        out = sched.plan()
         frames.append(
             Frame(
                 step=step,
@@ -72,7 +89,6 @@ def record(steps: int = 7) -> list[Frame]:
         )
         for r in out.decode:
             r.output_token_ids.append(999)
-        sched.advance_chunks(out.prefill, out.prefill_chunk_lens)
     return frames
 
 
@@ -160,21 +176,13 @@ def main() -> int:
         print(f"step {f.step}: prefill={f.prefill} decode={f.decode} "
               f"preempted={f.preempted} total={f.total_preemptions}")
 
-    fonts = (
-        ImageFont.truetype(FONT_PATH, 17),
-        ImageFont.truetype(BOLD_PATH, 17),
-        ImageFont.truetype(FONT_PATH, 15),
-    )
+    fonts = FontPack.mono(17, 17, 15)
     images = [render(f, fonts) for f in frames]
     images += [images[-1]] * 2
-    palette = [im.convert("P", palette=Image.ADAPTIVE, colors=64) for im in images]
 
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    palette[0].save(
-        out, save_all=True, append_images=palette[1:], duration=args.duration, loop=0, optimize=True
-    )
-    print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(palette)} frames)")
+    save_gif(images, out, duration=args.duration)
+    print(f"saved {out} ({out.stat().st_size / 1024:.0f} KB, {len(images)} frames)")
     return 0
 
 

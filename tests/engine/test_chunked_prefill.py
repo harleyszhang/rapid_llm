@@ -15,9 +15,9 @@ import gc
 import pytest
 import torch
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
+from rapid_llm.engine.batch_planner import SchedulerConfig
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import SchedulerConfig
+from rapid_llm.engine.scheduler import Scheduler
 
 pytestmark = [pytest.mark.gpu, pytest.mark.weights]
 
@@ -39,7 +39,7 @@ LONG = "banana " * 200
 @pytest.fixture
 def engine(model_dir):
     """Continuous-batching engine with chunking turned down to :data:`_CHUNK`."""
-    built = ContinuousBatchingEngine.from_pretrained(
+    built = Scheduler.from_pretrained(
         str(model_dir),
         max_seq_len=_MAX_SEQ_LEN,
         max_num_seqs=4,
@@ -48,7 +48,7 @@ def engine(model_dir):
     )
     config = SchedulerConfig(max_seq_len=_MAX_SEQ_LEN, max_num_seqs=4, max_chunk_size=_CHUNK)
     built.config = config
-    built.scheduler.config = config
+    built.planner.config = config
     yield built
     del built
     gc.collect()

@@ -2,7 +2,7 @@
 
 The tier's own suite (``test_offloading_manager.py``) drives the manager in
 isolation, case for case against vLLM's ``simple_kv_offload`` tests. This one
-wires it into the :class:`Scheduler` and asserts the whole arc: a commit
+wires it into the :class:`BatchPlanner` and asserts the whole arc: a commit
 mirrors blocks down, an admission parks on the copy, the event drain lands it
 and re-indexes the GPU blocks, and every unwind path — a request aborted in
 flight, a lost seat, a refused pin — releases exactly what it should.
@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import pytest
 
+from rapid_llm.engine.batch_planner import BatchPlanner, Request, RequestStatus, SchedulerConfig
 from rapid_llm.engine.kv_offload.cpu import CPUPrimaryTierOffloadingManager
 from rapid_llm.engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 from rapid_llm.engine.sampler import SamplingParams
-from rapid_llm.engine.scheduler import Request, RequestStatus, Scheduler, SchedulerConfig
 
 BLOCK = PREFIX_CACHE_BLOCK_SIZE
 #: ``a``'s prompt: 64 tokens, exactly four blocks.
@@ -124,7 +124,7 @@ def build(
         enable_prefix_cache=True,  # the tier keys blocks by their content hash
         enable_preemption=enable_preemption,
     )
-    sched = Scheduler(config, num_slots=num_slots, num_blocks=pool_blocks, offloading=manager)
+    sched = BatchPlanner(config, num_slots=num_slots, num_blocks=pool_blocks, offloading=manager)
     return sched, manager, copier
 
 
@@ -141,14 +141,14 @@ def partial_hit_setup(pool_blocks: int = 10, **kwargs):
 
     a = make_request("a", A_TOKENS)
     sched.add_request(a)
-    sched.schedule()
+    sched.plan()
     sched.finish(a, "eos")  # settles the commit: the store is in flight now
     copier.release_all()
     manager.take_events()  # drained: the CPU holds all four of a's keys
 
     f = make_request("f", range(2000, 2000 + (pool_blocks - 4) * BLOCK))
     sched.add_request(f)
-    sched.schedule()
+    sched.plan()
     sched.finish(f, "eos")  # ate the free queue, evicting a's tail block
     return sched, manager, copier
 
@@ -165,7 +165,7 @@ class TestStoreThenPromote:
 
         b = make_request("b", A_TOKENS + list(range(3000, 3032)))
         sched.add_request(b)
-        out = sched.schedule()
+        out = sched.plan()
 
         # The pool serves 48 tokens of the prompt; the fourth block is being
         # copied, so nothing about b may run this step.
@@ -180,7 +180,7 @@ class TestStoreThenPromote:
         assert len(moves) == 1  # exactly the one block the pool was missing
 
         copier.release_all()
-        out = sched.schedule()
+        out = sched.plan()
 
         # The copy landed: b is seated and resumes its final 32 tokens.
         assert [r.request_id for r in out.prefill] == ["b"]
@@ -191,7 +191,7 @@ class TestStoreThenPromote:
         assert len(blocks) == 6  # the whole prompt maps in one step
 
         # The resume's commit mirrors the two freshly computed blocks down.
-        sched.schedule()
+        sched.plan()
         assert copier.directions == [True, True, False, True]
         moves, is_store = copier.last_batch
         assert is_store is True
@@ -209,14 +209,14 @@ class TestStoreThenPromote:
         sched, _manager, copier = partial_hit_setup()
         b = make_request("b", A_TOKENS + list(range(3000, 3032)))
         sched.add_request(b)
-        sched.schedule()  # parks on the copy
+        sched.plan()  # parks on the copy
         copier.release_all()
-        sched.schedule()  # lands, seats, resumes
+        sched.plan()  # lands, seats, resumes
         assert sched.num_promoting == 0
 
         c = make_request("c", A_TOKENS + list(range(4000, 4016)))
         sched.add_request(c)
-        out = sched.schedule()
+        out = sched.plan()
 
         # The block b's copy re-indexed now serves straight from the pool:
         # no second promotion, no second load.
@@ -236,7 +236,7 @@ class TestPromotionTeardown:
         sched, _manager, copier = partial_hit_setup()
         b = make_request("b", A_TOKENS + list(range(3000, 3032)))
         sched.add_request(b)
-        sched.schedule()
+        sched.plan()
         assert sched.num_promoting == 1
 
         free_before = sched.num_free_blocks
@@ -248,7 +248,7 @@ class TestPromotionTeardown:
         assert sched.has_unfinished_requests()  # the dying promotion keeps it alive
 
         copier.release_all()
-        sched.schedule()
+        sched.plan()
         assert sched.num_free_blocks == free_before + 4  # the deferred free ran
         assert not sched.has_unfinished_requests()
         assert sched.num_promoting == 0
@@ -267,20 +267,20 @@ class TestSeatGating:
         # grows it and the block arithmetic stays fixed.
         h1 = make_request("h1", range(5000, 5017))
         sched.add_request(h1)
-        sched.schedule()
+        sched.plan()
 
         b = make_request("b", A_TOKENS + list(range(3000, 3032)))
         h2 = make_request("h2", range(6000, 6017))
         sched.add_request(b)
         sched.add_request(h2)
-        out = sched.schedule()
+        out = sched.plan()
 
         assert b not in out.prefill and b not in out.decode
         assert b.status is RequestStatus.WAITING
         assert sched.num_promoting == 1
 
         copier.release_all()
-        out = sched.schedule()
+        out = sched.plan()
 
         # The copy landed and was indexed, but every seat is taken: b waits
         # in place rather than re-entering the queue (re-admission would
@@ -291,7 +291,7 @@ class TestSeatGating:
         assert b.num_computed_tokens == 64  # the copy is readable
 
         sched.finish(h1, "eos")
-        out = sched.schedule()
+        out = sched.plan()
         assert [r.request_id for r in out.prefill] == ["b"]
         assert b.num_computed_tokens == 96
 
@@ -307,7 +307,7 @@ class TestRefusedPin:
 
         b = make_request("b", A_TOKENS + list(range(3000, 3032)))
         sched.add_request(b)
-        out = sched.schedule()
+        out = sched.plan()
 
         # The probe found CPU blocks and the GPU allocation succeeded, but the
         # pin was refused: b degrades to the plain path *this* step, with its
@@ -342,4 +342,4 @@ class TestConfiguration:
             enable_prefix_cache=False,
         )
         with pytest.raises(ValueError, match="enable_prefix_cache"):
-            Scheduler(config, num_slots=4, num_blocks=10, offloading=manager)
+            BatchPlanner(config, num_slots=4, num_blocks=10, offloading=manager)

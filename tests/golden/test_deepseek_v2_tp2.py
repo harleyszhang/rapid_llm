@@ -23,8 +23,8 @@ from typing import Any
 import pytest
 import torch
 
-from rapid_llm.engine.continuous_engine import ContinuousBatchingEngine
 from rapid_llm.engine.sampler import SamplingParams
+from rapid_llm.engine.scheduler import Scheduler
 from tests.conftest import REPO_ROOT, checkpoint_problem
 
 # No ``weights`` mark: that mark binds a test to the shared ``model_dir``
@@ -134,7 +134,7 @@ def dsv2_dir() -> Path:
 @pytest.fixture(scope="module")
 def lite(dsv2_dir: Path) -> dict[str, Any]:
     """Greedy runs with per-step and per-prompt-position logprobs, engine freed."""
-    engine = ContinuousBatchingEngine.from_pretrained(
+    engine = Scheduler.from_pretrained(
         model=str(dsv2_dir),
         device="cuda:0",
         max_seq_len=_MAX_SEQ_LEN,
