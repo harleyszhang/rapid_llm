@@ -184,9 +184,7 @@ def _bench_decode(hf_model, model, config, batch: int) -> dict:
 
     prompt_len = DECODE_PROMPT
     ids = torch.randint(0, CONFIG["vocab_size"], (batch, prompt_len), device="cuda")
-    pos_p = (
-        torch.arange(prompt_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
-    )
+    pos_p = torch.arange(prompt_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
     meta_p = _lite_meta(batch, prompt_len, prefill=True)
 
     def lite_round() -> float:
@@ -228,7 +226,9 @@ def _bench_decode(hf_model, model, config, batch: int) -> dict:
     }
 
 
-def _hf_greedy(hf_model, config, ids: torch.Tensor, pos_p: torch.Tensor, steps: int) -> torch.Tensor:
+def _hf_greedy(
+    hf_model, config, ids: torch.Tensor, pos_p: torch.Tensor, steps: int
+) -> torch.Tensor:
     """Greedy generation with a fresh cache; shared by parity and noise floor."""
     from transformers.cache_utils import DynamicCache
 
@@ -277,9 +277,7 @@ def _parity_suite(hf_model, model, config) -> dict:
     batch, prompt_len = 2, 128
     torch.manual_seed(123)  # fixed prompt, independent of the weight seeds
     ids = torch.randint(0, CONFIG["vocab_size"], (batch, prompt_len), device="cuda")
-    pos_p = (
-        torch.arange(prompt_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
-    )
+    pos_p = torch.arange(prompt_len, device="cuda").unsqueeze(0).expand(batch, -1).contiguous()
 
     with torch.no_grad():
         t32 = _hf_greedy(fp32_model, config, ids, pos_p, GREEDY_STEPS)
@@ -310,7 +308,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.json is None:
         args.json = timestamped_log_path(
-            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "models", "deepseek_v4"
+            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "models",
+            "deepseek_v4",
         )
 
     require_gpus(1)
@@ -365,7 +364,12 @@ def main() -> int:
             "device": torch.cuda.get_device_name(0),
             "timing": {
                 "prefill": {"batch": PREFILL_BATCH, "warmup": _WARMUP, "runs": _RUNS},
-                "decode": {"prompt": DECODE_PROMPT, "steps": DECODE_STEPS, "warmup": _DECODE_WARMUP, "runs": _DECODE_RUNS},
+                "decode": {
+                    "prompt": DECODE_PROMPT,
+                    "steps": DECODE_STEPS,
+                    "warmup": _DECODE_WARMUP,
+                    "runs": _DECODE_RUNS,
+                },
             },
             "known_limitations": {
                 "greedy_parity": (

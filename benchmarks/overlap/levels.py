@@ -48,8 +48,7 @@ CKPT = "my_weight/Qwen2.5-1.5B-Instruct"
 #: L1 runs graphed on one GPU through the continuous engine (the copy-stream
 #: overlap and its timeline live in the worker, not in ``TextGenerator``);
 #: L2/L3 need TP=2 to have an all-reduce to hide.
-ENGINE_L1 = {"continuous": True, "use_cuda_graph": True, "max_seq_len": 2048,
-             "max_num_seqs": 16}
+ENGINE_L1 = {"continuous": True, "use_cuda_graph": True, "max_seq_len": 2048, "max_num_seqs": 16}
 ENGINE_TP2 = {"tensor_parallel_size": 2, "use_cuda_graph": False, "max_seq_len": 2048}
 
 

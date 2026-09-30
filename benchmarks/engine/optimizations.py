@@ -385,7 +385,9 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--kv-blocks", type=int, default=40960)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--shared-sentences", type=int, default=32)
-    parser.add_argument("--greedy", action="store_true", help="temperature=0; required for --verify")
+    parser.add_argument(
+        "--greedy", action="store_true", help="temperature=0; required for --verify"
+    )
     parser.add_argument(
         "--verify",
         action="store_true",
