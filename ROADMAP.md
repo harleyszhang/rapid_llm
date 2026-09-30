@@ -10,7 +10,7 @@
 | # | 亮点 | 状态 | 他们为何不做 |
 | --- | --- | --- | --- |
 | F1 | **任意模型任意单层的独立运行 harness**:单层跑 forward、对比 HF、测延迟/显存 | 已有(v0.10) | 他们没有这个抽象;大模型验证靠整模型跑 + 8 卡 |
-| F2 | 默认单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | v1 全量多进程隔离(pdb 进不了 EngineCore);这里多进程只在 TP/DP>1 时启用(地基 0 的 UniProc/Multiproc 双实现),单卡默认仍是单进程 |
+| F2 | 默认离线单卡路径全程单进程,`pdb` 可直达 kernel 调用点 | 已有 | `LLM`/`LLMEngine` 保留进程内执行；在线 `AsyncLLMEngine` 使用隔离的 scheduler process，避免服务生命周期污染前端 |
 | F3 | 冷启动秒级(无 CUDA C++ 编译、无 torch.compile、graph 捕获可关) | 已有 | 他们为长驻服务优化,启动 30s–2min 不在乎 |
 | F4 | 后端缺失自动回退原生,永不硬失败 | 待建 | 他们缺库常直接报错退出 |
 | F5 | **bf16 权重与 KV**:参数与 cache dtype 脱离 fp16 硬编码(现散在 config/base/moe/attention 多处),由 checkpoint dtype 驱动 | 已有(v0.11) | 他们早已全面支持;fp16-only 是我们刻意保持的最小精度面,补 bf16 需连带各量化 method 的 supported_dtypes 与 kernel cast 策略 |
@@ -32,8 +32,8 @@
 | P6 | **自动调优 tile 配置落盘复用**(见工具 autotune 模块) | 待建 | 针对真实 shape 分布,自动生成而非手工 JSON | 高频 shape 命中最优 tile |
 | P7 | CUDA graph 惰性捕获:首遇 (batch, bucket) 组合再 capture,省启动时间与预留显存 | 待建 | 中途 capture 有运行中 OOM(KV profiler 的 workspace 按全网格预扣)与首步尾延迟风险,vLLM 同样是启动时全量 capture | 启动时间与显存预留双降 |
 | P8 | **DP/TP 与 CUDA Graph 同时生效**:TP all-reduce 可被 capture,DP 各副本独立 graph replay | 已落地 | vLLM 显式禁用 TP+CUDAGraph(见 `gpu_model_runner`);此处捕获后用跨 rank 指纹 + 数值闸确认结构对称再上线 | H100×2 实测 graph 与 eager 逐字节同答,logit 差 0.000e+00 |
-| P9 | **引擎级异步调度**(CPU-GPU overlap):调度器独立进程,ZMQ 收请求,最多 N 个 batch 同时在流水线上 | 待建 | 借 vLLM `EngineCoreProc`+ZMQ、SGLang `zmq_to_scheduler`;自有:N-batch 流水线 + 双缓冲 slot | decode 步 CPU 侧等待归零,GPU 利用率逼近 100% |
-| P10 | **DP 负载均衡策略族**:round-robin / 最小请求数 / 最小 token 数 / cache-aware(prefix 命中感知路由) | 待建 | 借 SGLang `LoadBalanceMethod` 四策略;自有:cache-aware 用各副本 prefix cache 命中估计打分,共享前缀请求聚到同 rank | DP 副本间负载倾斜 <10%,命中率同步提升 |
+| P9 | **引擎级异步调度**(CPU-GPU overlap):前端与 scheduler process 通过 typed IPC 解耦，Scheduler 内支持 N-depth launch/harvest 流水线 | 已落地 | 单一 `Scheduler` 同时拥有排程与执行；异步 readback、pending-token ledger 和反压不引入第二套 engine | decode 步 CPU 侧等待归零,GPU 利用率逼近 100% |
+| P10 | **DP 负载均衡策略族**:round-robin / 最小请求数 / 最小 token 数 / cache-aware(prefix 命中感知路由) | 已落地 | `DataParallelController` 在发送前绑定策略，按 request id 精确记账；cache-aware 以 prefix block 命中和在飞负载联合评分 | DP 副本间负载倾斜 <10%,命中率同步提升 |
 
 ## 架构设计维度
 
@@ -47,7 +47,7 @@
 | A6 | **算子一等公民分发**:ABC 签名 + 声明式清单 + 确定性 dispatch,从现有 `registry.py` 雏形(availability+priority)升级到完整链路 | 待建(雏形已有) | 对标 sglang `KernelSpec`+selector;自有:实测排序自动选最快,sglang 甩给用户手选 |
 | A7 | **运行时可观测性内置**:metrics/tracing 是一等 API,非离线工具;每个 step 产出 per-request 延迟、KV 占用、后端选择、overlap 气泡 | 已有(v0.10) | vLLM 的 metrics 面向运维仪表盘;这里面向开发者 debug,粒度到算子级 |
 | A8 | **前沿注意力可插拔**:MLA/DSA/SWA/HCA 作为 `attention.*` 逻辑算子的不同实现,共享 paged KV 接口 | 待建 | vLLM 的 MLA 是独立类(`MLAAttention`);这里走统一 dispatch,新增变体只注册不写新类 |
-| A10 | **多进程隔离引擎**(地基 0,对齐 vLLM/SGLang 进程模型):EngineCore(调度)与 Worker(GPU 执行)分离,调度决策只算一次、广播 SchedulerOutput;单卡默认仍单进程 | 待建 | vLLM `EngineCoreProc`+`MultiprocExecutor`/SGLang scheduler 进程网格是多年踩坑后的定论;当前 TP"镜像进程"/DP 一次性批处理是最大架构债(详见地基 0) |
+| A10 | **统一 Scheduler 进程模型**(地基 0):在线前端只管理请求，scheduler process 内的 `Scheduler` 统一排程与执行；TP follower 仅执行 leader 广播的 `StepPlan` | 已落地 | 删除中间 EngineCore/Worker 包装层；单卡离线仍进程内执行，在线、DP 和 TP 复用 typed command/event 与同一 Scheduler 热路径 |
 | A11 | **并行 module 补齐**:`QKVParallelLinear`(q_proj+kv_proj 合体一次 GEMM,按 head 对齐切) / `VocabParallelEmbedding` / `ParallelLMHead` 按 vocab 维切分,采样走"去中心化 log_softmax"(只规约 logsumexp 标量 + gather 局部 top-k,logits 永不物化全量) | 待建 | vLLM `QKVParallelLinear`/`VocabParallelEmbedding`/`ParallelLMHead` 参照;当前 q/kv 两次 GEMM、embed/lm_head 全量复制是 v0.7.0 遗留决策(按小 vocab 估 0.3GB/rank 不值),Qwen3 151K vocab 下 embed+lm_head ≈4.9GB/rank、decode lm_head GEMM 是算力大头,必须切(详见第四节) |
 
 ## 工具维度(按功能模块划分)
@@ -109,57 +109,47 @@
 
 后面所有功能都挂在这四个地基上,顺序不能反。地基 0 是并行的一切前提——进程模型不对,TP/DP 都是纸面。
 
-## 地基 0:多进程隔离引擎(对齐 vLLM/SGLang)
+## 地基 0:统一 Scheduler 进程模型（已落地）
 
-> 结论先行:当前 TP/DP 的实现是"每进程跑一个完整引擎",而 vLLM/SGLang 的共识是"调度算一次、执行进程隔离"。这个差距不补齐,P8/P9/P10、在线服务×TP、DP 常驻副本全都落不了地。
+> 结论先行：连续批处理只有一个运行时 `Scheduler`。在线前端、DP controller 和 TP follower 各自只承担单一职责，不再叠加 EngineCore、DP engine 或 Worker facade。离线 `LLM`/`LLMEngine` 仍保留进程内执行与直接调试能力。
 
-### v0.7.0 现状问题清单(代码证据)
+### v0.7.0 历史问题与处理结果
 
-**架构债(4 条)**:
+| # | 历史问题 | 处理结果 |
+| --- | --- | --- |
+| 1 | TP 每个 rank 运行完整生成循环，靠相同输入隐式锁步 | replica leader 唯一运行 `Scheduler`；TP follower 只执行 leader 广播的 `StepPlan` |
+| 2 | TP 与持续批处理互斥 | TP 与单一 Scheduler step loop 组合，停止、抢占和 token 状态只由 leader 更新 |
+| 3 | DP 副本只接受一次性 batch | 每个 replica leader 运行常驻 `Scheduler.run_event_loop()`，请求可随时加入或取消 |
+| 4 | DP×TP 只启动 DP 个进程却声明完整网格 | `DataParallelController` 一次拉起 `dp_size × tp_size` 个 rank，每个副本只有 leader 读取请求通道 |
+| 5 | DP×TP 的设备规约误用 TP rank 作为设备号 | 规约使用 `torch.cuda.current_device()`，服从实际进程绑卡和 `CUDA_VISIBLE_DEVICES` 映射 |
+| 6 | DP 路由以字符数近似 token 数且无法精确回收 | controller 复用前端 token ids，并按 request id 记录和释放策略 charge |
+| 7 | TP 采样 RNG 不同步 | leader 采样后广播 token，保留跨 rank 一致性门禁 |
 
-| # | 问题 | 代码证据 | vLLM/SGLang 的做法 |
-| --- | --- | --- | --- |
-| 1 | **TP 是"镜像进程"不是引擎**:每个 rank 跑一个完整 `TextGenerator`(含 tokenizer/sampler/停止判断),rank 0 把 prompt tokens `dist.broadcast` 给 mirror worker 陪跑,输出丢弃 | `cli.py:_tp_mirror_worker` 的 broadcast 循环 | 调度只在 leader 算一次,广播的是**结构化 SchedulerOutput**,worker 只执行 forward(vLLM `WorkerProc`、SGLang leader scheduler) |
-| 2 | **旧 TP 与持续批处理互斥**:调度/停止/detokenize 在每个 rank 独立执行,靠"相同输入→相同决策"隐式锁步;抢占/异步停止等 rank-local 决策一旦引入就 desync | 旧连续批处理入口直接拒绝 tp>1 | 调度决策单点,天然一致 |
-| 3 | **旧 DP worker 是一次性批处理**:副本闲在两次 `generate()` 之间;请求不能中途加入;KV 每次 `free_all()` 全量重置 | 旧 `data_parallel.py` worker 调 `LLM.generate()` | 副本改为常驻 scheduler process，请求随到随入 |
-| 4 | **DP×TP 组合死锁** | `data_parallel.py:99` `init_parallel(global_rank=dp_rank*tp_size, tp_size, dp_size)` 声明 dp×tp 的 NCCL world,但只 spawn 了 dp 个进程 | spawn 完整 dp×tp 进程网格(SGLang)或组内嵌套 spawn TP worker(vLLM) |
-
-**bug(3 条)**:
-
-| # | bug | 位置 | 修法 |
-| --- | --- | --- | --- |
-| 5 | `all_reduce_min` 用 `_TP_RANK` 当 CUDA device index;dp>1 时非 leader 副本的 TP rank 0 会算到别人的卡上 | `parallel_state.py:245` `cuda:{_TP_RANK}` | `torch.cuda.current_device()` |
-| 6 | 旧 DP 路由用字符数 `len(prompt)` 当 token 数，least-loaded 的参数与语义不一致 | 旧 controller 路由与独立 policy 模块 | 路由层复用 token ids，policy 按 request id 精确记账 |
-| 7 | TP 采样 RNG 不同步(已修,保留监控) | `tensor_model_parallel_broadcast` 采样后广播 | — |
-
-### 目标进程模型
+### 当前进程模型
 
 ```
-单卡(默认,F2 不破):  Frontend ──同进程── EngineCore( Scheduler + Worker 同体 )
-TP:                    Frontend ── EngineCore(leader) ── broadcast SchedulerOutput(gloo) ── Worker 进程 × tp
-DP:                    Frontend ── Router(P10) ── EngineCore 进程 × dp(每个内嵌自己的 TP 组)
+离线单卡:  LLM/LLMEngine ──同进程── Executor
+在线单卡:  AsyncLLMEngine ── typed IPC ── scheduler process: Scheduler ── Executor
+在线 DP:   AsyncLLMEngine ── DataParallelController ── scheduler process × dp
+TP 副本:   Scheduler leader ── StepPlan control plane ── TP follower × (tp - 1)
 ```
 
 **设计决策**:
 
-1. **Executor 接口先行**(对标 vLLM `v1/executor/`):`Executor` ABC 只暴露 `init()/forward()/shutdown()`;两个实现——`UniProcExecutor`(EngineCore 直接持有 ModelRunner,单进程,pdb 直达 kernel 保住 F2)与 `MultiprocExecutor`(spawn tp 个 WorkerProc,各持 ModelRunner+KV cache)。调度器只见 Executor,不知进程拓扑——单卡/多卡同一套调度代码。
-2. **调度只算一次**:leader 序列化 `SchedulerOutput`(prefill/decode 列表 + slot + block 号),经 gloo(CPU 组)broadcast 给 TP worker——控制面小张量;数据面 all_reduce 仍走 NCCL。镜像进程模式里"各 rank 独立跑 Scheduler"的整段隐式锁步代码退场。
-3. **DP 常驻循环**:DP worker 从一次性 `LLM` 换成常驻 EngineCore 循环(请求队列随到随入,持续批处理永续),负载/缓存水位上报给路由层(P10 的输入)。
-4. **进程网格一次 spawn**:dp×tp 个 Worker 进程统一拉起,每个进程 `init_parallel(global_rank=dp*tp+tp_rank,...)`——修复 bug 4 的死锁。
+1. **`BatchPlanner` 只排程**：持有 waiting/running、slot 与 KV block 状态，`plan()` 返回不可变 `StepPlan`；不加载模型、不做前向、不发布结果。
+2. **`Scheduler` 是唯一热路径**：拥有 planner、executor、请求状态和 launch/harvest；`run_event_loop()` 直接消费 typed command 并发布 typed event。
+3. **前端只管理请求**：`AsyncLLMEngine` 负责 tokenizer、增量 detokenization、stream 生命周期和一个 output loop；DP=1 直连 scheduler process，DP>1 经 `DataParallelController` 路由。
+4. **DP controller 只协调**：它拥有 DP×TP 进程网格、路由策略、请求到 replica 的映射和 DPA 锁步，不加载权重或 KV cache。同步 `generate()` 只是相同协议上的阻塞 facade。
+5. **TP follower 不是第二个 engine**：仅执行 leader 广播的 `StepPlan`；调度、停止和结果发布始终只发生在 leader。
+6. **typed IPC 固定边界**：请求、取消、批量 admission、启动、失败和关闭均使用 `scheduler_ipc.py` 的值对象；消息编码不进入 model forward。
 
-### 验收
+### 已通过的验收
 
-- TP=2 下连续批处理 `Scheduler` 可用，golden 全绿;
-- DP×TP(2×2)能起能推理(当前是死锁);
-- `AsyncLLMEngine`(HTTP 服务路径)+ TP=2 可跑;
-- 单卡默认路径仍单进程(冒烟:pdb 断点直达 Triton kernel 调用点);
-- 每个阶段有单元测试:mock 进程网格,断言 SchedulerOutput 广播内容一致、RNG 同步。
-
-### 落地顺序
-
-1. 先修 bug 4/5/6(小改,不动架构)→ **v0.8.0**;
-2. Executor 抽象 + UniProc/Multiproc 双实现 + SchedulerOutput 广播 + TP 接持续批处理 + DP worker 换常驻循环 → **v0.8.0**;
-3. 与第八节合流:EngineCore 拆独立进程 + ZMQ + N-batch 流水线(地基 0 是第八节的前置,第八节是地基 0 的异步化终态)→ **v0.12**。
+- TP=2 连续批处理和 DP×TP 网格可启动、推理并回收；
+- `AsyncLLMEngine` 的流顺序、取消、故障 fan-out 与幂等 shutdown 有定向回归；
+- DP 四种策略、乱序完成、批量 admission、DPA 空闲副本和不等长 forward 锁步有覆盖；
+- 离线单卡仍由进程内 `LLM`/`LLMEngine` 提供直接调试路径；
+- 旧 engine 类型、模块路径和协议专属包装层已删除。
 
 ## 地基 1:真分页 KV + 请求级动态管理(解锁 chunked prefill + prefix caching)
 
@@ -430,63 +420,57 @@ o rlap 不止"TP 通信藏进计算"一件事。把所有重叠拆成三条正�
 
 关键决策:`KVTransfer` 必须先于 PD 建好,因为分层存储和 PD 共用它。落点:请求级回收 + watermark 在 **v0.7**;抢占在 **v0.9**;`KVTransfer` 抽象 + 分层存储 + PD 在 **v0.12**(共用传输层)。
 
-# 八、引擎级异步调度架构(P9)
+# 八、引擎级异步调度架构(P9，已落地)
 
-> 对应第六节 ping-pong **轴 A(Host-Device)**。这是改动最大的一条:把调度器从主线程拆出去,让 CPU 和 GPU 各跑各的。**前置是地基 0**:没有 Executor 抽象和进程边界,本节的架构图落不了地;反过来本节是地基 0 的异步化终态——EngineCore 从"同进程可选拆"升级为"独立进程 + ZMQ + N-batch 流水线"。
+> 对应第六节 ping-pong **轴 A(Host-Device)**。进程隔离负责把 API 生命周期与设备生命周期解耦；Host-Device overlap 则在同一个 `Scheduler.step()` 内通过 launch/harvest 流水线完成。两者共享同一 Scheduler，不需要额外的 engine core 或 GPU worker facade。
 
-## 现状与动机
+## 当前结构
 
-当前 `AsyncLLMEngine` 是单 worker 线程 + `queue.SimpleQueue`,同步调用 `engine.step()`——每步 CPU 等 GPU 返回后才调度下一步,CPU-GPU 串行,气泡明显。vLLM v1 的 `EngineCoreProc` 和 SGLang 的 `zmq_to_scheduler` 已证明:调度器拆成独立进程、ZMQ 通信,可让 CPU 调度与 GPU 执行重叠。
-
-## 架构设计
+`AsyncLLMEngine` 已经是纯 request manager：父进程负责 tokenizer、增量 detokenization、stream 生命周期和一个 output loop；子进程的 `Scheduler` 同时拥有 `BatchPlanner`、`Executor`、KV/request 状态和连续 step loop。DP>1 时只在两者之间加入 `DataParallelController`，每个 replica leader 仍运行完全相同的 `Scheduler.run_event_loop()`。
 
 ```
-┌───────────────┐     ZMQ (req in)     ┌─────────────────┐     SchedulerOutput queue   ┌──────────────┐
-│  Frontend     │ ──────────────────▶  │  Scheduler      │ ─────────────────────────▶  │  Executor    │
-│  (API/CLI)    │ ◀──────────────────  │  (独立进程)       │ ◀───────────────────────── │  (GPU worker)│
-└───────────────┘     ZMQ (output)     └─────────────────┘     ResultEvent queue       └──────────────┘
+┌──────────────────┐   typed Command/Event   ┌────────────────────────────────┐
+│ AsyncLLMEngine   │ ──────────────────────▶ │ scheduler process              │
+│ request manager  │ ◀────────────────────── │ Scheduler → Planner + Executor │
+└──────────────────┘                         └────────────────────────────────┘
+           │ DP>1                                          │ TP>1
+           ▼                                               ▼
+ DataParallelController                         StepPlan → TP followers
 ```
 
-**四个组件**:
-
-| 组件 | 职责 | 借鉴 | 自有设计 |
-| --- | --- | --- | --- |
-| **Frontend** | 收 HTTP/CLI 请求,序列化后发给 Scheduler | vLLM `AsyncLLM` | 复用现有 `AsyncLLMEngine` 的 asyncio 层,只换 IPC 后端 |
-| **Scheduler** | 独立进程;跑 `Scheduler.schedule()`,产出 `SchedulerOutput`;不碰 GPU | vLLM `EngineCoreProc`;SGLang `zmq_to_scheduler` | **N-batch 流水线**:允许多个 `SchedulerOutput` 同时在 queue 里未被执行,不是严格 1:1 的 request-response |
-| **Executor** | GPU worker;消费 `SchedulerOutput`,跑 `model_runner.forward()`,采样,回传 result | vLLM `gpu_worker` | **双缓冲 slot**:batch i 在 GPU 跑时,batch i+1 的 input tensor 已在另一块预分配 buffer 里 ready |
-| **Output Router** | 按 request_id 把 result 路由回对应 Frontend stream | vLLM output queue | 复用现有 `_RequestStream` 的 `call_soon_threadsafe` 机制 |
-
-## N-batch 流水线(核心创新)
-
-vLLM/SGLang 的调度器与执行器是严格 1:1 的 request-response——调度一步、执行一步、回传一步。rapid_llm 的原创设计是**流水线化**:
-
-| 时刻 | CPU(Scheduler) | GPU(Executor) |
+| 组件 | 职责 | 不拥有的状态 |
 | --- | --- | --- |
-| t0 | 调度 batch 0 | idle |
-| t1 | 调度 batch 1 | 执行 batch 0 |
-| t2 | 调度 batch 2 | 执行 batch 1 |
-| ... | ... | ... |
+| **AsyncLLMEngine** | tokenize、request table、增量 detokenize、stream/abort/failure fan-out | Scheduler、replica 路由、模型和 KV cache |
+| **DataParallelController** | 可选的 DP×TP 网格、策略路由、typed IPC、DPA wave 协调 | tokenizer、模型执行和前端 stream |
+| **Scheduler** | admission、连续批处理、launch/harvest、结果事件和 shutdown | 前端 asyncio 生命周期 |
+| **Executor** | 设备输入、model forward、采样和异步 readback | 请求路由和跨请求生命周期 |
 
-最多 N 个 batch 同时在流水线上飞(N 由 `max_num_batched_tokens` 和 slot 双缓冲数决定)。这要求:
+## N-depth launch/harvest 流水线
 
-1. **双缓冲 KV slot**:batch i 写的 KV 行和 batch i+1 读的 KV 行不能是同一组——否则 decode 步的 `update_kv_index` 会覆写正在被 forward 读的行。
-2. **无锁 result 回传**:Executor 产出 result 后通过 ZMQ push 回 Scheduler/Frontend,不阻塞下一个 batch 的调度。
-3. **反压(backpressure)**:当流水线满(N 个 batch 在飞)时,Scheduler 阻塞在 push 上,自然反压 Frontend。这比 vLLM 的显式 `can_schedule()` 检查更简洁。
+`Scheduler._step_pipelined()` 让最多 `pipeline_depth` 个 step 在飞：step N launch 时 harvest N-depth 的结果。planner 与 executor 保持组合关系，`StepPlan` 不跨本地进程边界序列化，因此热路径没有额外队列或包装对象。
 
-## ZMQ 通信细节
+| 时刻 | Host | Device |
+| --- | --- | --- |
+| t0 | plan/launch step 0 | 执行 step 0 |
+| t1 | plan/launch step 1 | 执行 step 1，step 0 readback |
+| t2 | harvest step 0，plan/launch step 2 | 执行 step 2，step 1 readback |
 
-- **请求通道**:Frontend → Scheduler,`ZMQ_PUSH` / `ZMQ_PULL`,序列化 `(request_id, prompt_token_ids, sampling_params)`。
-- **调度输出通道**:Scheduler → Executor,`ZMQ_PUSH` / `ZMQ_PULL`,序列化 `SchedulerOutput`(prefill/decode 列表 + chunk_lens)。
-- **结果通道**:Executor → Frontend(经 Scheduler 或直连),`ZMQ_PUB` / `ZMQ_SUB` 按 request_id 路由,或 `ZMQ_PUSH` / `ZMQ_PULL` + Frontend 侧 demux。
-- ZMQ socket 的 `recv`/`send` 释放 GIL,天然可与 asyncio 事件循环共存(vLLM 已验证)。
+流水线契约:
 
-## 落地顺序
+1. `pending_tokens` 记录设备领先 host 的 token 数，后续 plan 据此选择正确 KV 行；
+2. 最旧 readback 必须在 pinned buffer 复用前 harvest，稳态只在最终 drain 时等待 event；
+3. EOS/stop 最多延迟 `pipeline_depth` 个 step 被 host 观察，期间多算出的 token 会丢弃而不会暴露给 stream；
+4. DPA 仍由 `_execute_lockstep()` 补齐每个 replica 的 forward 次数，不因流水线改变 collective 顺序。
 
-1. 先把现有 `AsyncLLMEngine` 的 `queue.SimpleQueue` 换成 ZMQ,Scheduler 仍在同进程内但独立线程——验证 IPC 正确性。
-2. 再拆 Scheduler 到独立进程——验证 N-batch 流水线和双缓冲。
-3. 最后接 `observe.overlap`(模块 F)实时监控 CPU/GPU 两条流水线的气泡。
+## typed IPC 与反压
 
-单元测试:mock GPU 执行时间,断言 N=2 时 CPU 等待时间 < N=1 时的 50%;mock Scheduler 延迟,断言 GPU 空闲率下降。
+- 请求通道只传 `AddRequest`、`AddRequestBatch`、`AbortRequest`、utility、wake 和 shutdown command；
+- 结果通道只传 ready、request events、utility result 和 failure event；
+- DP=1 前端直连 scheduler process；DP>1 由 controller 转发同一协议，前端看不到 replica rank；
+- 阻塞 batch 用 `AddRequestBatch` 原子进入 admission wave，并只请求终态事件；在线 stream 使用逐 token 事件；
+- 有界执行资源由 `max_num_seqs`、token budget、KV block 和 pipeline depth 共同形成反压。
+
+后续工作只增加 `observe.overlap` 对 CPU/GPU/copy 气泡的在线可视化和更多稳定 workload 门禁，不再引入第二套调度或执行进程模型。
 
 # 九、前沿注意力变体(A8)
 
@@ -767,8 +751,8 @@ DSA 是在 MLA 基础上加稀疏选择:decode 时不扫全部 `Skv` 行,而是�
 ## v0.12.0 异步调度 + KV 传输
 
 - **feat**
-  - P9 引擎级异步调度(地基 0 的异步化终态,即 A 轴):EngineCore 独立进程 + ZMQ + N-batch 流水线
-  - P10 DP 负载均衡策略族:round-robin / 最少请求数 / 最少 token 数 / cache-aware
+  - P9 引擎级异步调度（已完成）：`AsyncLLMEngine` request manager + typed IPC + scheduler process + N-depth launch/harvest 流水线
+  - P10 DP 负载均衡策略族（已完成）：round-robin / 最少请求数 / 最少 token 数 / cache-aware
   - DP attention:MLA + EP 组合
   - Router 雏形:metrics 反馈路由 + 健康检查
   - 分层存储:CPU 层与磁盘层作为 KV 的 tier provider,目标是 prefix cache 溢出后仍命中,而非扩 KV 容量
