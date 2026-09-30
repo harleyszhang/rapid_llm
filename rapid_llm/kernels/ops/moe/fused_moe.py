@@ -995,7 +995,10 @@ def _silu_and_mul_kernel(
     if APPLY_LIMIT:
         gate = tl.minimum(gate, LIMIT)
         up = tl.minimum(tl.maximum(up, -LIMIT), LIMIT)
-    out = silu(gate) * up
+        activated = silu(gate).to(x_ptr.dtype.element_ty)
+    else:
+        activated = silu(gate)
+    out = activated * up
     if QUANT_OUT:
         # Masked lanes carry 0 from the loads above, so they cannot raise the
         # amax. Same scale convention as the per-token quantisers: exactly

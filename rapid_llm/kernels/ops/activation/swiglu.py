@@ -8,6 +8,8 @@ Usage:
     y = swiglu_forward(gate, up)
 """
 
+import math
+
 import torch
 
 try:
@@ -88,7 +90,13 @@ def swiglu_forward(gate, up):
 
 @_jit
 def _swiglu_forward_fused_kernel(
-    x_ptr, c_ptr, row_stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+    x_ptr,
+    c_ptr,
+    row_stride,
+    n_cols: tl.constexpr,
+    LIMIT: tl.constexpr,
+    APPLY_LIMIT: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     program_id = tl.program_id(0).to(tl.int64)
 
@@ -103,19 +111,22 @@ def _swiglu_forward_fused_kernel(
     # sigmoid requires type float32
     gate_row = tl.load(x_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
     up_row = tl.load(x_ptr + n_cols + col_offsets, mask=mask, other=0)
-    c_row = silu(gate_row) * up_row
+    if APPLY_LIMIT:
+        gate_row = tl.minimum(gate_row, LIMIT)
+        up_row = tl.minimum(tl.maximum(up_row, -LIMIT), LIMIT)
+        activated = silu(gate_row).to(c_ptr.dtype.element_ty)
+    else:
+        activated = silu(gate_row)
+    c_row = activated * up_row
     tl.store(c_ptr + col_offsets, c_row, mask=mask)
 
 
-def swiglu_forward_fused(x):
-    """silu(gate) * up where ``x`` is ``concat([gate, up], dim=-1)``.
-
-    The merged gate/up projection emits one ``[..., 2 * n_cols]`` tensor; this
-    activates both halves in a single pass without slicing them apart first
-    (a slice of a fused row is not contiguous, so the split would copy).
-    """
+def _swiglu_forward_fused(x, limit: float):
     if triton is None or not x.is_cuda:
         gate, up = x.chunk(2, dim=-1)
+        if limit != math.inf:
+            gate = gate.clamp(max=limit)
+            up = up.clamp(min=-limit, max=limit)
         return torch.nn.functional.silu(gate) * up
 
     ori_shape = x.shape  # [..., 2 * n_cols]
@@ -130,7 +141,19 @@ def swiglu_forward_fused(x):
         c,
         x.stride(0),
         n_cols=n_cols,
+        LIMIT=limit if limit != math.inf else 0.0,
+        APPLY_LIMIT=limit != math.inf,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
     )
     return c.view(*ori_shape[:-1], n_cols)
+
+
+def swiglu_forward_fused(x):
+    """SwiGLU over a packed ``[gate, up]`` projection."""
+    return _swiglu_forward_fused(x, math.inf)
+
+
+def swiglu_forward_fused_bounded(x, limit: float):
+    """Bounded SwiGLU with activation rounding in the input dtype."""
+    return _swiglu_forward_fused(x, limit)
