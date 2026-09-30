@@ -20,6 +20,7 @@ from __future__ import annotations
 import itertools
 import math
 import os
+import queue
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -73,6 +74,7 @@ __all__ = [
     "Scheduler",
     "SchedulerConfig",
     "StepPlan",
+    "run_scheduler_process",
 ]
 
 if TYPE_CHECKING:
@@ -606,6 +608,7 @@ class Scheduler:
         request_id: str | None = None,
         prompt_token_ids: list[int] | None = None,
         on_error: Callable[[Request, BaseException], None] | None = None,
+        arrival_time: float | None = None,
     ) -> Request:
         """Queue a request and return the handle that tracks it.
 
@@ -620,6 +623,8 @@ class Scheduler:
             on_error: O10 — fired (on the engine thread, from :meth:`step`)
                 when a background encode fails or the tokenised prompt is
                 rejected. The synchronous path raises from here instead.
+            arrival_time: Parent-process admission time, when the request crossed
+                a process boundary; defaults to the local monotonic clock.
         """
         if request_id is None:
             request_id = f"req-{next(self._request_ids)}"
@@ -638,6 +643,7 @@ class Scheduler:
                 prompt=prompt,
                 prompt_token_ids=[],
                 params=sampling_params or SamplingParams(),
+                arrival_time=arrival_time if arrival_time is not None else time.monotonic(),
             )
             future = self._ensure_tokenize_pool().submit(
                 self.tokenizer.encode, prompt, add_special_tokens=True
@@ -654,6 +660,7 @@ class Scheduler:
                 else self.tokenizer.encode(prompt, add_special_tokens=True)
             ),
             params=sampling_params or SamplingParams(),
+            arrival_time=arrival_time if arrival_time is not None else time.monotonic(),
         )
         self._register_request(request)
         return request
@@ -735,19 +742,13 @@ class Scheduler:
 
     @property
     def num_kv_blocks(self) -> int:
-        """KV blocks the executor allocated; ``0`` when the backend has none.
-
-        Public because the engine core process handshakes this number back to
-        its parent (see :mod:`rapid_llm.engine.engine_core`).
-        """
+        """KV blocks reported to the request manager during process startup."""
         return self._executor.num_kv_blocks
 
     def has_unfinished_requests(self) -> bool:
         """Whether anything is queued, in flight, or awaiting its harvest."""
         return (
-            self.planner.has_unfinished_requests()
-            or bool(self._inflight)
-            or bool(self._tokenizing)
+            self.planner.has_unfinished_requests() or bool(self._inflight) or bool(self._tokenizing)
         )
 
     def _await_offloaded_stores(self) -> None:
@@ -1098,6 +1099,130 @@ class Scheduler:
                 unique.append(request)
         return unique, remaining
 
+    def run_event_loop(self, command_queue, event_queue, *, parent_pid: int | None = None) -> None:
+        """Process typed commands and publish generation events until shutdown."""
+        from .scheduler_ipc import (
+            AbortRequest,
+            AddRequest,
+            RequestEvent,
+            SchedulerEvents,
+            ShutdownScheduler,
+            UtilityEvent,
+            UtilityRequest,
+        )
+
+        sent_tokens: dict[str, int] = {}
+        last_step_ms = 0.0
+        stopping = False
+
+        def apply(command) -> None:
+            nonlocal stopping
+            if isinstance(command, AddRequest):
+                try:
+                    self.add_request(
+                        "",
+                        command.sampling_params,
+                        request_id=command.request_id,
+                        prompt_token_ids=list(command.prompt_token_ids),
+                        arrival_time=command.arrival_time,
+                    )
+                except ValueError as exc:
+                    event_queue.put(
+                        SchedulerEvents(
+                            outputs=(
+                                RequestEvent(
+                                    request_id=command.request_id,
+                                    new_token_ids=(),
+                                    finish_reason="invalid",
+                                    error=str(exc),
+                                ),
+                            )
+                        )
+                    )
+                else:
+                    sent_tokens[command.request_id] = 0
+            elif isinstance(command, AbortRequest):
+                self.abort(command.request_id)
+                sent_tokens.pop(command.request_id, None)
+            elif isinstance(command, UtilityRequest):
+                if command.method == "step_stats":
+                    event_queue.put(
+                        SchedulerEvents(
+                            utility_output=UtilityEvent(
+                                call_id=command.call_id,
+                                result={
+                                    "running": self.planner.num_running,
+                                    "waiting": self.planner.num_waiting,
+                                    "num_promoting": self.planner.num_promoting,
+                                    "last_step_ms": last_step_ms,
+                                },
+                            )
+                        )
+                    )
+                else:
+                    event_queue.put(
+                        SchedulerEvents(
+                            utility_output=UtilityEvent(
+                                call_id=command.call_id,
+                                failure_message=f"unknown utility method {command.method!r}",
+                            )
+                        )
+                    )
+            elif isinstance(command, ShutdownScheduler):
+                stopping = True
+            else:
+                raise TypeError(f"unsupported scheduler command: {type(command).__name__}")
+
+        while not stopping:
+            busy = self.has_unfinished_requests()
+            try:
+                command = command_queue.get_nowait() if busy else command_queue.get(timeout=0.5)
+            except queue.Empty:
+                if parent_pid is not None and os.getppid() != parent_pid:
+                    return
+            else:
+                apply(command)
+                while not stopping:
+                    try:
+                        apply(command_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+            if stopping:
+                break
+            if not self.has_unfinished_requests():
+                continue
+
+            started = time.monotonic()
+            advanced = self.step()
+            last_step_ms = (time.monotonic() - started) * 1e3
+            outputs = []
+            for request in advanced:
+                sent = sent_tokens.get(request.request_id, 0)
+                new_token_ids = tuple(request.output_token_ids[sent:])
+                if new_token_ids:
+                    sent_tokens[request.request_id] = sent + len(new_token_ids)
+                prompt_logprobs = None
+                if request.is_finished:
+                    sent_tokens.pop(request.request_id, None)
+                    if request.prompt_logprobs is not None:
+                        prompt_logprobs = tuple(request.prompt_logprobs)
+                if new_token_ids or request.is_finished:
+                    outputs.append(
+                        RequestEvent(
+                            request_id=request.request_id,
+                            new_token_ids=new_token_ids,
+                            finish_reason=request.finish_reason,
+                            prompt_len=request.prompt_len,
+                            delta_logprobs=request.delta_logprobs if new_token_ids else None,
+                            prompt_logprobs=prompt_logprobs,
+                        )
+                    )
+            if outputs:
+                event_queue.put(SchedulerEvents(outputs=tuple(outputs)))
+            elif self.has_unfinished_requests():
+                time.sleep(0.001)
+
     def generate(
         self,
         prompts: Sequence[str],
@@ -1275,3 +1400,30 @@ class Scheduler:
     def _retire(self, request: Request) -> None:
         """Drop the per-request state the engine owns; the caller keeps the handle."""
         self._detokenizers.pop(request.request_id, None)
+
+
+def run_scheduler_process(model: str, engine_kwargs: dict, command_queue, event_queue) -> None:
+    """Build one scheduler in a child process and run its command loop."""
+    from .. import __version__
+    from .scheduler_ipc import PROTOCOL_VERSION, SchedulerFailed, SchedulerReady
+
+    scheduler = None
+    try:
+        scheduler = Scheduler.from_pretrained(model, **engine_kwargs)
+        event_queue.put(
+            SchedulerReady(
+                protocol_version=PROTOCOL_VERSION,
+                engine_version=__version__,
+                max_model_len=scheduler.config.max_seq_len,
+                num_gpu_blocks=scheduler.num_kv_blocks,
+                max_num_seqs=scheduler.planner.max_num_seqs,
+            )
+        )
+        scheduler.run_event_loop(command_queue, event_queue, parent_pid=os.getppid())
+    except BaseException as exc:
+        logger.exception("scheduler process crashed")
+        event_queue.put(SchedulerFailed(f"{type(exc).__name__}: {exc}"))
+        raise
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown()

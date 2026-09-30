@@ -473,16 +473,6 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
             },
             "does not support CUDA Graph",
         ),
-        (
-            {
-                "enable_dp_attention": True,
-                "data_parallel_size": 2,
-                "enable_expert_parallel": True,
-                "use_cuda_graph": False,
-                "engine_backend": "process",
-            },
-            "engine_backend='thread'",
-        ),
     ],
 )
 def test_server_config_rejects_invalid_dp_attention_combinations(overrides, message):
@@ -490,12 +480,8 @@ def test_server_config_rejects_invalid_dp_attention_combinations(overrides, mess
         ServerConfig(model_dir="/nonexistent", **overrides)
 
 
-def test_one_replica_still_builds_the_single_process_engine(monkeypatch):
-    """``data_parallel_size == 1`` must keep the original path.
-
-    A data-parallel coordinator of one replica is a whole extra process hop for
-    nothing; the default has to stay byte-for-byte the engine it was.
-    """
+def test_one_replica_builds_the_scheduler_process_engine(monkeypatch):
+    """A single replica starts the scheduler-process request manager directly."""
     from rapid_llm.entrypoints import api_server
 
     def fake_from_pretrained(model, **kwargs):

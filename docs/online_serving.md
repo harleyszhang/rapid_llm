@@ -69,28 +69,25 @@ CPU 服务使用 `pip install -e '.[serve]'`，启动时加 `--device cpu --max-
 | `--tensor-parallel-size` | `1` | 一份权重的 TP 切分数（切权重，装得下大模型） |
 | `--data-parallel-size` | `1` | 整模型副本数（每副本一卡起，买吞吐；与 TP 组成 dp×tp 网格） |
 | `--load-balancer` | `round_robin` | 请求怎么路由到副本：`round_robin` / `total_requests` / `total_tokens` |
-| `--engine-backend` | `thread` | 引擎后端：`thread` 为工作线程内运行（见[线程模型](#线程模型)），`process` 为独立 EngineCore 子进程（ZMQ IPC，需 pyzmq / msgpack，仅服务单副本） |
 
 `--max-num-seqs` 既是显存旋钮也是延迟旋钮：超过某个宽度之后，每 token 的成本不再下降，而单请求延迟还在涨。
 
-## 线程模型
+## 进程模型
 
-引擎的 `step()` 是阻塞的同步调用，直接在事件循环里跑会让一步计算卡住所有连接。所以 [`AsyncLLMEngine`](../rapid_llm/engine/async_engine.py) 把引擎放在**独立工作线程**上：
+[`AsyncLLMEngine`](../rapid_llm/engine/async_engine.py) 是 API/request manager：父进程持有 tokenizer、增量 detokenizer 和请求流，独立 scheduler 子进程持有 `Scheduler`、executor、KV cache 与设备状态。两侧仅通过 typed command/event 队列交换 token id：
 
 ```text
-    协程 A ──┐                            ┌──> asyncio.Queue A ──> 协程 A
-    协程 B ──┼─> SimpleQueue(命令) ──> 工作线程 ─┼──> asyncio.Queue B ──> 协程 B
-    协程 C ──┘      (add / abort)      step() 循环  └──> asyncio.Queue C ──> 协程 C
+    协程 A ──┐                                  ┌──> asyncio.Queue A ──> 协程 A
+    协程 B ──┼─> typed command queue ──> Scheduler ─┼──> asyncio.Queue B ──> 协程 B
+    协程 C ──┘       (add / abort)        step()    └──> asyncio.Queue C ──> 协程 C
 ```
 
-- 工作线程**独占**引擎，是唯一碰调度器和 GPU 的执行体——所以两者都不需要加锁；
-- 协程从不直接调引擎，只投命令、等增量；
-- 回传用 `loop.call_soon_threadsafe`，因为 `asyncio.Queue` 不是线程安全的；
-- 空闲时工作线程阻塞在命令队列上，没有流量就不烧 CPU。
+- scheduler process 是唯一访问调度器和 GPU 的执行体；
+- tokenizer 和增量 detokenizer 留在 API 进程，设备进程只收发 token id；
+- 一个接收线程读取所有 scheduler events，再按 request id 投递到对应事件循环；
+- 空闲时 scheduler 阻塞在命令队列上，没有流量就不占用 CPU。
 
-每个请求流记住的是**创建它的那个协程所在的事件循环**，不是引擎启动时选定的某一个。这点是被一个真实的死锁逼出来的：早先版本在 `start()` 时绑定一个循环，于是 ASGI 测试客户端（自己在另一个线程里跑一个循环）永远收不到任何数据——不是报错，是挂住。回归测试：`tests/engine/test_async_engine.py::test_the_engine_serves_a_second_event_loop`。
-
-客户端断开时，`generate()` 的 `finally` 会投一条 abort，被放弃的请求**下一步就让出槽位**，而不是继续跑到长度上限。
+每个请求流记住创建它的事件循环，接收线程通过 `loop.call_soon_threadsafe` 投递结果，因此同一 request manager 可以服务多个事件循环。客户端断开时，`generate()` 的 `finally` 会发送 abort，被放弃的请求下一步释放 slot。
 
 ### 多卡：`--data-parallel-size` / `--tensor-parallel-size`
 
@@ -103,10 +100,6 @@ rapid-llm serve --model-dir my_weight/Qwen2.5-1.5B-Instruct \
 ```
 
 进程布局与历史实测见[数据并行](./data_parallel.md)。吞吐随工作负载和硬件变化，不保证线性扩展。
-
-### 进程后端：`--engine-backend process`
-
-引擎也可以整体搬进独立子进程（vLLM v1 式的切分）：父进程保留 tokenizer 与流式 detokenizer，子进程独占调度器与执行器，两侧只交换 token id——命令通道 ROUTER ↔ DEALER、输出通道 PUSH ↔ PULL，msgpack 帧加协议版本握手。[`EngineCoreClient`](../rapid_llm/engine/engine_core_client.py) 对外镜像 `AsyncLLMEngine` 的接口，OpenAI 层与所有端点行为不变；子进程崩溃会以 `EngineDeadError` 传播到所有打开的流。该后端只服务单副本（`--data-parallel-size > 1` 会被拒绝）。
 
 ## 不经 HTTP 直接用
 

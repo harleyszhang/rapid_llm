@@ -11,14 +11,12 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from rapid_llm.engine.async_engine import AsyncLLMEngine
 from rapid_llm.engine.batch_planner import SchedulerConfig
 from rapid_llm.engine.scheduler import Scheduler
 
@@ -188,17 +186,3 @@ def test_abort_cancels_a_still_tokenizing_request():
     assert engine._tokenizing == {}
     assert not engine.has_unfinished_requests()
     engine.shutdown()
-
-
-async def test_a_rejected_prompt_raises_in_the_caller_through_the_async_front_end():
-    """The async front end's ``on_error`` wiring: a prompt the background
-    encode rejects must surface as the same ValueError the synchronous path
-    raises from ``add_request`` — not a hang, and not a dead worker."""
-    engine = _build_engine([[_WORD], [_EOS]])
-
-    async def collect(async_engine, prompt):
-        return [chunk async for chunk in async_engine.generate(prompt)]
-
-    async with AsyncLLMEngine(engine) as async_engine:
-        with pytest.raises(ValueError):
-            await asyncio.wait_for(collect(async_engine, "empty me"), 20.0)
