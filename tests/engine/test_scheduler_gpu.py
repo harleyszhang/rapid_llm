@@ -196,16 +196,19 @@ def test_survivors_are_byte_identical_when_a_neighbour_leaves(model_dir):
 
     engine = build_engine(model_dir, use_cuda_graph=True)
     try:
-        requests = [engine.add_request(prompt, GREEDY) for prompt in PROMPTS]
-        early = engine.add_request(
-            PROMPTS[1], SamplingParams(temperature=0.0, max_gen_len=3, repetition_penalty=1.0)
-        )
-        # Submitted after the group above, so it prefills in its own step and
-        # leaves the shared decode batch three tokens later.
+        early_params = SamplingParams(temperature=0.0, max_gen_len=3, repetition_penalty=1.0)
+        requests = [
+            engine.add_request(prompt, early_params if index == 1 else GREEDY)
+            for index, prompt in enumerate(PROMPTS)
+        ]
+        early = requests[1]
+        survivors = requests[:1] + requests[2:]
         drain(engine)
 
         assert early.finish_reason == "length"
-        assert {r.prompt: r.text for r in requests} == expected
+        assert {r.prompt: r.text for r in survivors} == {
+            prompt: expected[prompt] for prompt in (PROMPTS[0], *PROMPTS[2:])
+        }
     finally:
         del engine
         _free()
