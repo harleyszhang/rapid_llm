@@ -171,7 +171,9 @@ def _offline_metrics(directory: Path, tag: str, variant: str, batch: int, mode: 
 
 
 def _geo(values: list[float]) -> float:
-    return math.exp(sum(math.log(value) for value in values) / len(values)) if values else float("nan")
+    return (
+        math.exp(sum(math.log(value) for value in values) / len(values)) if values else float("nan")
+    )
 
 
 def _ttft(metrics: dict) -> float:
@@ -277,15 +279,23 @@ def _print_parallel(directory: Path) -> tuple[list[tuple], list[tuple]]:
     return tp_rows, dp_rows
 
 
-def _print_geomeans(offline: list[tuple], online: list[tuple], tp_rows: list[tuple], dp_rows: list[tuple]) -> None:
+def _print_geomeans(
+    offline: list[tuple], online: list[tuple], tp_rows: list[tuple], dp_rows: list[tuple]
+) -> None:
     print("\n" + "=" * 100)
     print("geometric means (fused/baseline)")
     print("=" * 100)
     groups = (
         ("qk_norm models - eager", lambda row: row[0].startswith("qwen3") and row[1] == "eager"),
         ("qk_norm models - graph", lambda row: row[0].startswith("qwen3") and row[1] == "graph"),
-        ("control qwen2 - eager", lambda row: row[0] == "qwen2.5-0.5b-control" and row[1] == "eager"),
-        ("control qwen2 - graph", lambda row: row[0] == "qwen2.5-0.5b-control" and row[1] == "graph"),
+        (
+            "control qwen2 - eager",
+            lambda row: row[0] == "qwen2.5-0.5b-control" and row[1] == "eager",
+        ),
+        (
+            "control qwen2 - graph",
+            lambda row: row[0] == "qwen2.5-0.5b-control" and row[1] == "graph",
+        ),
     )
     for name, predicate in groups:
         selected = [row for row in offline if predicate(row)]
@@ -293,7 +303,10 @@ def _print_geomeans(offline: list[tuple], online: list[tuple], tp_rows: list[tup
             f"  {name:<24s} n={len(selected):2d}  TPOT geo={_geo([r[2] for r in selected]):.4f}  "
             f"TPS geo={_geo([r[3] for r in selected]):.4f}  TTFT geo={_geo([r[4] for r in selected]):.4f}"
         )
-    for name, tag in (("online - qk_norm model", "qwen3-4b"), ("online - control", "qwen2.5-0.5b-control")):
+    for name, tag in (
+        ("online - qk_norm model", "qwen3-4b"),
+        ("online - control", "qwen2.5-0.5b-control"),
+    ):
         selected = [row for row in online if row[0] == tag]
         print(
             f"  {name:<24s} n={len(selected):2d}  TPS geo={_geo([r[2] for r in selected]):.4f}  "

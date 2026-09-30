@@ -76,19 +76,22 @@ MODELS = {
 }
 
 COMPARE_STEPS = (
-    *(("batch", name) for name in (
-        "Qwen1.5-0.5B",
-        "Qwen3-MoE-Tiny",
-        "Qwen2.5-1.5B",
-        "Qwen2.5-1.5B-Instruct",
-        "Qwen3-0.6B",
-        "Qwen3-1.7B",
-        "Qwen2.5-3B",
-        "Llama-3.2-3B-Instruct",
-        "Qwen3-0.6B-FP8",
-        "Qwen3-8B",
-        "Meta-Llama-3.1-8B-Instruct",
-    )),
+    *(
+        ("batch", name)
+        for name in (
+            "Qwen1.5-0.5B",
+            "Qwen3-MoE-Tiny",
+            "Qwen2.5-1.5B",
+            "Qwen2.5-1.5B-Instruct",
+            "Qwen3-0.6B",
+            "Qwen3-1.7B",
+            "Qwen2.5-3B",
+            "Llama-3.2-3B-Instruct",
+            "Qwen3-0.6B-FP8",
+            "Qwen3-8B",
+            "Meta-Llama-3.1-8B-Instruct",
+        )
+    ),
     ("tp", "Qwen3-8B"),
     ("tp", "Meta-Llama-3.1-8B-Instruct"),
     ("tp", "Qwen3-30B-A3B-Instruct-2507-FP8"),
@@ -205,14 +208,17 @@ class Runner:
         )
         if available.returncode == 0:
             return
-        version = subprocess.run(
-            [self.python, "-c", "import torch; print(torch.__version__)"],
-            cwd=_REPO_ROOT,
-            env=self._env(),
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip() or "no torch"
+        version = (
+            subprocess.run(
+                [self.python, "-c", "import torch; print(torch.__version__)"],
+                cwd=_REPO_ROOT,
+                env=self._env(),
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            or "no torch"
+        )
         raise SystemExit(f"CUDA 不可用: {self.python} (torch {version}) 的构建与本机驱动不匹配。")
 
     def gpu_count(self) -> int:
@@ -422,7 +428,9 @@ def _build_parser() -> argparse.ArgumentParser:
             os.environ.get("PY_VLLM", "/mnt/otto-temp/zhanghonggao.zhg/vllm/.venv/bin/python"),
         ),
     )
-    models.add_argument("--log-dir", type=Path, default=Path(os.environ.get("LOG_DIR", "docs/benchmark_logs")))
+    models.add_argument(
+        "--log-dir", type=Path, default=Path(os.environ.get("LOG_DIR", "docs/benchmark_logs"))
+    )
     models.set_defaults(_handler=_models)
 
     qk = subparsers.add_parser("qk-norm", help="QK-RMSNorm fusion A/B suite")
@@ -445,7 +453,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=_REPO_ROOT / "docs/benchmark_logs/qk_norm",
     )
-    summarize.set_defaults(_handler=lambda args, _: qk_norm.summarize(args.directory), dry_run=False)
+    summarize.set_defaults(
+        _handler=lambda args, _: qk_norm.summarize(args.directory), dry_run=False
+    )
     return parser
 
 

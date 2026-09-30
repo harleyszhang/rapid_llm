@@ -52,7 +52,9 @@ def main():
     ]
 
     if rank == 0:
-        print(f"Fused all-reduce RMSNorm benchmark (TP={world_size}, {torch.cuda.get_device_name()})")
+        print(
+            f"Fused all-reduce RMSNorm benchmark (TP={world_size}, {torch.cuda.get_device_name()})"
+        )
         print("=" * 75)
         print("Baseline: all-reduce + skip_rmsnorm")
         print("Fused:    all-reduce + fused_add_rmsnorm")
@@ -106,14 +108,16 @@ def main():
         fused_speedup = t_baseline / t_fused
 
         if rank == 0:
-            results.append({
-                "shape": f"({batch_seq}, {hidden})",
-                "batch_seq": batch_seq,
-                "hidden": hidden,
-                "baseline_us": round(t_baseline, 3),
-                "fused_us": round(t_fused, 3),
-                "fused_speedup": round(fused_speedup, 3),
-            })
+            results.append(
+                {
+                    "shape": f"({batch_seq}, {hidden})",
+                    "batch_seq": batch_seq,
+                    "hidden": hidden,
+                    "baseline_us": round(t_baseline, 3),
+                    "fused_us": round(t_fused, 3),
+                    "fused_speedup": round(fused_speedup, 3),
+                }
+            )
             print(f"{shape!s:<20} {t_baseline:<15.3f} {t_fused:<15.3f} {fused_speedup:<12.3f}")
 
     dist.destroy_process_group()

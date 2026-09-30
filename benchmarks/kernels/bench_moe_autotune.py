@@ -68,9 +68,7 @@ def _tile_for(tokens: int, geo: MoeGeometry, dtype_label: str, top_k: int) -> di
         n=2 * geo.intermediate,
         k=geo.hidden,
         dtype_label=dtype_label,
-        heuristic=lambda dev: _launch_config(
-            tokens, 0, tokens * top_k / geo.num_experts, dev
-        ),
+        heuristic=lambda dev: _launch_config(tokens, 0, tokens * top_k / geo.num_experts, dev),
         device_index=torch.cuda.current_device(),
     )
 
@@ -105,14 +103,18 @@ def main() -> int:
         torch.manual_seed(0)
         w1 = (
             torch.randn(
-                geo.num_experts, 2 * geo.intermediate, geo.hidden,
-                device="cuda", dtype=torch.float32,
+                geo.num_experts,
+                2 * geo.intermediate,
+                geo.hidden,
+                device="cuda",
+                dtype=torch.float32,
             )
             / geo.hidden**0.5
         )
         w2 = (
-            torch.randn(geo.num_experts, geo.hidden, geo.intermediate,
-                        device="cuda", dtype=torch.float32)
+            torch.randn(
+                geo.num_experts, geo.hidden, geo.intermediate, device="cuda", dtype=torch.float32
+            )
             / geo.intermediate**0.5
         )
         call, _r1, _r2, _sb = build(w1, w2)

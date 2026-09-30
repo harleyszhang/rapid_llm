@@ -122,16 +122,11 @@ def test_triton_32_int8_a8_caps_large_m_tile(monkeypatch):
     monkeypatch.setattr(_fused_moe_mod, "_TRITON_3_2", True)
     config = {"BLOCK_M": 128, "BLOCK_N": 256, "num_warps": 8}
 
-    fixed = _fused_moe_mod._compiler_safe_config(
-        config, _fused_moe_mod._QUANT_INT8_A8
-    )
+    fixed = _fused_moe_mod._compiler_safe_config(config, _fused_moe_mod._QUANT_INT8_A8)
 
     assert fixed == {"BLOCK_M": 32, "BLOCK_N": 256, "num_warps": 8}
     assert config["BLOCK_M"] == 128
-    assert (
-        _fused_moe_mod._compiler_safe_config(config, _fused_moe_mod._QUANT_FP8_A8)
-        is config
-    )
+    assert _fused_moe_mod._compiler_safe_config(config, _fused_moe_mod._QUANT_FP8_A8) is config
 
 
 def test_fused_moe_runs_with_autotune_disabled(monkeypatch):

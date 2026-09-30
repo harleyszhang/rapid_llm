@@ -17,8 +17,7 @@ _ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", None)
 
 TORCH_ACCELERATOR_ERRORS: tuple[type[BaseException], ...] = (
     (torch.cuda.OutOfMemoryError, _ACCELERATOR_ERROR)
-    if isinstance(_ACCELERATOR_ERROR, type)
-    and issubclass(_ACCELERATOR_ERROR, BaseException)
+    if isinstance(_ACCELERATOR_ERROR, type) and issubclass(_ACCELERATOR_ERROR, BaseException)
     else (torch.cuda.OutOfMemoryError,)
 )
 

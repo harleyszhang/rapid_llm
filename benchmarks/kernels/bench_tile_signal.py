@@ -127,7 +127,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.json is None:
         args.json = timestamped_log_path(
-            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "overlap", "overlap_l4"
+            Path(__file__).resolve().parents[2] / "docs" / "benchmark_logs" / "overlap",
+            "overlap_l4",
         )
 
     require_gpus(1)

@@ -84,9 +84,7 @@ class DeepseekV4UnquantizedMoEMethod(UnquantizedFusedMoEMethod):
             topk_position, token_index = torch.where(mask[expert_index])
             gate_up = F.linear(x[token_index], block.experts["gate_up_proj"][expert_index])
             gate = gate_up[:, :intermediate].clamp(max=block.swiglu_limit)
-            up = gate_up[:, intermediate:].clamp(
-                min=-block.swiglu_limit, max=block.swiglu_limit
-            )
+            up = gate_up[:, intermediate:].clamp(min=-block.swiglu_limit, max=block.swiglu_limit)
             current = F.linear(F.silu(gate) * up, block.experts["down_proj"][expert_index])
             current = current * topk_weights[token_index, topk_position, None]
             final.index_add_(0, token_index, current.to(final.dtype))

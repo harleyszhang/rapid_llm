@@ -241,9 +241,7 @@ def test_swiglu_fused_applies_bound_with_bfloat16_rounding():
     limit = 0.75
 
     actual = swiglu_forward_fused_bounded(fused, limit)
-    expected = torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(
-        min=-limit, max=limit
-    )
+    expected = torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(min=-limit, max=limit)
 
     assert torch.equal(actual, expected)
 
