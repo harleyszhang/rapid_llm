@@ -36,8 +36,8 @@ from ..distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from ..kernels import skip_rmsnorm
-from ..modules import SparseMoeBlock
+from ..kernels import skip_rmsnorm, swiglu_forward_fused_bounded
+from ..modules import FusedMLP, SparseMoeBlock
 from ..modules.deepseek_v4.attention import DeepseekV4Attention
 from ..modules.deepseek_v4.hyper_connection import DeepseekV4HyperConnection, DeepseekV4HyperHead
 from ..modules.deepseek_v4.rope import DeepseekV4RotaryEmbedding
@@ -53,25 +53,44 @@ def _sqrtsoftplus(x: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(F.softplus(x))
 
 
-class DeepseekV4FusedMoEMethod(UnquantizedFusedMoEMethod):
-    """The fused grouped-GEMM path with V4's bounded SwiGLU epilogue.
+class DeepseekV4SharedMLP(FusedMLP):
+    """Shared expert with V4's bounded SwiGLU evaluation order."""
 
-    Only the routed experts clamp (``gate ≤ limit``, ``|up| ≤ limit``); the
-    shared expert runs the plain SwiGLU every other family uses, exactly as
-    the reference's two MLP classes differ.
-    """
+    def __init__(
+        self,
+        config: ModelConfig,
+        quant: QuantizationConfig | None = None,
+        *,
+        intermediate_size: int | None = None,
+    ) -> None:
+        super().__init__(config, quant, intermediate_size=intermediate_size)
+        self.limit = float(config.swiglu_limit)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(swiglu_forward_fused_bounded(self.gate_up_proj(x), self.limit))
+
+
+class DeepseekV4UnquantizedMoEMethod(UnquantizedFusedMoEMethod):
+    """Reference-order fallback for unquantized V4 checkpoints."""
 
     def apply(self, block, x, topk_weights, topk_ids) -> torch.Tensor:
-        from ..kernels import fused_moe
-
-        return fused_moe(
-            x,
-            block.experts["gate_up_proj"],
-            block.experts["down_proj"],
-            topk_weights,
-            topk_ids,
-            swiglu_limit=float(getattr(block, "swiglu_limit", float("inf"))),
-        )
+        final = torch.zeros_like(x)
+        with torch.no_grad():
+            mask = F.one_hot(topk_ids, num_classes=block.num_experts).permute(2, 1, 0)
+            active_experts = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
+        intermediate = block.experts["gate_up_proj"].shape[1] // 2
+        for expert_index in active_experts:
+            expert_index = expert_index[0]
+            topk_position, token_index = torch.where(mask[expert_index])
+            gate_up = F.linear(x[token_index], block.experts["gate_up_proj"][expert_index])
+            gate = gate_up[:, :intermediate].clamp(max=block.swiglu_limit)
+            up = gate_up[:, intermediate:].clamp(
+                min=-block.swiglu_limit, max=block.swiglu_limit
+            )
+            current = F.linear(F.silu(gate) * up, block.experts["down_proj"][expert_index])
+            current = current * topk_weights[token_index, topk_position, None]
+            final.index_add_(0, token_index, current.to(final.dtype))
+        return final
 
 
 def _load_ep_expert_stack(param, loaded) -> torch.Tensor | None:
@@ -296,9 +315,12 @@ class DeepseekV4MoE(SparseMoeBlock):
         self.is_hash = str(config.mlp_layer_types[layer_index]) == "hash_moe"
         self.swiglu_limit = float(getattr(config, "swiglu_limit", float("inf")))
         if quant is None:
-            # The bounded SwiGLU rides inside the quant-method apply, where the
-            # activation kernel is launched.
-            self.quant_method = DeepseekV4FusedMoEMethod()
+            self.quant_method = DeepseekV4UnquantizedMoEMethod()
+        self.shared_experts = DeepseekV4SharedMLP(
+            config,
+            quant,
+            intermediate_size=config.moe_intermediate_size,
+        )
         # V4's router is a module in the reference (``gate.weight``,
         # ``gate.e_score_correction_bias``, ``gate.tid2eid``); rapid_llm keeps
         # the same checkpoint keys through the bare-parameter ``mlp.gate*``

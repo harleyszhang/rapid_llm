@@ -123,8 +123,10 @@ def _loaded_pair(tmp_path, seed: int = 0):
     # ``RawParameter`` storage). Restore them so the parity comparison
     # measures the two code paths, not the two precisions.
     fp32_buffers = [
-        (hf_model.model.rotary_emb, name, buf.clone())
-        for name, buf in hf_model.model.rotary_emb.named_buffers()
+        (submodule, name, buf.clone())
+        for submodule in hf_model.modules()
+        if isinstance(submodule, type(hf_model.model.rotary_emb))
+        for name, buf in submodule.named_buffers()
         if buf.is_floating_point()
     ]
     for layer in hf_model.model.layers:

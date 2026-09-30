@@ -33,6 +33,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "tanh": (".ops.activation.activations", "tanh"),
     "swiglu_forward": (".ops.activation.swiglu", "swiglu_forward"),
     "swiglu_forward_fused": (".ops.activation.swiglu", "swiglu_forward_fused"),
+    "swiglu_forward_fused_bounded": (
+        ".ops.activation.swiglu",
+        "swiglu_forward_fused_bounded",
+    ),
     "flash_attention2_no_pad": (".ops.attention.flashattention2_nopad", "flash_attention2_no_pad"),
     "flash_attention2_chunked": (
         ".ops.attention.flashattention2_nopad",
@@ -161,6 +165,7 @@ __all__ = [
     "smoothquant_matmul",
     "swiglu_forward",
     "swiglu_forward_fused",
+    "swiglu_forward_fused_bounded",
     "tanh",
     "unpack_int8_experts",
     "update_kv_buffer",

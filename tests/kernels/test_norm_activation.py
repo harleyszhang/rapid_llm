@@ -14,7 +14,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from rapid_llm.kernels import qk_rmsnorm, skip_rmsnorm, swiglu_forward, swiglu_forward_fused
+from rapid_llm.kernels import (
+    qk_rmsnorm,
+    skip_rmsnorm,
+    swiglu_forward,
+    swiglu_forward_fused,
+    swiglu_forward_fused_bounded,
+)
 from tests import reference
 
 _RTOL, _ATOL = 2e-2, 2e-2
@@ -225,6 +231,21 @@ def test_swiglu_fused_zero_gate_gives_zero():
     )
     out = swiglu_forward_fused(fused)
     assert torch.count_nonzero(out) == 0
+
+
+def test_swiglu_fused_applies_bound_with_bfloat16_rounding():
+    """The bounded path follows clamp, bf16 SiLU, then multiply ordering."""
+    torch.manual_seed(9)
+    fused = torch.randn(3, 256, device="cuda", dtype=torch.bfloat16)
+    gate, up = fused.chunk(2, dim=-1)
+    limit = 0.75
+
+    actual = swiglu_forward_fused_bounded(fused, limit)
+    expected = torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(
+        min=-limit, max=limit
+    )
+
+    assert torch.equal(actual, expected)
 
 
 def test_skip_rmsnorm_writes_residual_in_place():
