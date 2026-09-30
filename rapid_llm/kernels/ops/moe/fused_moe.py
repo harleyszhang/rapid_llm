@@ -120,6 +120,10 @@ _INT8_MAX = 127.0
 #: ``num_tokens * top_k``.
 _INLINE_A_QUANT_MAX_ROWS = 32
 
+#: Triton 3.2 aborts in ``make_ttgir`` when lowering the int8 tensor-core dot
+#: with a 64-row (or wider) M tile. Later compilers accept the same IR.
+_TRITON_3_2 = tuple(triton.__version__.split(".")[:2]) == ("3", "2")
+
 
 # --------------------------------------------------------------------------- #
 # Token alignment (2 Triton launches; every output shape is static -> no host sync)
@@ -845,6 +849,15 @@ def _launch_config(
     }
 
 
+def _compiler_safe_config(config: dict, quant_mode: int) -> dict:
+    if _TRITON_3_2 and quant_mode == _QUANT_INT8_A8 and config["BLOCK_M"] > 32:
+        # Triton 3.2's Nvidia backend aborts instead of reporting a compile
+        # error for this int8 dot shape. Preserve every tuned launch parameter
+        # except the dimension that produces the invalid TTGIR.
+        return {**config, "BLOCK_M": 32}
+    return config
+
+
 def _invoke_moe_gemm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1203,6 +1216,7 @@ def _fused_moe(
         ),
         device_index=device.index,
     )
+    config = _compiler_safe_config(config, quant_mode)
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids, config["BLOCK_M"], num_experts
     )
