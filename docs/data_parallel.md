@@ -114,7 +114,6 @@ rapid-llm serve /path/to/moe-checkpoint \
 | DPA + CUDA Graph | 暂不支持 | ragged step 几何与跨 replica 锁步尚未纳入捕获契约 |
 | DPA + speculative decoding | 暂不支持 | 每 step 的 forward 数和验证 pass 尚未纳入锁步协议 |
 | DPA + Sequence Parallelism | 暂不支持 | 两者都会在 MoE 前重分 token 轴 |
-| DPA + process engine backend | 暂不支持 | 服务端需使用 `engine_backend="thread"` 的 DP 协调器 |
 
 回归与真实 checkpoint 门禁：
 

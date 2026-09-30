@@ -52,12 +52,8 @@ from .protocol import (
 )
 
 if TYPE_CHECKING:
-    from ..engine.engine_core_client import EngineCoreClient
-
-    #: What a server run may sit on: the in-process async engine (one replica),
-    #: the data-parallel coordinator over several, or a separate engine core
-    #: process. All three answer the same generate/metrics/tokenizer calls.
-    EngineBackend = AsyncLLMEngine | AsyncDataParallelEngine | EngineCoreClient
+    #: Both backends expose the same request-manager interface.
+    EngineBackend = AsyncLLMEngine | AsyncDataParallelEngine
 
 logger = get_logger(__name__)
 
@@ -152,12 +148,6 @@ class ServerConfig:
         chat_template: ``True`` applies the tokenizer's chat template to
             ``/v1/chat/completions`` messages. Turn it off for base models, which
             have no template and degenerate when given one.
-        engine_backend: Where scheduling runs. ``"thread"`` runs the
-            continuous-batching engine inside this process; ``"process"``
-            spawns a separate engine core process and talks to it over ZMQ
-            (needs the ``serve`` extra's ``pyzmq``/``msgpack``), which keeps
-            the event loop out of the GPU step path. HTTP behaviour is the
-            same either way.
     """
 
     model_dir: str
@@ -181,7 +171,6 @@ class ServerConfig:
     enable_dp_attention: bool = False
     load_balancer: str = "round_robin"
     chat_template: bool = True
-    engine_backend: str = "thread"
 
     def __post_init__(self) -> None:
         """Reject DPA combinations before the server starts loading a model."""
@@ -193,8 +182,6 @@ class ServerConfig:
             raise ValueError("DP attention requires enable_expert_parallel=True")
         if self.use_cuda_graph:
             raise ValueError("DP attention does not support CUDA Graph yet; disable it")
-        if self.engine_backend != "thread":
-            raise ValueError("DP attention requires engine_backend='thread'")
 
     @property
     def model_name(self) -> str:
@@ -563,12 +550,9 @@ def build_app(config: ServerConfig, engine: EngineBackend | None = None):
 
     Args:
         config: Engine and serving options.
-        engine: Pre-built engine; when omitted one is loaded on startup — one
-            replica's async engine, the data-parallel front end when
-            ``config.data_parallel_size`` is above 1, or a separate engine
-            core process when ``config.engine_backend == "process"``.
-            Injecting a fake here is what lets the protocol layer be tested
-            without a GPU or a checkpoint.
+        engine: Pre-built request manager; when omitted one is loaded on startup.
+            Injecting a fake here lets the protocol layer be tested without a GPU
+            or checkpoint.
     """
     fastapi = _require_fastapi()
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -583,11 +567,6 @@ def build_app(config: ServerConfig, engine: EngineBackend | None = None):
     async def lifespan(_app):
         if state["engine"] is None:
             if config.data_parallel_size > 1:
-                if config.engine_backend == "process":
-                    raise RuntimeError(
-                        "engine_backend='process' serves one replica; lower "
-                        "data_parallel_size to 1 to use it"
-                    )
                 # ``device`` is deliberately absent: a replica's device is its
                 # position in the grid, and the coordinator loads no model.
                 logger.info(
@@ -634,20 +613,8 @@ def build_app(config: ServerConfig, engine: EngineBackend | None = None):
                     "prefix_cache_blocks": config.prefix_cache_blocks,
                     "enable_preemption": config.enable_preemption,
                 }
-                if config.engine_backend == "process":
-                    logger.info("loading %s in a separate engine core process", config.model_dir)
-                    # Imported here, not at module scope: ZMQ is an optional
-                    # dependency the thread backend never needs.
-                    from ..engine.engine_core_client import EngineCoreClient
-
-                    state["engine"] = EngineCoreClient.from_pretrained(
-                        config.model_dir, **engine_kwargs
-                    )
-                else:
-                    logger.info("loading %s for serving", config.model_dir)
-                    state["engine"] = AsyncLLMEngine.from_pretrained(
-                        config.model_dir, **engine_kwargs
-                    )
+                logger.info("loading %s in a scheduler process", config.model_dir)
+                state["engine"] = AsyncLLMEngine.from_pretrained(config.model_dir, **engine_kwargs)
         active: EngineBackend = state["engine"]
         active.start()
         state["server"] = OpenAIServer(

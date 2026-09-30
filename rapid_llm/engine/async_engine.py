@@ -1,58 +1,60 @@
-"""Asyncio front end for the continuous-batching engine.
+"""Async request manager for a scheduler process.
 
-:class:`AsyncLLMEngine` runs one pump thread that drives the synchronous
-engine's ``step()`` loop and fans results out to per-request asyncio
-streams, so many callers share a single batching loop.
-
-Usage:
-    engine = AsyncLLMEngine(sync_engine)
-    async for chunk in await engine.generate(prompt): ...
+The parent process owns tokenization, incremental detokenization and request
+streams. The child process owns ``Scheduler``, its executor and all device
+state. Typed commands and events are the only objects crossing that boundary.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import itertools
+import multiprocessing as mp
 import queue
 import threading
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..tools.observability.metrics import EngineMetrics
 from ..utils.logger import get_logger
+from .detokenizer import IncrementalDetokenizer
+from .llm_engine import LLMEngine
 from .sampler import PositionLogprobs, SamplingParams
-from .scheduler import Scheduler
+from .scheduler import run_scheduler_process
+from .scheduler_ipc import (
+    PROTOCOL_VERSION,
+    AbortRequest,
+    AddRequest,
+    RequestEvent,
+    SchedulerEvents,
+    SchedulerFailed,
+    SchedulerReady,
+    ShutdownScheduler,
+    UtilityEvent,
+    UtilityRequest,
+)
 
 logger = get_logger(__name__)
+
+_STARTUP_TIMEOUT_S = 900.0
+_OUTPUT_POLL_S = 0.25
+_STATS_INTERVAL_S = 1.0
+_JOIN_GRACE_S = 30.0
+_TERMINATE_GRACE_S = 10.0
 
 
 @dataclass(frozen=True)
 class StreamedOutput:
-    """One increment of a request's completion.
-
-    Attributes:
-        request_id: Which request this belongs to.
-        delta: Text produced since the previous chunk; may be empty when a token
-            did not complete a character.
-        text: The completion so far, including ``delta``.
-        finish_reason: ``None`` while generating, else why it stopped.
-        prompt_tokens: Prompt size as the engine tokenised it.
-        completion_tokens: Tokens sampled so far, this chunk included.
-        logprobs: The record for the token this chunk carries; ``None`` unless
-            the request asked for them.
-        prompt_logprobs: The request's whole prompt records, attached to the
-            final chunk only; ``None`` unless the request asked for them.
-    """
+    """One increment of a request's completion."""
 
     request_id: str
     delta: str
     text: str
     finish_reason: str | None
-    # Defaults keep hand-built chunks (tests, fakes) valid; the worker always
-    # fills these from the engine's own bookkeeping so a caller reporting
-    # usage never has to re-encode the text — which would be slow and lossy at
-    # token boundaries.
     prompt_tokens: int = 0
     completion_tokens: int = 0
     logprobs: PositionLogprobs | None = None
@@ -63,31 +65,31 @@ class StreamedOutput:
         return self.finish_reason is not None
 
 
+class SchedulerProcessError(RuntimeError):
+    """The scheduler process failed and cannot answer active requests."""
+
+
+class _Lifecycle(enum.Enum):
+    STARTING = "starting"
+    RUNNING = "running"
+    FAILED = "failed"
+    CLOSING = "closing"
+    CLOSED = "closed"
+
+
 class _RequestStream:
-    """Delivery queue for one request, written by the worker, read by a coroutine.
+    """Per-request delivery queue and incremental detokenization state."""
 
-    Holds the event loop of the coroutine that created it, not a loop the engine
-    picked once at startup. Requests from different loops therefore coexist —
-    which matters because an ASGI test client, a notebook and ``uvicorn`` each run
-    their own, and a queue awaited on one loop is never woken by a put scheduled
-    onto another.
-    """
-
-    def __init__(self, request_id: str, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, request_id: str, loop: asyncio.AbstractEventLoop, tokenizer: Any) -> None:
         self.request_id = request_id
         self._loop = loop
         self._queue: asyncio.Queue[StreamedOutput | BaseException | None] = asyncio.Queue()
+        self._detokenizer = IncrementalDetokenizer(tokenizer, 1)
+        self._text = ""
+        self._completion_tokens = 0
         self.finished = False
 
     def push(self, item: StreamedOutput | BaseException | None) -> None:
-        """Hand an item to the consuming coroutine. Called from the worker thread.
-
-        ``call_soon_threadsafe`` is the whole point: ``asyncio.Queue`` is not
-        thread-safe, so the put has to be scheduled onto the loop rather than
-        performed on the worker. A loop that is already closing rejects the
-        callback, which only happens during shutdown and costs a dropped chunk of
-        a request nobody is reading any more.
-        """
         with contextlib.suppress(RuntimeError):
             self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
 
@@ -97,91 +99,168 @@ class _RequestStream:
             raise item
         return item
 
+    def push_event(self, event: RequestEvent) -> None:
+        if event.error is not None:
+            self.finished = True
+            self.push(ValueError(event.error))
+            return
 
-class AsyncLLMEngine:
-    """Serves many concurrent coroutines from one continuously batched engine.
+        delta = "".join(self._detokenizer.append(0, token) for token in event.new_token_ids)
+        if event.new_token_ids:
+            self._completion_tokens += len(event.new_token_ids)
+            self._text += delta
+        if event.finished:
+            self.finished = True
+        if not delta and not event.finished:
+            return
+        self.push(
+            StreamedOutput(
+                request_id=self.request_id,
+                delta=delta,
+                text=self._text,
+                finish_reason=event.finish_reason,
+                prompt_tokens=event.prompt_len,
+                completion_tokens=self._completion_tokens,
+                logprobs=event.delta_logprobs if event.new_token_ids else None,
+                prompt_logprobs=event.prompt_logprobs,
+            )
+        )
 
-    Args:
-        engine: The engine to drive. This object owns it from here on; calling
-            ``step()`` elsewhere would race the worker thread.
-    """
 
-    def __init__(self, engine: Scheduler) -> None:
-        self._engine = engine
-        self._commands: queue.SimpleQueue[tuple[str, Any] | None] = queue.SimpleQueue()
+class RequestTracker:
+    """Own the single request table used by generation, abort and failure paths."""
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
         self._streams: dict[str, _RequestStream] = {}
-        self._stream_snapshot: dict[str, _RequestStream] = {}
-        self._request_ids = itertools.count()
-        self._worker: threading.Thread | None = None
-        self._stopping = threading.Event()
-        self._closed = False
-        # Serializes starting, admitting a request, and shutting down. Keeping
-        # admission in this critical section prevents shutdown from consuming
-        # its sentinel between stream registration and the matching ``add``.
-        self._lifecycle_lock = threading.Lock()
-        # Guards mutations to ``_streams`` and its copy-on-write snapshot. The
-        # worker only reads the snapshot, keeping a mutex out of the per-token
-        # publish path while coroutines register and drop entries.
+        self._snapshot: dict[str, _RequestStream] = {}
         self._lock = threading.Lock()
 
+    def register(self, request_id: str, loop: asyncio.AbstractEventLoop) -> _RequestStream:
+        stream = _RequestStream(request_id, loop, self._tokenizer)
+        with self._lock:
+            if request_id in self._streams:
+                raise ValueError(f"request id {request_id!r} is already active")
+            self._streams[request_id] = stream
+            self._snapshot = self._streams.copy()
+        return stream
+
+    def get(self, request_id: str) -> _RequestStream | None:
+        return self._snapshot.get(request_id)
+
+    def remove(self, request_id: str, stream: _RequestStream) -> None:
+        with self._lock:
+            if self._streams.get(request_id) is stream:
+                self._streams.pop(request_id)
+                self._snapshot = self._streams.copy()
+
+    def fail_all(self, item: BaseException | None) -> None:
+        for stream in tuple(self._snapshot.values()):
+            stream.finished = True
+            stream.push(item)
+
+    def clear(self, item: BaseException | None) -> None:
+        with self._lock:
+            streams = tuple(self._streams.values())
+            self._streams.clear()
+            self._snapshot = {}
+        for stream in streams:
+            stream.finished = True
+            stream.push(item)
+
+
+class AsyncLLMEngine:
+    """Serve concurrent coroutines through one isolated scheduler process."""
+
+    def __init__(
+        self,
+        model: str,
+        tokenizer: Any,
+        engine_kwargs: dict[str, Any],
+        *,
+        startup_timeout_s: float = _STARTUP_TIMEOUT_S,
+        process_target: Callable = run_scheduler_process,
+        process_context: Any = None,
+    ) -> None:
+        self._model = model
+        self._tokenizer = tokenizer
+        self._engine_kwargs = dict(engine_kwargs)
+        self._metrics = EngineMetrics()
+        self._tracker = RequestTracker(tokenizer)
+        self._request_ids = itertools.count()
+        self._utility_ids = itertools.count()
+        self._lifecycle_lock = threading.Lock()
+        self._state = _Lifecycle.STARTING
+        self._failure: SchedulerProcessError | None = None
+        self._receiver: threading.Thread | None = None
+        self._stop_receiver = threading.Event()
+
+        ctx = process_context or mp.get_context("spawn")
+        self._commands = ctx.Queue()
+        self._events = ctx.Queue()
+        self._process = ctx.Process(
+            target=process_target,
+            args=(model, self._engine_kwargs, self._commands, self._events),
+            daemon=False,
+            name="rapid-llm-scheduler",
+        )
+        try:
+            self._process.start()
+            self._ready = self._await_ready(startup_timeout_s)
+        except BaseException:
+            self._abort_launch()
+            raise
+        self._state = _Lifecycle.RUNNING
+
     @classmethod
-    def from_pretrained(cls, model: str, **kwargs: Any) -> AsyncLLMEngine:
-        """Load a checkpoint and wrap it for async serving.
-
-        Args:
-            model: HuggingFace checkpoint directory.
-            **kwargs: Forwarded to
-                :meth:`Scheduler.from_pretrained`
-        """
-        return cls(Scheduler.from_pretrained(model, **kwargs))
-
-    # ------------------------------------------------------------- lifecycle #
-    @property
-    def tokenizer(self):
-        """The engine's tokenizer, for chat templating in an entrypoint layer."""
-        return self._engine.tokenizer
+    def from_pretrained(
+        cls,
+        model: str,
+        *,
+        startup_timeout_s: float = _STARTUP_TIMEOUT_S,
+        **engine_kwargs: Any,
+    ) -> AsyncLLMEngine:
+        tokenizer = LLMEngine._load_tokenizer(model)
+        return cls(model, tokenizer, engine_kwargs, startup_timeout_s=startup_timeout_s)
 
     @property
-    def metrics(self):
-        """The engine's metric registry, for the entrypoint's ``/metrics``."""
-        return self._engine.metrics
+    def tokenizer(self) -> Any:
+        return self._tokenizer
+
+    @property
+    def metrics(self) -> EngineMetrics:
+        return self._metrics
+
+    @property
+    def scheduler_info(self) -> SchedulerReady:
+        return self._ready
 
     def start(self) -> None:
-        """Start the worker thread. Idempotent, and safe to call from any loop."""
+        """Start the single output receiver. The operation is idempotent."""
         with self._lifecycle_lock:
-            self._start_locked()
-
-    def _start_locked(self) -> None:
-        """Start the worker while ``_lifecycle_lock`` is held."""
-        if self._closed:
-            raise RuntimeError("this AsyncLLMEngine has been shut down")
-        if self._worker is not None:
-            return
-        self._worker = threading.Thread(target=self._run, name="rapid-llm-engine", daemon=True)
-        self._worker.start()
+            self._require_running()
+            self._start_receiver_locked()
 
     async def shutdown(self) -> None:
-        """Stop the worker and fail any stream still being read."""
+        """Stop admission, stop output delivery, then reclaim the child process."""
         with self._lifecycle_lock:
-            if self._closed:
+            if self._state in (_Lifecycle.CLOSING, _Lifecycle.CLOSED):
                 return
-            self._closed = True
-            worker = self._worker
-            if worker is not None:
-                self._stopping.set()
-                self._commands.put(None)  # wake the worker if it is idle
+            self._state = _Lifecycle.CLOSING
+            with contextlib.suppress(Exception):
+                self._commands.put(ShutdownScheduler())
+            self._stop_receiver.set()
+            receiver = self._receiver
 
-        if worker is not None:
-            await asyncio.get_running_loop().run_in_executor(None, worker.join, 30.0)
-            with self._lifecycle_lock:
-                if self._worker is worker:
-                    self._worker = None
-        with self._lock:
-            streams = list(self._streams.values())
-            self._streams.clear()
-            self._stream_snapshot = {}
-        for stream in streams:
-            stream.push(None)
+        loop = asyncio.get_running_loop()
+        if receiver is not None:
+            await loop.run_in_executor(None, receiver.join, 5.0)
+        await loop.run_in_executor(None, self._join_process)
+        self._tracker.clear(None)
+        self._close_channels()
+        with self._lifecycle_lock:
+            self._receiver = None
+            self._state = _Lifecycle.CLOSED
 
     async def __aenter__(self) -> AsyncLLMEngine:
         self.start()
@@ -190,38 +269,38 @@ class AsyncLLMEngine:
     async def __aexit__(self, *_exc: object) -> None:
         await self.shutdown()
 
-    # ------------------------------------------------------------ public API #
     async def generate(
         self,
         prompt: str,
         sampling_params: SamplingParams | None = None,
         request_id: str | None = None,
     ) -> AsyncIterator[StreamedOutput]:
-        """Stream one request's completion.
-
-        The request is submitted on first iteration and cancelled if the consumer
-        stops early — an abandoned HTTP connection therefore frees its cache slot
-        on the next step instead of running to its length cap.
-
-        Args:
-            prompt: Prompt text, already chat-templated if the model expects that.
-            sampling_params: Per-request knobs.
-            request_id: Caller-supplied id; generated when omitted.
-
-        Yields:
-            :class:`StreamedOutput` chunks, the last one carrying a finish reason.
-        """
+        """Tokenize, submit and stream one request; abort it on early close."""
         with self._lifecycle_lock:
-            self._start_locked()
-            request_id = request_id or f"async-{next(self._request_ids)}"
-            stream = _RequestStream(request_id, asyncio.get_running_loop())
-            with self._lock:
-                if request_id in self._streams:
-                    raise ValueError(f"request id {request_id!r} is already active")
-                self._streams[request_id] = stream
-                self._stream_snapshot = self._streams.copy()
-            self._commands.put(("add", (request_id, prompt, sampling_params)))
+            self._require_running()
+            self._start_receiver_locked()
+            request_id = request_id or f"request-{next(self._request_ids)}"
+            stream = self._tracker.register(request_id, asyncio.get_running_loop())
+
+        submitted = False
         try:
+            token_ids = await asyncio.to_thread(
+                self._tokenizer.encode, prompt, add_special_tokens=True
+            )
+            if not token_ids:
+                raise ValueError("the prompt is empty after tokenisation")
+            with self._lifecycle_lock:
+                self._require_running()
+                self._commands.put(
+                    AddRequest(
+                        request_id=request_id,
+                        prompt_token_ids=tuple(token_ids),
+                        sampling_params=sampling_params or SamplingParams(),
+                        arrival_time=time.monotonic(),
+                    )
+                )
+                submitted = True
+
             while True:
                 chunk = await stream.get()
                 if chunk is None:
@@ -230,15 +309,9 @@ class AsyncLLMEngine:
                 if chunk.is_finished:
                     return
         finally:
-            with self._lock:
-                # An older coroutine must never remove a newer stream sharing
-                # its id (the admission guard normally prevents this; identity
-                # makes cleanup safe even if a future caller bypasses it).
-                if self._streams.get(request_id) is stream:
-                    self._streams.pop(request_id)
-                    self._stream_snapshot = self._streams.copy()
-            if not stream.finished:
-                self._commands.put(("abort", request_id))
+            self._tracker.remove(request_id, stream)
+            if submitted and not stream.finished:
+                self.abort(request_id)
 
     async def generate_text(
         self,
@@ -246,127 +319,140 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams | None = None,
         request_id: str | None = None,
     ) -> StreamedOutput:
-        """Await a whole completion, discarding the intermediate chunks."""
-        last: StreamedOutput | None = None
+        last = None
         async for chunk in self.generate(prompt, sampling_params, request_id):
             last = chunk
         if last is None:
             raise RuntimeError(f"request {request_id} produced no output")
         return last
 
-    # ----------------------------------------------------------- worker loop #
-    def _run(self) -> None:
-        """Drive the engine until shutdown. The only thread that touches it.
+    def abort(self, request_id: str) -> None:
+        with self._lifecycle_lock:
+            if self._state is _Lifecycle.RUNNING:
+                self._commands.put(AbortRequest(request_id))
 
-        Releasing the engine belongs here rather than in :meth:`shutdown`: the
-        worker owns it, so the thread that ran every model pass is also the one
-        that tells the tensor-parallel followers to stop. Doing it from the event
-        loop would issue a collective off the owning thread, and skipping it would
-        leave those follower processes waiting for a plan that never comes.
-        """
-        try:
-            while not self._stopping.is_set():
-                try:
-                    self._drain_commands()
-                    if not self._engine.has_unfinished_requests():
-                        # Idle: block on the command queue rather than spinning, so a
-                        # server with no traffic costs no CPU.
-                        self._apply(self._commands.get())
-                        continue
-                    for request in self._engine.step():
-                        self._publish(request)
-                except Exception as exc:  # the worker thread must not die silently
-                    logger.exception("engine worker step failed")
-                    self._fail_all(exc)
-                    self._drop_everything()
-        finally:
-            self._engine.shutdown()
-
-    def _drain_commands(self) -> None:
+    def _await_ready(self, timeout_s: float) -> SchedulerReady:
+        deadline = time.monotonic() + timeout_s
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"scheduler process did not report ready within {timeout_s:.0f}s"
+                )
             try:
-                self._apply(self._commands.get_nowait())
+                event = self._events.get(timeout=min(_OUTPUT_POLL_S, remaining))
             except queue.Empty:
+                if not self._process.is_alive():
+                    raise RuntimeError(
+                        f"scheduler process exited with code {self._process.exitcode} during startup"
+                    ) from None
+                continue
+            if isinstance(event, SchedulerFailed):
+                raise RuntimeError(f"scheduler process failed to start: {event.message}")
+            if not isinstance(event, SchedulerReady):
+                logger.warning("scheduler process sent an unexpected startup event; ignoring it")
+                continue
+            if event.protocol_version != PROTOCOL_VERSION:
+                raise RuntimeError(
+                    f"scheduler protocol mismatch: child v{event.protocol_version} "
+                    f"({event.engine_version}), parent v{PROTOCOL_VERSION}"
+                )
+            return event
+
+    def _start_receiver_locked(self) -> None:
+        if self._receiver is not None:
+            return
+        self._receiver = threading.Thread(
+            target=self._output_loop,
+            name="rapid-llm-scheduler-output",
+            daemon=True,
+        )
+        self._receiver.start()
+
+    def _output_loop(self) -> None:
+        last_stats = time.monotonic()
+        while not self._stop_receiver.is_set():
+            try:
+                event = self._events.get(timeout=_OUTPUT_POLL_S)
+            except queue.Empty:
+                if not self._process.is_alive():
+                    self._on_process_exit()
+                    return
+            else:
+                self._handle_event(event)
+            if self._stop_receiver.is_set():
                 return
+            now = time.monotonic()
+            if now - last_stats >= _STATS_INTERVAL_S:
+                last_stats = now
+                self._commands.put(UtilityRequest(next(self._utility_ids), "step_stats"))
 
-    def _apply(self, command: tuple[str, Any] | None) -> None:
-        if command is None:  # shutdown sentinel
+    def _handle_event(self, event) -> None:
+        if isinstance(event, SchedulerFailed):
+            self._mark_failed(event.message)
             return
-        kind, payload = command
-        if kind == "add":
-            request_id, prompt, params = payload
-            try:
-                self._engine.add_request(
-                    prompt, params, request_id=request_id, on_error=self._fail_async
-                )
-            except ValueError as exc:
-                # A rejected prompt (empty, or longer than the context window) is
-                # the caller's problem, not a server fault: hand the error to that
-                # one stream and keep serving everyone else.
-                self._fail(request_id, exc)
-        elif kind == "abort":
-            self._engine.abort(payload)
-
-    def _fail_async(self, request, exc: BaseException) -> None:
-        """Deliver a background-tokenize failure to its stream (O10).
-
-        The engine thread fires this from ``step`` once a request's encode
-        failed or its prompt was rejected — the same exception the
-        synchronous path above would have raised from ``add_request``.
-        """
-        self._fail(request.request_id, exc)
-
-    def _publish(self, request) -> None:
-        stream = self._get_stream(request.request_id)
-        if stream is None:
-            # Consumer already went away; the abort command it queued will land
-            # on a later iteration, so there is nothing to do here.
+        if not isinstance(event, SchedulerEvents):
+            logger.warning("ignoring unexpected scheduler event %s", type(event).__name__)
             return
-        if request.is_finished:
-            stream.finished = True
-        if request.delta or request.is_finished:
-            stream.push(
-                StreamedOutput(
-                    request_id=request.request_id,
-                    delta=request.delta,
-                    text=request.text,
-                    finish_reason=request.finish_reason,
-                    prompt_tokens=request.prompt_len,
-                    completion_tokens=len(request.output_token_ids),
-                    logprobs=request.delta_logprobs,
-                    prompt_logprobs=(
-                        tuple(request.prompt_logprobs)
-                        if request.is_finished and request.prompt_logprobs is not None
-                        else None
-                    ),
-                )
-            )
+        if event.utility_output is not None:
+            self._apply_utility(event.utility_output)
+        for output in event.outputs:
+            stream = self._tracker.get(output.request_id)
+            if stream is not None:
+                stream.push_event(output)
 
-    def _fail(self, request_id: str, exc: BaseException) -> None:
-        stream = self._get_stream(request_id)
-        if stream is not None:
-            stream.finished = True
-            stream.push(exc)
+    def _apply_utility(self, output: UtilityEvent) -> None:
+        if output.failure_message is not None:
+            logger.warning("scheduler utility call failed: %s", output.failure_message)
+            return
+        result = output.result or {}
+        self._metrics.observe_load(int(result.get("running", 0)), int(result.get("waiting", 0)))
 
-    def _get_stream(self, request_id: str) -> _RequestStream | None:
-        """Look up a stream without putting a lock on the publish hot path."""
-        return self._stream_snapshot.get(request_id)
+    def _on_process_exit(self) -> None:
+        with self._lifecycle_lock:
+            if self._state is not _Lifecycle.RUNNING:
+                return
+        self._mark_failed(f"exited unexpectedly with code {self._process.exitcode}")
 
-    def _fail_all(self, exc: BaseException) -> None:
-        streams = list(self._stream_snapshot.values())
-        for stream in streams:
-            stream.finished = True
-            stream.push(exc)
+    def _mark_failed(self, message: str) -> None:
+        error = SchedulerProcessError(f"scheduler process failed: {message}")
+        with self._lifecycle_lock:
+            if self._state is not _Lifecycle.RUNNING:
+                return
+            self._state = _Lifecycle.FAILED
+            self._failure = error
+            self._stop_receiver.set()
+        logger.error("%s", error)
+        self._tracker.fail_all(error)
 
-    def _drop_everything(self) -> None:
-        """Abort every in-flight request after a step raised.
+    def _require_running(self) -> None:
+        if self._state is _Lifecycle.FAILED:
+            raise self._failure
+        if self._state is not _Lifecycle.RUNNING:
+            raise RuntimeError(f"AsyncLLMEngine is {self._state.value}")
 
-        Without this the loop would re-enter the same broken step forever, since
-        the requests that triggered it are still scheduled. Clearing them returns
-        the worker to idle so later requests get a clean engine.
-        """
-        for request in [*self._engine.planner.running, *self._engine.planner.waiting]:
-            try:
-                self._engine.abort(request.request_id)
-            except Exception:  # already on the failure path
-                logger.exception("failed to abort %s during recovery", request.request_id)
+    def _abort_launch(self) -> None:
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=_TERMINATE_GRACE_S)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join(timeout=_TERMINATE_GRACE_S)
+        self._close_channels()
+
+    def _join_process(self) -> None:
+        self._process.join(timeout=_JOIN_GRACE_S)
+        if self._process.is_alive():
+            logger.warning("scheduler process did not stop; terminating it")
+            self._process.terminate()
+            self._process.join(timeout=_TERMINATE_GRACE_S)
+        if self._process.is_alive():
+            logger.error("scheduler process ignored termination; killing it")
+            self._process.kill()
+            self._process.join(timeout=_TERMINATE_GRACE_S)
+
+    def _close_channels(self) -> None:
+        for channel in (self._commands, self._events):
+            with contextlib.suppress(Exception):
+                channel.close()
+                channel.join_thread()

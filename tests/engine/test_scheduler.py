@@ -11,20 +11,25 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
+import queue
+import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from rapid_llm.engine.async_engine import AsyncLLMEngine
 from rapid_llm.engine.sampler import PositionLogprobs, SamplingParams
 from rapid_llm.engine.scheduler import Scheduler, SchedulerConfig
+from rapid_llm.engine.scheduler_ipc import (
+    AddRequest,
+    RequestEvent,
+    SchedulerEvents,
+    ShutdownScheduler,
+)
 from rapid_llm.executor.worker import PassLogprobs
 
 _EOS = 2
 _WORD = 100  # any token id the stop set does not contain
-_TIMEOUT = 20.0
 
 
 class _FakeTokenizer:
@@ -85,10 +90,6 @@ def _build_engine(rows: list[list[int]]) -> Scheduler:
         SchedulerConfig(max_seq_len=64, max_num_seqs=4),
         executor=_ScriptedExecutor(rows),
     )
-
-
-async def _collect(engine: AsyncLLMEngine, prompt: str) -> list:
-    return [chunk async for chunk in engine.generate(prompt)]
 
 
 def test_dpa_lockstep_fills_missing_local_forwards(monkeypatch):
@@ -190,22 +191,35 @@ def test_generated_request_ids_skip_user_supplied_ids():
     engine.shutdown()
 
 
-async def test_an_eos_request_does_not_strand_its_stream():
-    """Same regression, through the async front end: the stream must hear it.
-
-    The worker publishes only what step() returns, so a finish missing from
-    that list leaves the awaiting coroutine blocked on a final chunk that
-    never arrives — a hang, not an error, invisible until a request just
-    stops responding. The wait_for turns that hang into a test failure.
-    """
+def test_an_eos_request_does_not_strand_the_process_event_loop():
+    """The terminal event must cross the process boundary even without a token."""
     engine = _build_engine([[_WORD], [_EOS]])
-    async with AsyncLLMEngine(engine) as async_engine:
-        chunks = await asyncio.wait_for(_collect(async_engine, "hi"), _TIMEOUT)
+    commands: queue.Queue = queue.Queue()
+    events: queue.Queue = queue.Queue()
+    worker = threading.Thread(target=engine.run_event_loop, args=(commands, events))
+    worker.start()
+    commands.put(
+        AddRequest(
+            request_id="streamed",
+            prompt_token_ids=(10, 11, 12),
+            sampling_params=SamplingParams(),
+            arrival_time=0.0,
+        )
+    )
 
-    assert chunks[-1].finish_reason == "eos"
-    assert chunks[-1].is_finished
-    assert all(chunk.finish_reason is None for chunk in chunks[:-1])
-    assert chunks[-1].text  # the prefill token still reached the caller
+    outputs: list[RequestEvent] = []
+    while not outputs or not outputs[-1].finished:
+        event = events.get(timeout=2.0)
+        if isinstance(event, SchedulerEvents):
+            outputs.extend(event.outputs)
+    commands.put(ShutdownScheduler())
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert outputs[-1].finish_reason == "eos"
+    assert outputs[-1].new_token_ids == ()
+    assert outputs[0].new_token_ids == (_WORD,)
+    engine.shutdown()
 
 
 def _record(token_id: int, logprob: float = -0.1) -> PositionLogprobs:
