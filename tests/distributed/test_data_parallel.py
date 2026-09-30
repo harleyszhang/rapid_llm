@@ -17,6 +17,7 @@ from rapid_llm.engine.scheduler_ipc import (
     PROTOCOL_VERSION,
     AbortRequest,
     AddRequest,
+    AddRequestBatch,
     ReplicaReady,
     RequestEvent,
     SchedulerEvents,
@@ -65,6 +66,14 @@ class _FakeQueue:
 
     def join_thread(self) -> None:
         pass
+
+
+class _FakeTokenizer:
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+        return [ord(char) for char in text]
+
+    def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str:
+        return "".join(chr(token_id) for token_id in token_ids)
 
 
 class _FakeProcess:
@@ -173,6 +182,51 @@ def test_round_robin_routes_typed_requests(controller_factory):
     controller.send(second)
     assert controller._command_queues[0].sent == [first]
     assert controller._command_queues[1].sent == [second]
+
+
+def test_batched_requests_are_grouped_into_one_command_per_replica(controller_factory):
+    controller = controller_factory(device="cpu")
+    requests = tuple(
+        AddRequest(f"r{index}", (index,), _GREEDY, time.monotonic()) for index in range(3)
+    )
+
+    controller.send(AddRequestBatch(requests))
+
+    first = controller._command_queues[0].sent
+    second = controller._command_queues[1].sent
+    assert first == [AddRequestBatch((requests[0], requests[2]))]
+    assert second == [AddRequestBatch((requests[1],))]
+
+
+def test_blocking_generate_requests_only_the_final_scheduler_event(controller_factory):
+    controller = controller_factory(device="cpu")
+    controller._tokenizer = _FakeTokenizer()
+    controller._event_queue.put(
+        SchedulerEvents(outputs=(RequestEvent("batch-0", (111, 107), finish_reason="length"),))
+    )
+
+    outputs = controller.generate("hi", _GREEDY)
+
+    batch = controller._command_queues[0].sent[0]
+    assert isinstance(batch, AddRequestBatch)
+    assert len(batch.requests) == 1
+    assert batch.requests[0].stream is False
+    assert outputs[0].text == "ok"
+
+
+def test_logprob_generation_keeps_incremental_scheduler_events(controller_factory):
+    controller = controller_factory(device="cpu")
+    controller._tokenizer = _FakeTokenizer()
+    controller._event_queue.put(
+        SchedulerEvents(outputs=(RequestEvent("batch-0", (111, 107), finish_reason="length"),))
+    )
+
+    controller.generate("hi", SamplingParams(logprobs=0))
+
+    batch = controller._command_queues[0].sent[0]
+    assert isinstance(batch, AddRequestBatch)
+    assert len(batch.requests) == 1
+    assert batch.requests[0].stream is True
 
 
 def test_dpa_request_wakes_every_idle_peer(controller_factory):

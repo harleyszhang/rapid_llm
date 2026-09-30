@@ -8,7 +8,7 @@ from typing import Any
 
 from .sampler import PositionLogprobs, SamplingParams
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,14 @@ class AddRequest:
     prompt_token_ids: tuple[int, ...]
     sampling_params: SamplingParams
     arrival_time: float
+    stream: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class AddRequestBatch:
+    """Submit requests atomically so one scheduling step sees the whole batch."""
+
+    requests: tuple[AddRequest, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +55,7 @@ class ShutdownScheduler:
 
 
 type SchedulerCommand = (
-    AddRequest | AbortRequest | UtilityRequest | WakeScheduler | ShutdownScheduler
+    AddRequest | AddRequestBatch | AbortRequest | UtilityRequest | WakeScheduler | ShutdownScheduler
 )
 
 

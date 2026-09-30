@@ -34,7 +34,7 @@ if __name__ == "__main__":
 | 负载均衡策略 | `RoundRobinPolicy` / `RequestCountPolicy` / `TokenCountPolicy` / `CacheAwarePolicy` | 按请求选择 replica，并按 request id 精确回收负载 |
 | 协调器 | `DataParallelController` | 拉起 DP × TP 网格、路由命令、汇聚事件并回收资源 |
 
-**一套 typed 协议，一种执行模型。** 同步 `generate()` 与在线服务都发送 `AddRequest` / `AbortRequest`，副本统一返回 `SchedulerEvents`；启动、失败和停止也分别使用 typed event/command。同步接口只是 controller 上的阻塞 facade，在线接口由 `AsyncLLMEngine` 的 request manager 消费同一事件流，不再有另一套 batch 消息或 DP 专属异步引擎。
+**一套 typed 协议，一种执行模型。** 在线服务发送 `AddRequest` / `AbortRequest`；同步 `generate()` 用 `AddRequestBatch` 将同一批请求原子投递到各副本，避免进程队列的到达时序把它拆成多个 admission wave。两者都进入相同的 Scheduler 请求路径并统一返回 `SchedulerEvents`；阻塞调用只需终态事件，流式调用则接收逐 token 事件。启动、失败和停止也分别使用 typed event/command。同步接口只是 controller 上的阻塞 facade，在线接口由 `AsyncLLMEngine` 的 request manager 消费同一事件流，不再有另一套执行模型或 DP 专属异步引擎。
 
 - **rank process**（`_run_replica_process`）是网格里的**一个 cell**，不是一个副本：spawn 子进程按 `global_rank` 绑卡，再按副本内位置分化。
   - **leader**（`tp_rank == 0`）构造常驻 `Scheduler` 并直接运行 `run_event_loop()`。请求可以逐条加入，完成的序列下一步释放 slot；空闲时阻塞等待命令，不空转 CPU。
