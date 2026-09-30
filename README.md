@@ -20,10 +20,11 @@
 
 <pre>
 <b>Acceleration Features</b>
-        ✅ Flash Attention       ✅ CUDA Graph Optimize    ✅ Chunked Prefill          ✅ Prefix Caching
+        ✅ Flash Attention3      ✅ CUDA Graph Optimize    ✅ Chunked Prefill          ✅ Prefix Caching
         ✅ W8A16 (FP8/INT8)      ✅ W4A16 (AWQ/GPTQ)       ✅ SmoothQuant W8A8         ✅ FP8 KV Cache (2×)
         ✅ NVFP4 Weight-Only     ✅ FP8 W8A8 Fused MoE     ✅ TP + CUDA Graph          ✅ DP + CUDA Graph
         ✅ Kernel Autotune       ✅ Fused MoE              ✅ Tensor Parallel          ✅ Data Parallel
+        ✅ DP Attention + EP
         ✅ Comm-Compute Overlap  ✅ Tile-Signaling         ✅ DeepSeek V4 (mHC)        ✅ N-gram Speculative Decoding
 
 <b>Framework Design</b>
@@ -43,6 +44,7 @@ The model registry includes LLaMA, Qwen2, Qwen3, Qwen3-MoE, LLaVA, Qwen3-VL, and
 | Tensor parallelism | Shards projections, attention heads, and the vocabulary across ranks |
 | Expert parallelism | Assigns whole MoE experts within the TP group and routes tokens with all-to-all |
 | Data parallelism | Routes requests between independent replicas; can combine with TP |
+| Data Parallelism Attention | Keeps Attention/KV replica-local and pools MoE tokens over the DP × TP expert grid; eager mode only |
 | CPU parallelism | Uses Gloo; select `device="cpu"` |
 | CUDA Graph | Captures supported decode shapes; requires matching choices across TP ranks |
 | Quantization | Weight-only INT8/FP8/INT4 and GPU-specific formats; support varies by backend |
@@ -160,6 +162,9 @@ GPU benchmark results are workload-specific. Hardware, batch shape, prompt lengt
 - [Model benchmarks](docs/benchmark_models.md) and [evaluation](docs/eval_models.md)
 - [Quantization](docs/quantization.md) and [recorded quantization matrix](docs/benchmark_logs/quantization/quant_matrix_20260901.md)
 - [Overlap experiments](docs/release-v0.11.5.md) and [later kernel changes](docs/release-v0.12.0.md)
+- [Data Parallelism Attention](docs/data_parallel.md#data-parallelism-attentiondpa), including usage, constraints, and a recorded 4× H100 run
+
+Recorded DPA run: Qwen3-30B-A3B-Instruct-2507-FP8, eager greedy generation, balanced batch 16, 16 output tokens. `local1` measured 320.3 TPS; `dpa2` measured 196.0 TPS with AgRs and 168.0 TPS with padded all-to-all; `dpa2x2` measured 164.2 and 155.1 TPS respectively. The run also passed idle-replica and uneven-prefill lockstep scenarios. See the [full environment, methodology, and results](docs/data_parallel.md#dpa-四卡实测2026-09-30); this workload is communication-bound and does not demonstrate throughput scaling.
 
 Release notes and benchmark logs describe the revision and environment measured at the time. They are not the current API reference or a guarantee of speedup on another device.
 

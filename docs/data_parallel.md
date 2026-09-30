@@ -71,6 +71,103 @@ CUDA 的 TP 数据面使用 NCCL，CPU 使用 Gloo；控制面使用 Gloo。下�
 
 这条网格约束在 CPU 上就能断言，不需要四张卡：把 `mp.get_context` 换成假的进程/队列，直接检查 4 个 cell 的 `(global_rank, dp_rank, tp_rank)`（`test_dp_times_tp_spawns_one_process_per_grid_cell`）以及一个副本的两个 rank 拿到的是**同一个**队列对象（`test_a_replica_shares_one_queue_across_its_ranks`）。
 
+## Data Parallelism Attention（DPA）
+
+DPA 改变 DP 轴的含义：每个 DP rank 仍独占请求、Attention 和 KV cache，但 MoE experts 在完整的 `DP × TP` 网格上切分。一次 MoE forward 会先汇聚各 replica 的 token，运行全局专家分片，再把结果规约回请求所属的 replica。这样 KV 容量随 DP rank 数增长，Attention 不为别的 replica 读取 KV，同时专家权重不必在每个 replica 上完整复制。
+
+```python
+from rapid_llm import DataParallelEngine, SamplingParams
+
+with DataParallelEngine(
+    "/path/to/moe-checkpoint",
+    data_parallel_size=2,
+    tensor_parallel_size=1,
+    enable_expert_parallel=True,
+    enable_dp_attention=True,
+    use_cuda_graph=False,
+) as engine:
+    outputs = engine.generate(
+        ["The capital of France is", "Explain MoE routing"],
+        SamplingParams(temperature=0.0, max_gen_len=32),
+    )
+```
+
+服务入口使用同一组参数：
+
+```bash
+rapid-llm serve /path/to/moe-checkpoint \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --enable-dp-attention \
+    --no-cuda-graph
+```
+
+默认交换后端是 AgRs（ragged all-gather + reduce-scatter），只对真实 token 行运行专家；设置 `RAPID_MOE_A2A_BACKEND=all_to_all` 可切到带 padding 的 a2a 矩形池做 A/B。每个本地 scheduler 独立决定 prefill/decode pass，因此引擎先协调本 step 的最大 forward 数；较早完成或完全空闲的 replica 用 dummy forward 补齐，仍以相同顺序进入 MoE collective。任意请求到达时协调器也会唤醒其他 replica，避免请求倾斜导致 collective 等不到参与者。
+
+当前组合矩阵：
+
+| 组合 | 状态 | 原因 |
+| --- | --- | --- |
+| DPA + EP | 支持且必需 | experts 才有跨 DP 网格切分与汇聚对象 |
+| DPA + TP | 支持 | 每个 replica 内 TP；EP group 扩展到完整网格 |
+| DPA + AgRs / a2a | 支持 | AgRs 默认，a2a 用于对照 |
+| DPA + CUDA Graph | 暂不支持 | ragged step 几何与跨 replica 锁步尚未纳入捕获契约 |
+| DPA + speculative decoding | 暂不支持 | 每 step 的 forward 数和验证 pass 尚未纳入锁步协议 |
+| DPA + Sequence Parallelism | 暂不支持 | 两者都会在 MoE 前重分 token 轴 |
+| DPA + process engine backend | 暂不支持 | 服务端需使用 `engine_backend="thread"` 的 DP 协调器 |
+
+回归与真实 checkpoint 门禁：
+
+```bash
+pytest tests/distributed/test_dp_attention.py \
+    tests/distributed/test_data_parallel.py \
+    tests/engine/test_continuous_engine.py -q
+RAPID_LLM_TEST_DPA_DIR=/path/to/moe-checkpoint \
+    pytest tests/distributed/test_dp_attention_engine.py -q
+RAPID_MOE_A2A_BACKEND=all_to_all \
+    RAPID_LLM_TEST_DPA_DIR=/path/to/moe-checkpoint \
+    pytest tests/distributed/test_dp_attention_engine.py -q
+```
+
+性能脚本同时报告 TPS、TGS、相对单 rank 的 scaling efficiency、同步与通信的端到端开销，以及输出一致率；`balanced`、`idle`、`uneven` 三种场景分别覆盖均衡请求、空闲 replica 和不等长 chunked prefill：
+
+```bash
+python benchmarks/parallelism/bench_dp_attention.py \
+    --model /path/to/moe-checkpoint \
+    --arms local1,ep2,dpa2,dpa2x2 \
+    --backends agrs,a2a
+```
+
+### DPA 四卡实测（2026-09-30）
+
+Qwen3-30B-A3B-Instruct-2507-FP8，4× NVIDIA H100 80GB HBM3（GPU 间 NV18），CUDA 12.8，Torch `2.7.0a0+7c8ec84dab.nv25.03`，Triton 3.2.0。离线 eager greedy，`max_gen_len=16`，每组 1 次计时；因此数据用于记录功能与通信代价，不代表稳定态容量规划。
+
+`balanced` 固定总 batch=16，是 strong-scaling 口径：
+
+| 配置 | ranks | 延迟 | TPS | TGS | 效率 | sync+comm | exact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| local1 | 1 | 0.799 s | 320.3 | 320.3 | 100.0% | 0.0% | 16/16 |
+| ep2 | 2 | 1.530 s | 167.3 | 83.6 | 26.1% | 73.9% | 10/16 |
+| dpa2 / AgRs | 2 | 1.306 s | 196.0 | 98.0 | 30.6% | 69.4% | 14/16 |
+| dpa2 / a2a | 2 | 1.524 s | 168.0 | 84.0 | 26.2% | 73.8% | 12/16 |
+| dpa2x2 / AgRs | 4 | 1.559 s | 164.2 | 41.0 | 12.8% | 87.2% | 12/16 |
+| dpa2x2 / a2a | 4 | 1.651 s | 155.1 | 38.8 | 12.1% | 87.9% | 12/16 |
+
+请求倾斜场景确认空闲 replica 与不等长 chunked prefill 不会卡住 collective：
+
+| 配置 | idle TPS / exact | uneven TPS / exact |
+| --- | ---: | ---: |
+| local1 | 20.42 / 1/1 | 23.10 / 2/2 |
+| ep2 | 11.18 / 1/1 | 12.65 / 1/2 |
+| dpa2 / AgRs | 12.72 / 1/1 | 18.53 / 1/2 |
+| dpa2 / a2a | 11.10 / 1/1 | 16.22 / 1/2 |
+| dpa2x2 / AgRs | 10.78 / 1/1 | 15.72 / 1/2 |
+| dpa2x2 / a2a | 9.82 / 1/1 | 14.92 / 1/2 |
+
+`exact` 的参考不是 local1 整批输出，而是 local1 按相同 round-robin replica 子 batch 重放后恢复请求顺序；这排除了 batch 宽度变化。FP8/TP/collective 的累加顺序仍可能让近似并列 token 分叉，所以真实 checkpoint 门禁另外检查首个分叉的参考 top-2 gap ≤ 0.5 nat，并要求至少 2/3 生成 token 完全一致；AgRs 与 a2a 均通过。完整环境、输出与原始结果见 [`dp_attention_Qwen3-30B-A3B-Instruct-2507-FP8_20260930_120030.json`](./benchmark_logs/parallel/dp_attention_Qwen3-30B-A3B-Instruct-2507-FP8_20260930_120030.json)。
+
+该 workload 下，DPA 没有带来吞吐扩展：collective、跨 replica 锁步与协调器 IPC 占据 69%–88% 的理想线性吞吐预算。AgRs 在所有 DPA 行均快于带 padding 的 a2a；DPA 的收益在这里是 Attention/KV replica 本地化和 expert 权重跨网格切分，而不是小输出长度下的加速。
+
 ## 实测数据
 
 以下是早期 GPU 测量记录，保留用于复现比较，不代表当前版本或 CPU 的扩展效率。

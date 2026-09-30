@@ -161,11 +161,11 @@ Qwen3-30B-A3B-Instruct-2507-FP8（48 层 × 128 专家 × top-8，专家宽 768�
 本页的负结果**不能**外推到生产部署——生产推荐 EP 的前提，本测试一个都没占：
 
 1. **TP 出不了 NVLink 域**。V3/R1 671B 的 FP8 权重约 685 GB，8×H100（640 GB）放不下，最小部署 8×H200 或 2×8×H100 起步，必然跨节点；TP 每层两次 all-reduce 不能跨 IB，专家只能按 EP 分出去。本测试两张卡在同一 NVLink 域内，这条从未被触发。
-2. **生产拓扑是 DP-attention + EP，不是纯 EP**。MLA 的压缩 KV（576/层）按 token 共享、无法按注意力头切分，TP 下每个 rank 都要存全批 token 的 KV；DP-attention 把请求分给各 rank（MLA 注意力权重 ~4 GB FP8，复制得起），KV 容量 ×N，还顺手消掉 attention 的 all-reduce。本实现是纯 EP（attention 仍走 TP）——ep2 剩下的 6272 次 all-reduce 就是那一半。DP-attention 的交换面已在库面就位（DP 组、region 与默认的 AgRs 池化——TP>1 的 no-SP 适配见上文五阶段段），差引擎侧把 region 接进 step 循环，KV 容量 ×N 与 attention all-reduce 的消失才进实测。
+2. **生产拓扑是 DP-attention + EP，不是纯 EP**。MLA 的压缩 KV（576/层）按 token 共享、无法按注意力头切分，TP 下每个 rank 都要存全批 token 的 KV；DP-attention 把请求分给各 rank（MLA 注意力权重 ~4 GB FP8，复制得起），KV 容量 ×N，还顺手消掉 attention 的 all-reduce。本实现已把 DPA 接入常驻 DP scheduler：每个 replica 保持本地 Attention/KV，MoE region 在完整 `DP × TP` 网格上汇聚 token；forward-count 握手与 dummy pass 让空闲或较早完成的 replica 继续参加 collective。`docs/data_parallel.md` 给出公开配置、限制矩阵、真实 checkpoint 门禁和 benchmark 命令。
 3. **交换按需，不按最坏**。DeepEP 的 dispatch 把每个 token 去重后发给实际命中的 ~E[distinct] 个目的（top-8、ep=8 时约 5.25 份），LL 模式还允许溢出丢弃换紧凑容量；本实现默认容量预留线上恒为 `top_k×ep_size` 份——ep=2 时 16 份 vs 需要 ~2 份，ep=8 时 64 份 vs ~5.25，ep=32 时 256 份 vs ~8。本次重构已落下可选的均值+松弛容量（`RAPID_EP_CAPACITY_FACTOR`，DeepEP-LL 定容式 + 标准丢弃语义）+ WARN/STRICT 可见性开关，但默认关，两层原因：ep=2 真实偏斜大（热层 1.58x，factor=1.25 会丢 16% token）；且本机 NVLink 上 a2a 消息太小（decode 0.85-1.0 MB），带宽节省 ~0.1µs/层被集合通信延迟地板淹没，graph 捕获下 NCCL 对更小消息的算法选择反而让 bs16-2k 慢 4%（A/B 交替复现，丢弃率实测仅 0.42% 且 parity 全过）——**容量压缩的收益边界在高 ep_size/大 batch/带宽受限互联**，不在本机这种低延迟双卡拓扑。真正的解法仍是 DeepEP 那样的**去重发送**（而非单纯缩容量）。**wire 随 rank 数线性变差**：不改这条，规模化也兑现不了 EP 的字节优势。
 4. **传输栈**。DeepEP 用 NVSHMEM/RDMA、把排列折进拷贝、单次交换几十 μs；本实现是 NCCL `all_to_all_single` + 独立的 sort/searchsorted/scatter kernel。bs16 下每层 EP 通信路径与 TP 的差值实测 96 μs，而同规模消息在 NVLink 上的线时间 ≈1 μs——差值几乎全是延迟与发射，不是带宽。
 
-结论：rapid_llm 的 EP **正确但 baseline 级**——数值（tie-gap 门禁）、graph 捕获、无损路由都过关；差距是三件事：拓扑配对（DP-attention）、按需交换（去重/动态容量）、融合传输。其中拓扑配对的交换面已经落地——DP-attention 网格与 region 握手在 `distributed/`，MoE 在 region 激活时默认 AgRs（见上文五阶段段），剩下引擎侧接线；按需交换与融合传输仍是把 EP 从"正确性路径"变成"性能路径"的先决条件。
+结论：rapid_llm 的 EP **正确但 baseline 级**——数值（tie-gap 门禁）、graph 捕获、无损路由都过关；差距是拓扑配对、按需交换和融合传输三件事。DPA 已完成拓扑配对与引擎锁步接线：DP group、region 握手、默认 AgRs、空闲 replica dummy forward 和服务端公开配置均已落地；按需交换与融合传输仍是把 EP 从“正确性路径”变成“性能路径”的后续优化方向。
 
 ### MoE all-reduce 确实没了，但换来的更贵
 
