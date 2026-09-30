@@ -50,6 +50,7 @@ class _ScriptedExecutor:
     def __init__(self, rows: list[list[int]]) -> None:
         self._rows = rows
         self._calls = 0
+        self.dummy_calls = 0
         self.num_slots = 4
         # 0 means "cannot say": the scheduler then sizes its block pool from the
         # slot geometry, which is what a fake with no real cache wants.
@@ -60,6 +61,9 @@ class _ScriptedExecutor:
         self._calls += 1
         width = len(plan.sampling)
         return torch.tensor((row * width)[:width]), None
+
+    def execute_dummy(self) -> None:
+        self.dummy_calls += 1
 
     def shutdown(self) -> None:
         pass
@@ -86,6 +90,47 @@ def _build_engine(rows: list[list[int]]) -> ContinuousBatchingEngine:
 
 async def _collect(engine: AsyncLLMEngine, prompt: str) -> list:
     return [chunk async for chunk in engine.generate(prompt)]
+
+
+def test_dpa_lockstep_fills_missing_local_forwards(monkeypatch):
+    """A replica with one pass executes dummies up to the grid-wide maximum."""
+    from rapid_llm.engine import continuous_engine as continuous_module
+
+    engine = _build_engine([[_WORD]])
+    executor = engine._executor
+    engine.add_request("hi")
+    monkeypatch.setattr(continuous_module, "coordinate_forward_count_across_dp", lambda local: 3)
+
+    engine.step()
+
+    assert executor._calls == 1
+    assert executor.dummy_calls == 2
+    engine.shutdown()
+
+
+def test_idle_dpa_scheduler_still_executes_a_dummy_forward(monkeypatch):
+    """No local request is still one collective participant when a peer is busy."""
+    from rapid_llm.engine import continuous_engine as continuous_module
+
+    monkeypatch.setattr(continuous_module, "dp_attention_enabled", lambda: True)
+    monkeypatch.setattr(continuous_module, "coordinate_forward_count_across_dp", lambda local: 1)
+    engine = _build_engine([[_WORD]])
+    executor = engine._executor
+
+    assert engine.step() == []
+    assert executor._calls == 0
+    assert executor.dummy_calls == 1
+    engine.shutdown()
+
+
+def test_empty_non_dpa_step_does_not_execute_a_forward():
+    engine = _build_engine([[_WORD]])
+    executor = engine._executor
+
+    assert engine.step() == []
+    assert executor._calls == 0
+    assert executor.dummy_calls == 0
+    engine.shutdown()
 
 
 def test_a_request_stopping_on_eos_is_returned_by_step():

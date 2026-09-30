@@ -74,6 +74,31 @@ def test_unknown_load_balancer_is_rejected():
         DataParallelEngine(model="unused", data_parallel_size=1, load_balancer="magic")
 
 
+def test_dp_attention_requires_multiple_replicas():
+    with pytest.raises(ValueError, match="data_parallel_size > 1"):
+        DataParallelEngine(model="unused", enable_dp_attention=True)
+
+
+def test_dp_attention_requires_expert_parallelism():
+    with pytest.raises(ValueError, match="enable_expert_parallel=True"):
+        DataParallelEngine(
+            model="unused",
+            data_parallel_size=2,
+            enable_dp_attention=True,
+            use_cuda_graph=False,
+        )
+
+
+def test_dp_attention_requires_eager_mode():
+    with pytest.raises(ValueError, match="does not support CUDA Graph"):
+        DataParallelEngine(
+            model="unused",
+            data_parallel_size=2,
+            enable_dp_attention=True,
+            enable_expert_parallel=True,
+        )
+
+
 def test_requesting_more_gpus_than_exist_is_rejected(monkeypatch: pytest.MonkeyPatch):
     """The count is checked up front, not discovered by a worker failing to start."""
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
@@ -267,6 +292,7 @@ class _FakeQueue:
 #: from the signature rather than written down: this test is about *which* queue each
 #: rank gets, and a hard-coded index turns any new worker argument into a failure here.
 _REQUEST_QUEUE_ARG = list(inspect.signature(_dp_worker).parameters).index("request_queue")
+_ENABLE_DPA_ARG = list(inspect.signature(_dp_worker).parameters).index("enable_dp_attention")
 
 
 class _FakeProcess:
@@ -290,6 +316,45 @@ class _FakeProcess:
 
     def terminate(self) -> None:
         self._alive = False
+
+
+def test_dp_attention_flag_reaches_every_grid_cell(monkeypatch: pytest.MonkeyPatch):
+    """Every rank must build the widened EP/DP groups from the same DPA flag."""
+    from rapid_llm.engine import data_parallel as dp_module
+
+    _FakeProcess.spawned = []
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    monkeypatch.setattr(
+        dp_module.mp,
+        "get_context",
+        lambda method: type("_Ctx", (), {"Queue": _FakeQueue, "Process": _FakeProcess})(),
+    )
+
+    engine = DataParallelEngine(
+        model="unused",
+        data_parallel_size=2,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_dp_attention=True,
+        use_cuda_graph=False,
+    )
+
+    assert [args[_ENABLE_DPA_ARG] for args in _FakeProcess.spawned] == [True] * 4
+    engine.shutdown()
+
+
+def test_dpa_wake_reaches_idle_peer_queues():
+    """One routed request wakes every peer that must join its collectives."""
+    engine = object.__new__(DataParallelEngine)
+    engine.enable_dp_attention = True
+    engine._closed = True
+    engine._request_queues = [_FakeQueue(), _FakeQueue(), _FakeQueue()]
+
+    engine._send_with_dpa_wake(1, ("add", "r1", "prompt", _GREEDY))
+
+    assert engine._request_queues[0].items == [("wake",)]
+    assert engine._request_queues[1].items == [("add", "r1", "prompt", _GREEDY)]
+    assert engine._request_queues[2].items == [("wake",)]
 
 
 def test_dp_times_tp_spawns_one_process_per_grid_cell(monkeypatch: pytest.MonkeyPatch):
@@ -427,11 +492,22 @@ class _LoopEngine:
         self.running = [r for r in self.running if r.request_id != request_id]
 
 
-def _loop(engine: _LoopEngine, *messages) -> tuple[_ReplicaLoop, _LoopQueue, _LoopQueue]:
+def _loop(
+    engine: _LoopEngine, *messages, enable_dp_attention: bool = False
+) -> tuple[_ReplicaLoop, _LoopQueue, _LoopQueue]:
     """A loop wired to pre-queued messages plus the stop signal, and its two queues."""
     requests = _LoopQueue([*messages, _SHUTDOWN])
     results = _LoopQueue()
-    return _ReplicaLoop(engine, requests, results), requests, results
+    return (
+        _ReplicaLoop(
+            engine,
+            requests,
+            results,
+            enable_dp_attention=enable_dp_attention,
+        ),
+        requests,
+        results,
+    )
 
 
 def test_a_finished_batch_is_reported_once_with_every_index():
@@ -448,10 +524,13 @@ def test_a_finished_batch_is_reported_once_with_every_index():
     assert len(results.items) == 1
     kind, batch_id, payload = results.items[0]
     assert (kind, batch_id) == ("done", 0)
-    assert {index: (text, reason) for index, text, reason in payload} == {
+    completions, prompt_logprobs = payload
+    assert {index: (text, reason) for index, text, reason, _ in completions} == {
         3: ("xx", "eos"),
         1: ("xx", "eos"),
     }
+    assert all(logprobs is None for *_head, logprobs in completions)
+    assert prompt_logprobs == {3: None, 1: None}
 
 
 def test_a_batch_waits_for_its_slowest_request():
@@ -478,7 +557,9 @@ def test_a_batch_waits_for_its_slowest_request():
     requests.put(_SHUTDOWN)
     loop.run()
     assert len(results.items) == 1
-    assert len(results.items[0][2]) == 2
+    completions, prompt_logprobs = results.items[0][2]
+    assert len(completions) == 2
+    assert prompt_logprobs == {0: None, 1: None}
 
 
 def test_the_loop_blocks_when_idle_and_polls_when_busy():
@@ -495,6 +576,35 @@ def test_the_loop_blocks_when_idle_and_polls_when_busy():
 
     assert requests.gets[0] is True  # idle: waited for the dispatch
     assert not any(requests.gets[1:])  # busy: never waited again
+
+
+def test_idle_dpa_replica_keeps_stepping_while_a_peer_is_active(monkeypatch):
+    """A locally drained replica must not block before the next global handshake."""
+    from rapid_llm.engine import data_parallel as dp_module
+
+    active = iter((1, 1, 0))
+    monkeypatch.setattr(
+        dp_module,
+        "coordinate_forward_count_across_dp",
+        lambda local: next(active),
+    )
+    requests = _LoopQueue([("batch", 0, [0], ["a"], _GREEDY)])
+    results = _LoopQueue()
+    engine = _LoopEngine(tokens={"a": 1})
+    engine._after_step = lambda step: requests.put(_SHUTDOWN) if step == 2 else None
+    loop = _ReplicaLoop(
+        engine,
+        requests,
+        results,
+        enable_dp_attention=True,
+    )
+
+    loop.run()
+
+    assert engine.steps == 2, "the second step is the idle replica's lockstep pass"
+    assert requests.gets[0] is True
+    assert not any(requests.gets[1:]), "an active DPA epoch must only poll its queue"
+    assert results.items[0][0] == "done"
 
 
 def test_a_stop_signal_mid_batch_still_answers_it():
@@ -672,7 +782,9 @@ def test_batched_and_streamed_work_share_one_loop_without_confusion():
     dones = [message for message in results.items if message[0] == "done"]
     assert len(dones) == 1
     assert dones[0][1] == 0
-    assert dones[0][2] == [(0, "xx", "eos")], "the streamed prompt is not a batch member"
+    completions, prompt_logprobs = dones[0][2]
+    assert completions == [(0, "xx", "eos", None)], "the streamed prompt is not a batch member"
+    assert prompt_logprobs == {0: None}
     assert [message[0] for message in results.items if message[1] == "solo"] == [
         "delta",
         "finished",

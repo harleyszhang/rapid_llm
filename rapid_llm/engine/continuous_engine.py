@@ -29,7 +29,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
+from ..distributed.dp_attention import coordinate_forward_count_across_dp
 from ..distributed.parallel_state import (
+    dp_attention_enabled,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -356,6 +358,11 @@ class ContinuousBatchingEngine:
         # verify pass adds a forward per step and only pays off when the
         # workload has repetitive structure (code, repeated templates).
         self._speculate = os.environ.get(_SPECULATE_ENV, "0").strip().lower() in ("1", "true", "on")
+        if self._speculate and dp_attention_enabled():
+            raise ValueError(
+                "DP attention does not support speculative decoding yet: verify passes "
+                "must be coordinated across DP replicas"
+            )
         self._proposer = NgramProposer(max_ngram_size=5, max_draft=6) if self._speculate else None
         # O10 background tokenize: pool created on first use, jobs collected at
         # the top of every step (same thread that calls add_request, so the
@@ -793,7 +800,7 @@ class ContinuousBatchingEngine:
           simply rides the same depth-late harvest without extra cost.
         """
         scheduled = self.scheduler.schedule()
-        if scheduled.is_empty and not self._inflight:
+        if scheduled.is_empty and not self._inflight and not dp_attention_enabled():
             return []
 
         self._step_count += 1
@@ -820,10 +827,7 @@ class ContinuousBatchingEngine:
         # Launch only: no token is read back here. The readback rides the
         # executor's copy stream behind the pass that produced it, and its
         # event is honoured one step later.
-        staged: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
-        for work_item in work:
-            tokens, logprobs = self._executor.execute(work_item.plan)
-            staged.append((work_item, tokens, logprobs))
+        staged = self._execute_lockstep(work)
 
         advanced: list[Request] = []
         # Harvest the oldest in-flight tokens *before* this step's readbacks
@@ -886,11 +890,26 @@ class ContinuousBatchingEngine:
         self.metrics.observe_load(self.scheduler.num_running, self.scheduler.num_waiting)
         return advanced
 
+    def _execute_lockstep(
+        self, work: list[_Work]
+    ) -> list[tuple[_Work, torch.Tensor, PassLogprobs | None]]:
+        """Execute local passes and fill missing DPA passes with inert forwards."""
+        target = coordinate_forward_count_across_dp(len(work))
+        completed: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
+        for index in range(target):
+            if index >= len(work):
+                self._executor.execute_dummy()
+                continue
+            work_item = work[index]
+            tokens, logprobs = self._executor.execute(work_item.plan)
+            completed.append((work_item, tokens, logprobs))
+        return completed
+
     @torch.inference_mode()
     def _step_synchronous(self) -> list[Request]:
         """Plan, execute, and harvest in one step — the synchronous loop."""
         scheduled = self.scheduler.schedule()
-        if scheduled.is_empty:
+        if scheduled.is_empty and not dp_attention_enabled():
             return []
 
         self._step_count += 1
@@ -924,10 +943,7 @@ class ContinuousBatchingEngine:
         # are slot-disjoint, so one synchronisation per step suffices, and a
         # later pass's input prep rides the copy stream while an earlier pass's
         # forward is still on the GPU (the L1 overlap site).
-        pending: list[tuple[_Work, torch.Tensor, PassLogprobs | None]] = []
-        for work_item in work:
-            tokens, logprobs = self._executor.execute(work_item.plan)
-            pending.append((work_item, tokens, logprobs))
+        pending = self._execute_lockstep(work)
 
         emitted: list[tuple[Request, int, PositionLogprobs | None]] = []
         for work_item, tokens, logprobs in pending:

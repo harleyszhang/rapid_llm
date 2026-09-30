@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
 import time
 import traceback
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch.multiprocessing as mp
 
+from ..distributed.dp_attention import coordinate_forward_count_across_dp
 from ..utils.logger import get_logger
 from .dp_load_balancer import LOAD_BALANCERS, make_load_balancer
 from .outputs import CompletionOutput, RequestOutput
@@ -82,15 +84,20 @@ class _ReplicaLoop:
         engine: ContinuousBatchingEngine,
         requests: mp.Queue,
         results: mp.Queue,
+        *,
+        enable_dp_attention: bool = False,
     ) -> None:
         self._engine = engine
         self._requests = requests
         self._results = results
+        self._enable_dp_attention = enable_dp_attention
         self._batch_of: dict[str, tuple[int, int]] = {}
         self._solo: set[str] = set()
         self._live: dict[str, Any] = {}
         self._left: dict[int, int] = {}
-        self._answers: dict[int, list[tuple[int, str, str | None]]] = {}
+        self._answers: dict[
+            int, tuple[list[tuple[int, str, str | None, list | None]], dict[int, list | None]]
+        ] = {}
 
     def run(self) -> None:
         """Serve until the coordinator sends :data:`_SHUTDOWN` and the work drains.
@@ -99,6 +106,9 @@ class _ReplicaLoop:
         requests already in flight are worth the steps they have already cost, and
         the coordinator is waiting for their answers.
         """
+        if self._enable_dp_attention:
+            self._run_dp_attention()
+            return
         stopping = False
         while True:
             idle = not self._engine.has_unfinished_requests()
@@ -108,6 +118,27 @@ class _ReplicaLoop:
                 stopping = self._take_arrivals(block=idle)
             if self._engine.has_unfinished_requests():
                 self._step()
+
+    def _run_dp_attention(self) -> None:
+        """Keep every DPA scheduler in lockstep until the global batch drains."""
+        stopping = False
+        globally_active = False
+        while True:
+            if not stopping:
+                # All replicas may sleep only between global batches. Once any
+                # replica has work, an idle peer must keep polling and entering
+                # the coordination collective until the whole grid drains.
+                stopping = self._take_arrivals(
+                    block=not globally_active and not self._engine.has_unfinished_requests()
+                )
+            local_active = int(self._engine.has_unfinished_requests())
+            globally_active = coordinate_forward_count_across_dp(local_active) > 0
+            if globally_active:
+                # An idle local scheduler still enters step(); its executor fills
+                # every peer forward with a dummy pass.
+                self._step()
+            elif stopping:
+                return
 
     def _take_arrivals(self, block: bool) -> bool:
         """Admit everything waiting on the queue; ``True`` if asked to stop.
@@ -135,13 +166,15 @@ class _ReplicaLoop:
             self._admit_one(message[1], message[2], message[3])
         elif kind == "abort":
             self._abort_one(message[1])
+        elif kind == "wake":
+            return
 
     def _admit_batch(
         self, batch_id: int, indices: list[int], prompts: list[str], params: SamplingParams
     ) -> None:
         """Turn one dispatched batch into engine requests, remembering who is who."""
         self._left[batch_id] = len(prompts)
-        self._answers[batch_id] = []
+        self._answers[batch_id] = ([], {})
         for index, prompt in zip(indices, prompts, strict=True):
             try:
                 request = self._engine.add_request(prompt, params)
@@ -229,7 +262,11 @@ class _ReplicaLoop:
                 self._forget(request_id)
                 continue
             batch_id, index = self._batch_of[request_id]
-            self._answers[batch_id].append((index, request.text, request.finish_reason))
+            completions, prompt_logprobs = self._answers[batch_id]
+            completions.append(
+                (index, request.text, request.finish_reason, request.output_logprobs)
+            )
+            prompt_logprobs[index] = request.prompt_logprobs
             self._forget(request_id)
             self._left[batch_id] -= 1
             if self._left[batch_id] == 0:
@@ -277,6 +314,7 @@ def _dp_worker(
     enable_prefix_cache: bool,
     prefix_cache_blocks: int | None,
     enable_preemption: bool,
+    enable_dp_attention: bool,
     request_queue: mp.Queue,
     result_queue: mp.Queue,
 ) -> None:
@@ -341,6 +379,7 @@ def _dp_worker(
             tp_size=tp_size,
             dp_size=dp_size,
             enable_expert_parallel=ep_enabled,
+            enable_dp_attention=enable_dp_attention,
             backend="gloo" if on_cpu else "nccl",
         )
         device = "cpu" if on_cpu else f"cuda:{global_rank}"
@@ -375,7 +414,12 @@ def _dp_worker(
         return
 
     try:
-        _ReplicaLoop(engine, request_queue, result_queue).run()
+        _ReplicaLoop(
+            engine,
+            request_queue,
+            result_queue,
+            enable_dp_attention=enable_dp_attention,
+        ).run()
     except Exception:
         _log.exception("replica %d engine loop failed", dp_rank)
     finally:
@@ -418,6 +462,9 @@ class DataParallelEngine:
             16-token blocks; ``None`` uses the profiled cache capacity.
         enable_preemption: Allow a replica's scheduler to evict and recompute
             decode work when its logical concurrency exceeds cache slots.
+        enable_dp_attention: Keep attention and KV cache local to each replica,
+            while pooling MoE tokens over the full ``DP x TP`` expert grid.
+            Requires more than one replica, expert parallelism, and eager mode.
         **engine_kwargs: Forwarded verbatim to each replica's :class:`LLM`
             (``max_seq_len``, ``quantization``, ``use_cuda_graph``, ...). ``device``
             is not accepted: it is derived from the replica's position in the grid.
@@ -441,6 +488,7 @@ class DataParallelEngine:
         enable_prefix_cache: bool = False,
         prefix_cache_blocks: int | None = None,
         enable_preemption: bool = False,
+        enable_dp_attention: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         import torch
@@ -457,6 +505,21 @@ class DataParallelEngine:
             raise ValueError(
                 f"unknown load_balancer {load_balancer!r}; choose from {LOAD_BALANCERS}"
             )
+        if enable_dp_attention:
+            if data_parallel_size <= 1:
+                raise ValueError("DP attention requires data_parallel_size > 1")
+            if not engine_kwargs.get("enable_expert_parallel", False):
+                raise ValueError("DP attention requires enable_expert_parallel=True")
+            if engine_kwargs.get("use_cuda_graph", True):
+                raise ValueError(
+                    "DP attention does not support CUDA Graph yet; set use_cuda_graph=False"
+                )
+            if os.environ.get("LITE_LLAMA_SPECULATE", "0").strip().lower() in (
+                "1",
+                "true",
+                "on",
+            ):
+                raise ValueError("DP attention does not support speculative decoding yet")
         needed = data_parallel_size * tensor_parallel_size
         visible = torch.cuda.device_count()
         if engine_kwargs.get("device") != "cpu" and needed > visible:
@@ -469,6 +532,7 @@ class DataParallelEngine:
         self.model = model
         self.data_parallel_size = data_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
+        self.enable_dp_attention = enable_dp_attention
         self.world_size = needed
         self._balancer = make_load_balancer(load_balancer, data_parallel_size)
         self._engine_kwargs = {
@@ -511,6 +575,7 @@ class DataParallelEngine:
                     enable_prefix_cache,
                     prefix_cache_blocks,
                     enable_preemption,
+                    enable_dp_attention,
                     self._request_queues[global_rank // tensor_parallel_size],
                     self._result_queue,
                 ),
@@ -701,6 +766,8 @@ class DataParallelEngine:
         dispatched = 0
         for replica, indices in enumerate(buckets):
             if not indices:
+                if self.enable_dp_attention:
+                    self._request_queues[replica].put(("wake",))
                 continue
             batch_id = self._next_batch_id
             self._next_batch_id += 1
@@ -710,6 +777,8 @@ class DataParallelEngine:
 
         texts: list[str | None] = [None] * len(prompts)
         reasons: list[str | None] = [None] * len(prompts)
+        output_logprobs: list[list | None] = [None] * len(prompts)
+        prompt_logprobs: list[list | None] = [None] * len(prompts)
         failure: RuntimeError | None = None
         for _ in range(dispatched):
             kind, batch_id, payload = self._await_message()
@@ -723,9 +792,12 @@ class DataParallelEngine:
                 continue
             if failure is not None:
                 continue  # a sibling's results; this call is failing anyway
-            for index, text, reason in payload:
+            completions, batch_prompt_logprobs = payload
+            for index, text, reason, logprobs in completions:
                 texts[index] = text
                 reasons[index] = reason
+                output_logprobs[index] = logprobs
+                prompt_logprobs[index] = batch_prompt_logprobs[index]
 
         # Every request on a replica is done, so let a load-aware balancer forget
         # them — subtracting the same estimate that was added. Runs on the error path
@@ -739,9 +811,28 @@ class DataParallelEngine:
             raise failure
 
         return [
-            RequestOutput(prompt=prompt, outputs=[CompletionOutput(0, text or "", reason)])
-            for prompt, text, reason in zip(prompts, texts, reasons, strict=True)
+            RequestOutput(
+                prompt=prompt,
+                outputs=[CompletionOutput(0, text or "", reason, logprobs)],
+                prompt_logprobs=prompt_records,
+            )
+            for prompt, text, reason, logprobs, prompt_records in zip(
+                prompts,
+                texts,
+                reasons,
+                output_logprobs,
+                prompt_logprobs,
+                strict=True,
+            )
         ]
+
+    def _send_with_dpa_wake(self, replica: int, message: tuple) -> None:
+        """Send one command and wake every peer that must join its DPA steps."""
+        self._request_queues[replica].put(message)
+        if self.enable_dp_attention:
+            for peer, request_queue in enumerate(self._request_queues):
+                if peer != replica:
+                    request_queue.put(("wake",))
 
     def shutdown(self) -> None:
         """Stop every replica and release its GPU memory. Idempotent.

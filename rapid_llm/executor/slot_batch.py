@@ -382,6 +382,11 @@ class SlotBatch:
         self._host_slots, self._host_lens = [], []
 
     @property
+    def dummy_slot(self) -> int:
+        """Slot backed by the reserved null block for lockstep dummy forwards."""
+        return self._filler_slot if self._filler_slot is not None else 0
+
+    @property
     def seq_lens(self) -> torch.Tensor:
         """Cache length per row of the batch last submitted (filler included, so
         shaped for the model call). A token at cache row ``seq_len - 1`` sits at

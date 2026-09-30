@@ -22,7 +22,9 @@ import torch
 
 from ..batch_overlap.overlap import OverlapPolicy, StreamPool, Timeline
 from ..batch_overlap.two_batch_overlap import tbo_policy
+from ..distributed.dp_attention import dp_attention_region
 from ..distributed.parallel_state import (
+    dp_attention_enabled,
     expert_parallel_enabled,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_broadcast,
@@ -255,6 +257,21 @@ class ModelWorker:
         """
         return self._execute_inner(model_input)
 
+    @torch.inference_mode()
+    def execute_dummy(self) -> None:
+        """Run one inert pass so an idle DPA replica reaches every MoE collective."""
+        plan = ModelInput(
+            kind=PassKind.EXTEND,
+            slots=(self._slot_batch.dummy_slot,),
+            seq_starts=(0,),
+            seq_lens=(1,),
+            tokens=(self._pad_id,),
+            sampling=(),
+            sampled=(),
+            gen_counts=(),
+        )
+        self._execute_inner(plan)
+
     def _execute_inner(
         self, model_input: ModelInput
     ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
@@ -262,7 +279,10 @@ class ModelWorker:
         # Install block tables before the forward (so rows have pages) but after
         # prepare (which only gathered entries for rows the plan names).
         self._slot_batch.write_block_tables(model_input.block_writes)
-        logits, prompt = self._forward(model_input, prepared)
+        # The prepared tensor includes graph/filler rows, which are real model
+        # rows and therefore the exact token count the MoE stage will flatten.
+        with dp_attention_region(prepared.input_ids.numel()):
+            logits, prompt = self._forward(model_input, prepared)
         all_logits: torch.Tensor | None = None
         if model_input.return_logits and logits is not None:
             # logits here is the sampled-row slice; for verify we need the
@@ -508,7 +528,8 @@ class ModelWorker:
             logits = self._runner.forward_maybe_tbo(
                 prepared.input_ids,
                 positions,
-                enable_tbo=tbo_policy().active(
+                enable_tbo=not dp_attention_enabled()
+                and tbo_policy().active(
                     world_size=get_tensor_model_parallel_world_size(),
                     rows=rows,
                     graph_active=False,

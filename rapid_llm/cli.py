@@ -506,6 +506,15 @@ class ServeCommand(CliCommand):
                 },
             ),
             CliOption(
+                "--enable-dp-attention",
+                {
+                    "action": "store_true",
+                    "help": "Replicate attention/KV cache per DP rank and shard MoE experts "
+                    "across the full DP x TP grid (requires --enable-expert-parallel and "
+                    "--no-cuda-graph)",
+                },
+            ),
+            CliOption(
                 "--load-balancer",
                 {
                     "choices": list(LOAD_BALANCERS),
@@ -551,6 +560,7 @@ class ServeCommand(CliCommand):
             enable_expert_parallel=opts.enable_expert_parallel,
             kv_cache_dtype=opts.kv_cache_dtype,
             data_parallel_size=args.data_parallel_size,
+            enable_dp_attention=args.enable_dp_attention,
             load_balancer=args.load_balancer,
             # None = auto: the same base-vs-instruct detection chat/batch apply,
             # so a Base checkpoint is served verbatim instead of templated just

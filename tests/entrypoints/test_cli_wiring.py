@@ -385,10 +385,58 @@ class TestDataParallelSurface:
         assert captured_server["config"].load_balancer == "total_tokens"
         assert captured_server["config"].tensor_parallel_size == 1
 
+    def test_serve_passes_dp_attention_to_the_server(self, model_dir, captured_server):
+        args = build_parser().parse_args(
+            [
+                "serve",
+                "--model-dir",
+                str(model_dir),
+                "--data-parallel-size",
+                "2",
+                "--enable-expert-parallel",
+                "--enable-dp-attention",
+                "--no-cuda-graph",
+            ]
+        )
+
+        assert args.handler.run(args) == 0
+        config = captured_server["config"]
+        assert config.enable_dp_attention is True
+        assert config.enable_expert_parallel is True
+        assert config.use_cuda_graph is False
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (["--enable-dp-attention"], "data_parallel_size > 1"),
+            (
+                ["--data-parallel-size", "2", "--enable-dp-attention", "--no-cuda-graph"],
+                "enable_expert_parallel=True",
+            ),
+            (
+                [
+                    "--data-parallel-size",
+                    "2",
+                    "--enable-expert-parallel",
+                    "--enable-dp-attention",
+                ],
+                "does not support CUDA Graph",
+            ),
+        ],
+    )
+    def test_serve_rejects_invalid_dp_attention_combinations(
+        self, model_dir, captured_server, extra, message
+    ):
+        args = build_parser().parse_args(["serve", "--model-dir", str(model_dir), *extra])
+
+        with pytest.raises(ValueError, match=message):
+            args.handler.run(args)
+
     def test_serve_defaults_to_one_replica(self, model_dir, captured_server):
         """Without the flags a server run must stay exactly the engine it was."""
         args = build_parser().parse_args(["serve", "--model-dir", str(model_dir)])
 
         assert args.handler.run(args) == 0
         assert captured_server["config"].data_parallel_size == 1
+        assert captured_server["config"].enable_dp_attention is False
         assert captured_server["config"].load_balancer == "round_robin"

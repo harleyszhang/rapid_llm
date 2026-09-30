@@ -430,6 +430,9 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
         model_dir="/nonexistent",
         served_model_name=_MODEL,
         data_parallel_size=2,
+        enable_dp_attention=True,
+        enable_expert_parallel=True,
+        use_cuda_graph=False,
         load_balancer="total_tokens",
         max_num_seqs=7,
         max_seq_len=1024,
@@ -441,11 +444,50 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
     assert captured["data_parallel_size"] == 2
     assert captured["load_balancer"] == "total_tokens"
     assert captured["tensor_parallel_size"] == 1
+    assert captured["enable_dp_attention"] is True
+    assert captured["enable_expert_parallel"] is True
     assert captured["max_num_seqs"] == 7
     assert captured["max_seq_len"] == 1024
     assert captured["max_num_batched_tokens"] == 8192
-    assert captured["use_cuda_graph"] is True
+    assert captured["use_cuda_graph"] is False
     assert "device" not in captured, "a replica's device is its grid position"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enable_dp_attention": True}, "data_parallel_size > 1"),
+        (
+            {
+                "enable_dp_attention": True,
+                "data_parallel_size": 2,
+                "use_cuda_graph": False,
+            },
+            "enable_expert_parallel=True",
+        ),
+        (
+            {
+                "enable_dp_attention": True,
+                "data_parallel_size": 2,
+                "enable_expert_parallel": True,
+            },
+            "does not support CUDA Graph",
+        ),
+        (
+            {
+                "enable_dp_attention": True,
+                "data_parallel_size": 2,
+                "enable_expert_parallel": True,
+                "use_cuda_graph": False,
+                "engine_backend": "process",
+            },
+            "engine_backend='thread'",
+        ),
+    ],
+)
+def test_server_config_rejects_invalid_dp_attention_combinations(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        ServerConfig(model_dir="/nonexistent", **overrides)
 
 
 def test_one_replica_still_builds_the_single_process_engine(monkeypatch):

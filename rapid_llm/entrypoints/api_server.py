@@ -145,6 +145,8 @@ class ServerConfig:
             :class:`~rapid_llm.engine.async_data_parallel.AsyncDataParallelEngine`
             instead — the replicas multiply concurrent decode, which is what a
             server is for; the fields above apply *per replica*.
+        enable_dp_attention: Keep attention and KV cache local to each DP rank
+            while pooling MoE tokens across the full DP x TP expert grid.
         load_balancer: Which replica each request is routed to, one of
             :data:`~rapid_llm.engine.dp_load_balancer.LOAD_BALANCERS`.
         chat_template: ``True`` applies the tokenizer's chat template to
@@ -176,9 +178,23 @@ class ServerConfig:
     prefix_cache_blocks: int | None = None
     enable_preemption: bool = False
     data_parallel_size: int = 1
+    enable_dp_attention: bool = False
     load_balancer: str = "round_robin"
     chat_template: bool = True
     engine_backend: str = "thread"
+
+    def __post_init__(self) -> None:
+        """Reject DPA combinations before the server starts loading a model."""
+        if not self.enable_dp_attention:
+            return
+        if self.data_parallel_size <= 1:
+            raise ValueError("DP attention requires data_parallel_size > 1")
+        if not self.enable_expert_parallel:
+            raise ValueError("DP attention requires enable_expert_parallel=True")
+        if self.use_cuda_graph:
+            raise ValueError("DP attention does not support CUDA Graph yet; disable it")
+        if self.engine_backend != "thread":
+            raise ValueError("DP attention requires engine_backend='thread'")
 
     @property
     def model_name(self) -> str:
@@ -583,6 +599,7 @@ def build_app(config: ServerConfig, engine: EngineBackend | None = None):
                     model=config.model_dir,
                     **({"device": "cpu"} if config.device == "cpu" else {}),
                     data_parallel_size=config.data_parallel_size,
+                    enable_dp_attention=config.enable_dp_attention,
                     load_balancer=config.load_balancer,
                     max_seq_len=config.max_seq_len,
                     max_num_seqs=config.max_num_seqs,

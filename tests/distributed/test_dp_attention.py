@@ -206,6 +206,29 @@ def _replica_dp_stays_replica_dp(rank: int) -> dict:
     }
 
 
+def _coordinated_forward_count(rank: int) -> dict:
+    """Each TP lane sees the maximum pass count across its two DP replicas."""
+    from rapid_llm.distributed.dp_attention import coordinate_forward_count_across_dp
+
+    replica = ps.get_data_parallel_rank()
+    local = (1, 3)[replica]
+    return {"rank": rank, "local": local, "target": coordinate_forward_count_across_dp(local)}
+
+
+def test_forward_count_handshake_uses_the_busiest_replica():
+    seen = run_on_tp_ranks(
+        _coordinated_forward_count,
+        tp_size=2,
+        dp_size=2,
+        backend="gloo",
+        enable_expert_parallel=True,
+        enable_dp_attention=True,
+    )
+
+    assert [entry["local"] for entry in seen] == [1, 1, 3, 3]
+    assert [entry["target"] for entry in seen] == [3, 3, 3, 3]
+
+
 def test_replica_dp_keeps_ep_inside_one_replica():
     """Without DP-attention the EP group is still the replica's TP group.
 

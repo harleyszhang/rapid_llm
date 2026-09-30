@@ -60,6 +60,7 @@ from .parallel_state import (
 
 __all__ = [
     "DPMetadata",
+    "coordinate_forward_count_across_dp",
     "coordinate_tokens_across_dp",
     "current_dp_metadata",
     "dp_attention_region",
@@ -203,6 +204,21 @@ def dp_attention_region(num_tokens: int) -> Iterator[DPMetadata | None]:
         yield metadata
     finally:
         _metadata.reset(token)
+
+
+def coordinate_forward_count_across_dp(local_count: int) -> int:
+    """Return the largest number of forwards any DP replica needs this step.
+
+    Scheduler decisions stay local under DP attention, so one replica may split
+    prefill into more model passes than another. Every pass reaches grid-wide MoE
+    collectives; replicas with fewer passes therefore execute dummy forwards until
+    this maximum is met. The count is control-plane data and travels over Gloo.
+    """
+    if not dp_attention_enabled():
+        return local_count
+    count = torch.tensor([local_count], dtype=torch.int64)
+    gathered = data_parallel_all_gather(count, dim=0, group=get_data_parallel_cpu_group())
+    return max(int(value) for value in gathered.tolist())
 
 
 def coordinate_tokens_across_dp(num_tokens: int) -> DPMetadata:

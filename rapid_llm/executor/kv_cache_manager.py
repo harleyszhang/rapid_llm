@@ -12,6 +12,7 @@ import gc
 
 import torch
 
+from ..distributed.dp_attention import dp_attention_region
 from ..utils.logger import get_logger
 from .attention_metadata import AttentionMetadata
 
@@ -84,7 +85,7 @@ class MemoryProfiler:
         dummy.b_seq_len = torch.tensor([seq_len], dtype=torch.int32, device=self.device)
         dummy.max_actual_seq_len = seq_len
 
-        with torch.no_grad():
+        with torch.no_grad(), dp_attention_region(input_ids.numel()):
             model(input_ids, position_ids, dummy)
 
     def available_kv_blocks(self, model, vocab_size: int) -> int:

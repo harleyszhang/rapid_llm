@@ -39,6 +39,9 @@ SHUTDOWN_TIMEOUT_S = 30.0
 #: abort can sit in a futex forever.
 DESTROY_DEADLINE_S = 15.0
 
+#: TP control-plane sentinel for a DPA lockstep pass with no local scheduler work.
+_DUMMY_FORWARD = "rapid-llm-dpa-dummy-forward"
+
 
 def _destroy_with_deadline(destroy: Callable[[], None], abandon: Callable[[], None]) -> None:
     """Tear the group down, but never park the caller on a wedged abort.
@@ -100,6 +103,10 @@ class Executor(ABC):
         """
         tokens, records = self.execute(model_input)
         return tokens, records, None
+
+    def execute_dummy(self) -> None:
+        """Run one model pass without scheduler-visible output for DPA lockstep."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement DPA dummy forwards")
 
     @abstractmethod
     def shutdown(self) -> None:
@@ -171,6 +178,9 @@ class UniProcExecutor(Executor):
     ) -> tuple[torch.Tensor, PassLogprobs | None, torch.Tensor | None]:
         return self._worker.execute_verify(model_input)
 
+    def execute_dummy(self) -> None:
+        self._worker.execute_dummy()
+
     def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         return self._worker.readback(tokens)
 
@@ -235,6 +245,11 @@ class MultiprocExecutor(Executor):
         ensure_followers_alive(self._followers)
         tensor_model_parallel_broadcast_object_list(model_input)
         return self._worker.execute_verify(model_input)
+
+    def execute_dummy(self) -> None:
+        ensure_followers_alive(self._followers)
+        tensor_model_parallel_broadcast_object_list(_DUMMY_FORWARD)
+        self._worker.execute_dummy()
 
     def readback_async(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.cuda.Event | None]:
         # Rank 0's copy is the only one that matters: followers discard their tokens
@@ -425,6 +440,9 @@ def serve_plans(engine: LLMEngine, max_num_seqs: int, *, pipeline: bool | None =
     """
     worker = ModelWorker(engine, max_num_seqs, engine.max_seq_len, pipeline=pipeline)
     while (plan := tensor_model_parallel_broadcast_object_list()) is not None:
+        if plan == _DUMMY_FORWARD:
+            worker.execute_dummy()
+            continue
         # Records are discarded as the tokens are: every rank computed identical ones
         # and rank 0 reports them.
         worker.execute(plan)

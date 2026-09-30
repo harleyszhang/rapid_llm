@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from ..distributed.dp_attention import current_dp_metadata
 from ..executor.attention_metadata import AttentionMetadata
 from ..kernels import skip_rmsnorm
 from .comm_overlap import CommStreamPool, DeferredArContext, deferred_all_reduce
@@ -353,7 +354,11 @@ def model_forward_maybe_tbo(
         ``[rows, ..., vocab]`` logits — ``[rows, 1, vocab]`` for a decode step,
         the prefill grid's shape otherwise — rows in batch order.
     """
-    if input_ids.device.type == "cpu":
+    if input_ids.device.type == "cpu" or current_dp_metadata() is not None:
+        # DPA's MoE exchange pools the whole local batch with peer replicas.
+        # The op stream is shaped for rank-local TBO halves even when executed
+        # serially, so it cannot represent either DPA backend; use the ordinary
+        # layer-by-layer path while a DPA region is active.
         return model(input_ids, position_ids, atten_info)
     inputs = {"input_ids": input_ids, "position_ids": position_ids, "atten_info": atten_info}
     operations_strategy = OperationsStrategy.init_new_tbo(model.layers, prefill=prefill)

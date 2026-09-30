@@ -64,6 +64,8 @@ class AsyncDataParallelEngine(DataParallelEngine):
             being ``data_parallel_size`` unrelated ones — and where the online path
             has the advantage over the batch API, since requests arrive over time
             and a prefix populated by one can still be hot for the next.
+        enable_dp_attention: Keep attention and KV cache local to each replica,
+            while pooling MoE tokens over the full ``DP x TP`` expert grid.
         **engine_kwargs: Forwarded verbatim to each replica's engine, as for
             :class:`~rapid_llm.engine.data_parallel.DataParallelEngine`.
             ``device`` is not accepted; it is derived from the grid position.
@@ -82,6 +84,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
         enable_prefix_cache: bool = False,
         prefix_cache_blocks: int | None = None,
         enable_preemption: bool = False,
+        enable_dp_attention: bool = False,
         **engine_kwargs: Any,
     ) -> None:
         super().__init__(
@@ -96,6 +99,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
             enable_prefix_cache=enable_prefix_cache,
             prefix_cache_blocks=prefix_cache_blocks,
             enable_preemption=enable_preemption,
+            enable_dp_attention=enable_dp_attention,
             **engine_kwargs,
         )
         self._streams: dict[str, _RequestStream] = {}
@@ -226,7 +230,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
                 self._stream_snapshot = self._streams.copy()
             replica = self._select(prompt_ids)
             try:
-                self._request_queues[replica].put(("add", request_id, prompt, sampling_params))
+                self._send_with_dpa_wake(replica, ("add", request_id, prompt, sampling_params))
             except BaseException:
                 with self._lock:
                     if self._streams.get(request_id) is stream:
@@ -251,7 +255,7 @@ class AsyncDataParallelEngine(DataParallelEngine):
                 # A dead replica's queue is not ours to notice: the put is
                 # best-effort the same way the parent's shutdown puts are.
                 with contextlib.suppress(ValueError, OSError):
-                    self._request_queues[replica].put(("abort", request_id))
+                    self._send_with_dpa_wake(replica, ("abort", request_id))
             # Runs on every exit, error path included: a load-aware balancer
             # that only ever heard ``select`` would count this request forever.
             self._balancer.release(replica, estimated_tokens=estimate)
