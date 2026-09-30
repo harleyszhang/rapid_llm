@@ -1,0 +1,528 @@
+{
+  "config": {
+    "model": "/mnt/otto-temp/modelzoo_with_full_weights/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "arms": {
+      "local1": {
+        "dp": 1,
+        "tp": 1,
+        "dpa": false,
+        "ep": false
+      },
+      "ep2": {
+        "dp": 1,
+        "tp": 2,
+        "dpa": false,
+        "ep": true
+      },
+      "dpa2": {
+        "dp": 2,
+        "tp": 1,
+        "dpa": true,
+        "ep": true
+      },
+      "dpa2x2": {
+        "dp": 2,
+        "tp": 2,
+        "dpa": true,
+        "ep": true
+      }
+    },
+    "backends": [
+      "agrs",
+      "a2a"
+    ],
+    "scenarios": {
+      "balanced": 16,
+      "idle": 1,
+      "uneven": 2
+    },
+    "gen_len": 16,
+    "iters": 1,
+    "cuda_graph": false,
+    "overhead_definition": "1 - TPS / (local1 TPS * parallel_degree); includes collectives, lockstep waiting, and coordinator IPC",
+    "exact_completion_reference": "local1 replay of the same round-robin replica sub-batches, restored to request order",
+    "timestamp": "2026-09-30T12:00:30",
+    "environment": {
+      "gpu_model": "NVIDIA H100 80GB HBM3",
+      "gpu_count": 4,
+      "gpu_memory_gib": 79.2,
+      "sm_count": 132,
+      "compute_capability": "sm_90",
+      "driver_version": "580.126.20",
+      "interconnect_topology": "GPU0\t X \tNV18\tNV18\tNV18\tPIX\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A; GPU1\tNV18\t X \tNV18\tNV18\tNODE\tNODE\tPIX\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t0-47,96-143\t0\t\tN/A",
+      "cuda_version": "12.8",
+      "torch_version": "2.7.0a0+7c8ec84dab.nv25.03",
+      "triton_version": "3.2.0",
+      "transformers_version": "5.17.0",
+      "python_version": "3.12.3",
+      "cpu_cores": 192,
+      "inference_mode": "offline (all prompts submitted at once, no serving queue)"
+    }
+  },
+  "results": [
+    {
+      "arm": "local1",
+      "backend": "n/a",
+      "dp": 1,
+      "tp": 1,
+      "parallel_degree": 1,
+      "build_s": 16.49,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 0.7992,
+          "gen_tokens": 256,
+          "tps": 320.32,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter. It has a diameter of about 143,000",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The source code is written in a high-level programming language,",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter. It has a diameter of about 143,000",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The source code is written in a high-level programming language,"
+          ],
+          "tgs": 320.32,
+          "scaling_efficiency": 1.0,
+          "sync_communication_overhead": 0.0,
+          "exact_completions": 16
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 0.7834,
+          "gen_tokens": 16,
+          "tps": 20.42,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 20.42,
+          "scaling_efficiency": 1.0,
+          "sync_communication_overhead": 0.0,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 1.3851,
+          "gen_tokens": 32,
+          "tps": 23.1,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " Attention and experts cooperate. Attention and experts cooperate. Attention and experts cooperate. Attention"
+          ],
+          "tgs": 23.1,
+          "scaling_efficiency": 1.0,
+          "sync_communication_overhead": 0.0,
+          "exact_completions": 2
+        }
+      ],
+      "parity_references": {
+        "1": {
+          "balanced": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter. It has a diameter of about 143,000",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The source code is written in a high-level programming language,",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter. It has a diameter of about 143,000",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The source code is written in a high-level programming language,"
+          ],
+          "idle": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "uneven": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " Attention and experts cooperate. Attention and experts cooperate. Attention and experts cooperate. Attention"
+          ]
+        },
+        "2": {
+          "balanced": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "idle": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "uneven": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1. What is distributed inference? 2. How do attention and experts cooperate"
+          ]
+        }
+      }
+    },
+    {
+      "arm": "ep2",
+      "backend": "n/a",
+      "dp": 1,
+      "tp": 2,
+      "parallel_degree": 2,
+      "build_s": 16.38,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 1.5304,
+          "gen_tokens": 256,
+          "tps": 167.28,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of 142,984 km.",
+            " emphasizes readability and simplicity, making it an excellent choice for beginners and experienced developers alike",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of 142,984 km.",
+            " emphasizes readability and simplicity, making it an excellent choice for beginners and experienced developers alike",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "tgs": 83.64,
+          "scaling_efficiency": 0.2611,
+          "sync_communication_overhead": 0.7389,
+          "exact_completions": 10
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 1.4313,
+          "gen_tokens": 16,
+          "tps": 11.18,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 5.59,
+          "scaling_efficiency": 0.2738,
+          "sync_communication_overhead": 0.7262,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 2.5289,
+          "gen_tokens": 32,
+          "tps": 12.65,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1.1.1.1.1.1.1.1."
+          ],
+          "tgs": 6.33,
+          "scaling_efficiency": 0.2738,
+          "sync_communication_overhead": 0.7262,
+          "exact_completions": 1
+        }
+      ]
+    },
+    {
+      "arm": "dpa2",
+      "backend": "agrs",
+      "dp": 2,
+      "tp": 1,
+      "parallel_degree": 2,
+      "build_s": 16.21,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 1.3061,
+          "gen_tokens": 256,
+          "tps": 196.0,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 100\u00b0C at sea level. If the water in this experiment did",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 100\u00b0C at sea level. If the water in this experiment did",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "tgs": 98.0,
+          "scaling_efficiency": 0.3059,
+          "sync_communication_overhead": 0.6941,
+          "exact_completions": 14
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 1.2581,
+          "gen_tokens": 16,
+          "tps": 12.72,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 6.36,
+          "scaling_efficiency": 0.3115,
+          "sync_communication_overhead": 0.6885,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 1.7273,
+          "gen_tokens": 32,
+          "tps": 18.53,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1. Introduction\n2. Background\n3. Theoretical Framework\n4."
+          ],
+          "tgs": 9.27,
+          "scaling_efficiency": 0.4011,
+          "sync_communication_overhead": 0.5989,
+          "exact_completions": 1
+        }
+      ]
+    },
+    {
+      "arm": "dpa2",
+      "backend": "a2a",
+      "dp": 2,
+      "tp": 1,
+      "parallel_degree": 2,
+      "build_s": 15.99,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 1.5236,
+          "gen_tokens": 256,
+          "tps": 168.03,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of about 143,000 km",
+            " emphasizes readability and simplicity, making it a favorite among developers for both beginners and experts",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of about 143,000 km",
+            " emphasizes readability and simplicity, making it a favorite among developers for both beginners and experts",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "tgs": 84.02,
+          "scaling_efficiency": 0.2623,
+          "sync_communication_overhead": 0.7377,
+          "exact_completions": 12
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 1.441,
+          "gen_tokens": 16,
+          "tps": 11.1,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 5.55,
+          "scaling_efficiency": 0.2718,
+          "sync_communication_overhead": 0.7282,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 1.9723,
+          "gen_tokens": 32,
+          "tps": 16.22,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1. Introduction\n2. Background\n3. Theoretical Framework\n4."
+          ],
+          "tgs": 8.11,
+          "scaling_efficiency": 0.3511,
+          "sync_communication_overhead": 0.6489,
+          "exact_completions": 1
+        }
+      ]
+    },
+    {
+      "arm": "dpa2x2",
+      "backend": "agrs",
+      "dp": 2,
+      "tp": 2,
+      "parallel_degree": 4,
+      "build_s": 18.46,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 1.5591,
+          "gen_tokens": 256,
+          "tps": 164.2,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 100\u00b0C at sea level. If the water in this experiment did",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if it",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 100\u00b0C at sea level. If the water in this experiment did",
+            " Jupiter, which has a mass of approximately $1.9 \\times 1",
+            " has gained immense popularity due to its simplicity, readability, and powerful features. One",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if it",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "tgs": 41.05,
+          "scaling_efficiency": 0.1282,
+          "sync_communication_overhead": 0.8718,
+          "exact_completions": 12
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 1.4842,
+          "gen_tokens": 16,
+          "tps": 10.78,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 2.69,
+          "scaling_efficiency": 0.132,
+          "sync_communication_overhead": 0.868,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 2.0356,
+          "gen_tokens": 32,
+          "tps": 15.72,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1. Introduction\n2. Background\n3. Theoretical Framework\n4."
+          ],
+          "tgs": 3.93,
+          "scaling_efficiency": 0.1701,
+          "sync_communication_overhead": 0.8299,
+          "exact_completions": 1
+        }
+      ]
+    },
+    {
+      "arm": "dpa2x2",
+      "backend": "a2a",
+      "dp": 2,
+      "tp": 2,
+      "parallel_degree": 4,
+      "build_s": 18.6,
+      "scenarios": [
+        {
+          "scenario": "balanced",
+          "batch": 16,
+          "latency_s": 1.6507,
+          "gen_tokens": 256,
+          "tps": 155.09,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of 142,984 km.",
+            " emphasizes readability and simplicity, making it an excellent choice for beginners and experienced developers alike",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor.",
+            " Paris. The capital of the United States is Washington, D.C. The capital",
+            " two. One plus two equals three. One plus three equals four. One plus",
+            " 212 \u00b0F or 100 \u00b0C and ice melts",
+            " Jupiter, with a diameter of 142,984 km.",
+            " emphasizes readability and simplicity, making it an excellent choice for beginners and experienced developers alike",
+            " a subset of artificial intelligence (AI) that focuses on building systems that can learn",
+            " east and sets in the west. This is a fact. But what if the",
+            " machine code.  The machine code is then executed by the computer's processor."
+          ],
+          "tgs": 38.77,
+          "scaling_efficiency": 0.121,
+          "sync_communication_overhead": 0.879,
+          "exact_completions": 12
+        },
+        {
+          "scenario": "idle",
+          "batch": 1,
+          "latency_s": 1.6297,
+          "gen_tokens": 16,
+          "tps": 9.82,
+          "texts": [
+            " Paris. The capital of the United States is Washington, D.C. The capital"
+          ],
+          "tgs": 2.46,
+          "scaling_efficiency": 0.1202,
+          "sync_communication_overhead": 0.8798,
+          "exact_completions": 1
+        },
+        {
+          "scenario": "uneven",
+          "batch": 2,
+          "latency_s": 2.1447,
+          "gen_tokens": 32,
+          "tps": 14.92,
+          "texts": [
+            " two. One plus two equals three. One plus three equals four. One plus",
+            "1. Introduction\n2. Background\n3. Theoretical Framework\n4."
+          ],
+          "tgs": 3.73,
+          "scaling_efficiency": 0.1615,
+          "sync_communication_overhead": 0.8385,
+          "exact_completions": 1
+        }
+      ]
+    }
+  ]
+}
