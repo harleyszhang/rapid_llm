@@ -34,6 +34,7 @@ from ..distributed.parallel_state import (
     warmup_collectives,
 )
 from ..engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
+from ..utils.torch_compat import TORCH_ACCELERATOR_ERRORS, is_accelerator_oom
 from .attention_metadata import AttentionMetadata
 
 logger = logging.getLogger(__name__)
@@ -413,11 +414,8 @@ class CUDAGraphManager:
             runner = self._new_runner(key)
             runner.capture(warmup_metadata=(atten_info.b_req_idx, atten_info.cur_select_index))
             self._runners[key] = runner
-        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
-            if (
-                not isinstance(exc, torch.cuda.OutOfMemoryError)
-                and "out of memory" not in str(exc).lower()
-            ):
+        except TORCH_ACCELERATOR_ERRORS as exc:
+            if not is_accelerator_oom(exc):
                 raise
             runner = None
             self._failed.add(key)
@@ -932,11 +930,8 @@ class PrefillGraphManager:
             )
             runner._load(input_ids, position_ids, logits_positions, atten_info)
             runner.capture()
-        except (torch.cuda.OutOfMemoryError, torch.AcceleratorError) as exc:
-            if (
-                not isinstance(exc, torch.cuda.OutOfMemoryError)
-                and "out of memory" not in str(exc).lower()
-            ):
+        except TORCH_ACCELERATOR_ERRORS as exc:
+            if not is_accelerator_oom(exc):
                 raise
             logger.warning(
                 "Lazy capture of prefill graph n=%d width=%d ran out of memory; "

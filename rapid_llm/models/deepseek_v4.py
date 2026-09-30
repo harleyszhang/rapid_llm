@@ -43,6 +43,7 @@ from ..modules.deepseek_v4.hyper_connection import DeepseekV4HyperConnection, De
 from ..modules.deepseek_v4.rope import DeepseekV4RotaryEmbedding
 from ..modules.quantization import QuantizationConfig, RawParameter, UnquantizedFusedMoEMethod
 from ..modules.quantization.mxfp4 import e8m0_to_fp32, repack_mxfp4_pairs
+from ..utils.torch_compat import is_float8_e8m0fnu
 from .base import CausalLM
 from .config import ModelConfig
 
@@ -253,7 +254,7 @@ def _adapt_dspark_checkpoint(weights):
             # Ampere cannot compute on fp8; the w8a16 kernel widens the raw
             # bytes itself, and the parameters hold uint8.
             tensor = tensor.view(torch.uint8)
-        elif tensor.dtype == torch.float8_e8m0fnu:
+        elif is_float8_e8m0fnu(tensor.dtype):
             tensor = e8m0_to_fp32(tensor)
         elif tensor.dtype == torch.int8 and ".ffn.experts." in key and key.endswith(".weight"):
             tensor = repack_mxfp4_pairs(tensor)
