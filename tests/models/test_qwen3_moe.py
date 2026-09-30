@@ -198,6 +198,31 @@ def test_route_matches_hf(tmp_path):
     torch.testing.assert_close(weights.float(), ref_w, atol=1e-2, rtol=1e-1)
 
 
+def test_router_gemm_caches_old_torch_fallback(monkeypatch):
+    """Torch builds without ``mm(out_dtype=...)`` widen operands only after one probe."""
+    from rapid_llm.modules.moe import router as router_module
+
+    calls = []
+
+    def old_mm(*args, **kwargs):
+        calls.append(kwargs)
+        raise TypeError("mm() got an unexpected keyword argument 'out_dtype'")
+
+    monkeypatch.setattr(router_module, "_MM_OUT_DTYPE_SUPPORTED", None)
+    monkeypatch.setattr(router_module.torch, "mm", old_mm)
+    x = torch.randn(3, 8, dtype=torch.float16)
+    gate_weight = torch.randn(4, 8, dtype=torch.float16)
+    expected = torch.nn.functional.linear(x.float(), gate_weight.float())
+
+    first = router_module._mm_fp32(x, gate_weight)
+    second = router_module._mm_fp32(x, gate_weight)
+
+    assert calls == [{"out_dtype": torch.float32}]
+    assert first.dtype == torch.float32
+    torch.testing.assert_close(first, expected)
+    torch.testing.assert_close(second, expected)
+
+
 # --------------------------------------------------------------------------- #
 # Full-model logits parity vs HuggingFace (needs CUDA for the Triton kernels)
 # --------------------------------------------------------------------------- #

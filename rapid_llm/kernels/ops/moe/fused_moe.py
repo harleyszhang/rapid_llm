@@ -973,15 +973,17 @@ def _silu_and_mul_kernel(
     stride_xm,
     N,
     LIMIT: tl.constexpr,
+    APPLY_LIMIT: tl.constexpr,
     QUANT_OUT: tl.constexpr,
     QMAX: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     """``out = silu(x[:, :N]) * x[:, N:]`` on a contiguous ``[tokens, 2N]`` input.
 
-    ``LIMIT`` clamps the gate at ``+LIMIT`` and up at ``+-LIMIT`` before the
-    activation — DeepSeek-V4's ``swiglu_limit`` (gpt-oss semantics). ``inf``
-    (the default every other family passes) makes both clamps no-ops.
+    ``APPLY_LIMIT`` enables clamping the gate at ``+LIMIT`` and up at
+    ``+-LIMIT`` before the activation — DeepSeek-V4's ``swiglu_limit``
+    (gpt-oss semantics). The explicit boolean keeps older Triton compilers from
+    evaluating a Python ``float("inf")`` expression inside the kernel AST.
     """
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1)
@@ -990,7 +992,7 @@ def _silu_and_mul_kernel(
     # silu evaluates its sigmoid in fp32, matching the dense swiglu kernel.
     gate = tl.load(x_ptr + pid_m * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
     up = tl.load(x_ptr + pid_m * stride_xm + N + offs, mask=mask, other=0.0).to(tl.float32)
-    if float("inf") > LIMIT:
+    if APPLY_LIMIT:
         gate = tl.minimum(gate, LIMIT)
         up = tl.minimum(tl.maximum(up, -LIMIT), LIMIT)
     out = silu(gate) * up
@@ -1022,19 +1024,24 @@ def _silu_and_mul_kernel(
 def _moe_sum_kernel(
     input_ptr,
     output_ptr,
+    topk_ids_ptr,
     N,
+    NUM_EXPERTS: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """``output[m] = sum_k input[m * top_k + k]`` over the expanded slot dim."""
+    """Sum valid local-expert slots, treating non-local ``-1`` slots as zero."""
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1)
     offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = offs < N
     acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
-    base = input_ptr + pid_m * top_k * N
+    base_slot = pid_m * top_k
+    base = input_ptr + base_slot * N
     for i in tl.static_range(top_k):
-        acc += tl.load(base + i * N + offs, mask=mask, other=0.0).to(tl.float32)
+        expert = tl.load(topk_ids_ptr + base_slot + i)
+        valid = (expert >= 0) & (expert < NUM_EXPERTS)
+        acc += tl.load(base + i * N + offs, mask=mask & valid, other=0.0).to(tl.float32)
     tl.store(output_ptr + pid_m * N + offs, acc.to(output_ptr.dtype.element_ty), mask=mask)
 
 
@@ -1261,13 +1268,15 @@ def _fused_moe(
         if fuse_act_quant
         else None
     )
+    apply_swiglu_limit = swiglu_limit != float("inf")
     _silu_and_mul_kernel[(num_tokens * top_k, triton.cdiv(intermediate, block_n))](
         gate_up,
         act,
         act_scale,
         gate_up.stride(0),
         intermediate,
-        LIMIT=swiglu_limit,
+        LIMIT=swiglu_limit if apply_swiglu_limit else 0.0,
+        APPLY_LIMIT=apply_swiglu_limit,
         QMAX=act_qmax,
         QUANT_OUT=act_quant_out if fuse_act_quant else 0,
         BLOCK_N=block_n,
@@ -1317,7 +1326,14 @@ def _fused_moe(
     out = torch.empty((num_tokens, hidden), device=device, dtype=dtype)
     block_n = min(triton.next_power_of_2(hidden), 1024)
     _moe_sum_kernel[(num_tokens, triton.cdiv(hidden, block_n))](
-        expanded, out, hidden, top_k=top_k, BLOCK_N=block_n, num_warps=4
+        expanded,
+        out,
+        topk_ids,
+        hidden,
+        NUM_EXPERTS=num_experts,
+        top_k=top_k,
+        BLOCK_N=block_n,
+        num_warps=4,
     )
     return out
 
@@ -1439,13 +1455,15 @@ def fused_moe(
     # silu(gate) * up -> [M * top_k, I]
     act = torch.empty((num_tokens * top_k, intermediate), device=device, dtype=dtype)
     block_n = min(triton.next_power_of_2(intermediate), 1024)
+    apply_swiglu_limit = swiglu_limit != float("inf")
     _silu_and_mul_kernel[(num_tokens * top_k, triton.cdiv(intermediate, block_n))](
         gate_up,
         act,
         None,  # no activation scale on the weight-only path (QUANT_OUT=0)
         gate_up.stride(0),
         intermediate,
-        LIMIT=swiglu_limit,
+        LIMIT=swiglu_limit if apply_swiglu_limit else 0.0,
+        APPLY_LIMIT=apply_swiglu_limit,
         QUANT_OUT=0,
         QMAX=0.0,
         BLOCK_N=block_n,
@@ -1480,7 +1498,14 @@ def fused_moe(
     out = torch.empty((num_tokens, hidden), device=device, dtype=dtype)
     block_n = min(triton.next_power_of_2(hidden), 1024)
     _moe_sum_kernel[(num_tokens, triton.cdiv(hidden, block_n))](
-        expanded, out, hidden, top_k=top_k, BLOCK_N=block_n, num_warps=4
+        expanded,
+        out,
+        topk_ids,
+        hidden,
+        NUM_EXPERTS=num_experts,
+        top_k=top_k,
+        BLOCK_N=block_n,
+        num_warps=4,
     )
     return out
 

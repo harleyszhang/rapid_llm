@@ -38,11 +38,32 @@ _BF16X3_GEMM: Callable | None = None  # tier 3: (x, w) -> fp32
 #: vllm's tier-2 fp32 kernel is instantiated only for these (hidden, experts).
 _FP32_ROUTER_SHAPES = frozenset({(3072, 256), (6144, 128)})
 
+#: ``torch.mm(out_dtype=...)`` is version/build dependent. Probe it on the first
+#: CUDA router call, then avoid paying an exception on every MoE layer.
+_MM_OUT_DTYPE_SUPPORTED: bool | None = None
+
 
 @functools.lru_cache(maxsize=1)
 def _fp32_router_op_available() -> bool:
     """Whether vllm's compiled ``fp32_router_gemm`` op is present (tier 2)."""
     return hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm")
+
+
+def _mm_fp32(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
+    """Run low-precision router GEMM with fp32 output when this Torch supports it."""
+    global _MM_OUT_DTYPE_SUPPORTED
+
+    if _MM_OUT_DTYPE_SUPPORTED is not False:
+        try:
+            output = torch.mm(x, gate_weight.t(), out_dtype=torch.float32)
+        except TypeError as error:
+            if "out_dtype" not in str(error):
+                raise
+            _MM_OUT_DTYPE_SUPPORTED = False
+        else:
+            _MM_OUT_DTYPE_SUPPORTED = True
+            return output
+    return F.linear(x.float(), gate_weight.float())
 
 
 def _router_gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
@@ -53,8 +74,8 @@ def _router_gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
     1. CuteDSL ``ll_bf16_gemm``  — SM90+, M<=16, bf16, K%8==0    (hook; unported)
     2. vllm ``fp32_router_gemm`` — fp32 weight, tuned shapes, M<=32 (opportunistic)
     3. CuteDSL ``bf16x3``        — SM100                          (hook; unported)
-    4. cuBLAS bf16->fp32         — ``torch.mm(out_dtype=fp32)``   (active)
-    5. ``F.linear`` fp32         — CPU / non-bf16 fallback        (active)
+    4. cuBLAS bf16->fp32         — ``torch.mm(out_dtype=fp32)``   (when supported)
+    5. ``F.linear`` fp32         — CPU / old-Torch fallback       (active)
 
     Every tier emits fp32 logits, so the downstream topk is identical whichever fires.
     """
@@ -85,9 +106,11 @@ def _router_gemm(x: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
         return _BF16X3_GEMM(x, gate_weight)
 
     # tier 4: cuBLAS bf16 x bf16 -> fp32 (one tensor-core GEMM, fp32 epilogue).
+    # Older/vendor Torch builds do not expose ``out_dtype``; probe once and use
+    # the numerically equivalent widened fallback on those builds.
     if on_cuda and low_prec:
         x_gemm = x if x.dtype == gate_weight.dtype else x.to(gate_weight.dtype)
-        return torch.mm(x_gemm, gate_weight.t(), out_dtype=torch.float32)
+        return _mm_fp32(x_gemm, gate_weight)
 
     # tier 5: fp32 fallback (CPU, or a non-bf16/fp16 weight).
     return F.linear(x.float(), gate_weight.float())

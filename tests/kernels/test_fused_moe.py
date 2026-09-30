@@ -66,6 +66,30 @@ def test_align_no_padding_waste_when_full():
     assert expert_ids[:2].tolist() == [5, 5]
 
 
+def test_moe_sum_skips_nonlocal_expert_slots():
+    """AgRs leaves non-local slots unwritten; reduction must treat them as zero."""
+    rows, top_k, hidden, num_experts = 3, 2, 16, 4
+    valid = torch.randn(rows, hidden, device="cuda", dtype=torch.float16)
+    poisoned = torch.full_like(valid, float("nan"))
+    expanded = torch.stack((valid, poisoned), dim=1).reshape(rows * top_k, hidden)
+    ids = torch.tensor([[0, -1], [1, -1], [3, -1]], device="cuda", dtype=torch.int32)
+    out = torch.empty_like(valid)
+
+    _fused_moe_mod._moe_sum_kernel[(rows, 1)](
+        expanded,
+        out,
+        ids,
+        hidden,
+        NUM_EXPERTS=num_experts,
+        top_k=top_k,
+        BLOCK_N=hidden,
+        num_warps=4,
+    )
+
+    assert torch.isfinite(out).all()
+    torch.testing.assert_close(out, valid, rtol=0, atol=0)
+
+
 # --------------------------------------------------------------------------- #
 # Launch-config fallback (the path an empty autotune store takes)
 # --------------------------------------------------------------------------- #
