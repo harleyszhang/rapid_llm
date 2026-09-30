@@ -1099,8 +1099,15 @@ class Scheduler:
                 unique.append(request)
         return unique, remaining
 
-    def run_event_loop(self, command_queue, event_queue, *, parent_pid: int | None = None) -> None:
-        """Process typed commands and publish generation events until shutdown."""
+    def run_event_loop(
+        self,
+        command_queue,
+        event_queue,
+        *,
+        parent_pid: int | None = None,
+        enable_dp_attention: bool = False,
+    ) -> None:
+        """Process typed commands and publish events, optionally in DPA lockstep."""
         from .scheduler_ipc import (
             AbortRequest,
             AddRequest,
@@ -1109,15 +1116,19 @@ class Scheduler:
             ShutdownScheduler,
             UtilityEvent,
             UtilityRequest,
+            WakeScheduler,
         )
 
         sent_tokens: dict[str, int] = {}
         last_step_ms = 0.0
         stopping = False
+        globally_active = False
 
         def apply(command) -> None:
             nonlocal stopping
             if isinstance(command, AddRequest):
+                if stopping:
+                    return
                 try:
                     self.add_request(
                         "",
@@ -1168,30 +1179,44 @@ class Scheduler:
                             )
                         )
                     )
+            elif isinstance(command, WakeScheduler):
+                return
             elif isinstance(command, ShutdownScheduler):
                 stopping = True
             else:
                 raise TypeError(f"unsupported scheduler command: {type(command).__name__}")
 
-        while not stopping:
-            busy = self.has_unfinished_requests()
-            try:
-                command = command_queue.get_nowait() if busy else command_queue.get(timeout=0.5)
-            except queue.Empty:
-                if parent_pid is not None and os.getppid() != parent_pid:
-                    return
-            else:
-                apply(command)
-                while not stopping:
-                    try:
-                        apply(command_queue.get_nowait())
-                    except queue.Empty:
-                        break
+        while True:
+            local_active = self.has_unfinished_requests()
+            may_block = not local_active and not (enable_dp_attention and globally_active)
+            if not stopping:
+                try:
+                    command = (
+                        command_queue.get(timeout=0.5) if may_block else command_queue.get_nowait()
+                    )
+                except queue.Empty:
+                    if parent_pid is not None and os.getppid() != parent_pid:
+                        return
+                else:
+                    apply(command)
+                    while not stopping:
+                        try:
+                            apply(command_queue.get_nowait())
+                        except queue.Empty:
+                            break
 
-            if stopping:
-                break
-            if not self.has_unfinished_requests():
-                continue
+            local_active = self.has_unfinished_requests()
+            if enable_dp_attention:
+                globally_active = coordinate_forward_count_across_dp(int(local_active)) > 0
+                if stopping and not globally_active:
+                    return
+                if not globally_active:
+                    continue
+            else:
+                if stopping and not local_active:
+                    return
+                if not local_active:
+                    continue
 
             started = time.monotonic()
             advanced = self.step()
@@ -1220,7 +1245,7 @@ class Scheduler:
                     )
             if outputs:
                 event_queue.put(SchedulerEvents(outputs=tuple(outputs)))
-            elif self.has_unfinished_requests():
+            elif self.has_unfinished_requests() or enable_dp_attention:
                 time.sleep(0.001)
 
     def generate(

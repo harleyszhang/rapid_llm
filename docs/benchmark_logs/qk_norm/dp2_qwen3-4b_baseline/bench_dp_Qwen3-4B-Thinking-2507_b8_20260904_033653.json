@@ -25,7 +25,7 @@
     {
       "latency_s": 0.34703679103404284,
       "gen_tokens": 512,
-      "label": "DataParallelEngine dp=1",
+      "label": "DataParallelController dp=1",
       "replicas": 1,
       "batch": 8,
       "tps": 1475.3,
@@ -34,7 +34,7 @@
     {
       "latency_s": 0.3479849547147751,
       "gen_tokens": 1024,
-      "label": "DataParallelEngine dp=2",
+      "label": "DataParallelController dp=2",
       "replicas": 2,
       "batch": 16,
       "tps": 2942.7,

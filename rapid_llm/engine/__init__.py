@@ -15,10 +15,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .async_data_parallel import AsyncDataParallelEngine
     from .async_engine import AsyncLLMEngine, StreamedOutput
     from .batch_planner import BatchPlanner, Request, RequestStatus, SchedulerConfig, StepPlan
-    from .data_parallel import DataParallelEngine
+    from .data_parallel import DataParallelController
     from .generator import TextGenerator, VisionGenerator
     from .llm import LLM
     from .llm_engine import LLMEngine
@@ -41,12 +40,11 @@ if TYPE_CHECKING:
 # facade lazily so importing one lightweight symbol stays CPU-only.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "LLM": (".llm", "LLM"),
-    "AsyncDataParallelEngine": (".async_data_parallel", "AsyncDataParallelEngine"),
     "AsyncLLMEngine": (".async_engine", "AsyncLLMEngine"),
     "BatchedSamplingParams": (".sampler", "BatchedSamplingParams"),
     "CompletionOutput": (".outputs", "CompletionOutput"),
     "BatchPlanner": (".batch_planner", "BatchPlanner"),
-    "DataParallelEngine": (".data_parallel", "DataParallelEngine"),
+    "DataParallelController": (".data_parallel", "DataParallelController"),
     "DeepSeekToolParser": (".tool_parser", "DeepSeekToolParser"),
     "LLMEngine": (".llm_engine", "LLMEngine"),
     "QwenToolParser": (".tool_parser", "QwenToolParser"),
@@ -87,12 +85,11 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "LLM",
-    "AsyncDataParallelEngine",
     "AsyncLLMEngine",
     "BatchPlanner",
     "BatchedSamplingParams",
     "CompletionOutput",
-    "DataParallelEngine",
+    "DataParallelController",
     "DeepSeekToolParser",
     "LLMEngine",
     "QwenToolParser",

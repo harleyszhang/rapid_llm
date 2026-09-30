@@ -419,12 +419,11 @@ def test_two_replicas_build_the_data_parallel_engine(monkeypatch):
 
     captured: dict = {}
 
-    class FakeDP(FakeEngine):
-        def __init__(self, **kwargs):
-            super().__init__()
-            captured.update(kwargs)
+    def fake_from_pretrained(model, **kwargs):
+        captured.update(model=model, **kwargs)
+        return FakeEngine()
 
-    monkeypatch.setattr(api_server, "AsyncDataParallelEngine", FakeDP)
+    monkeypatch.setattr(api_server.AsyncLLMEngine, "from_pretrained", fake_from_pretrained)
 
     config = ServerConfig(
         model_dir="/nonexistent",

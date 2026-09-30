@@ -344,14 +344,14 @@ Where tensor parallelism splits one model across GPUs, data parallelism replicat
 ![data parallel](images/data_parallel.gif)
 
 ```python
-from rapid_llm import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelController, SamplingParams
 
 # Two whole-model replicas, one per GPU; requests routed round-robin.
-with DataParallelEngine(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_size=2) as engine:
-    outputs = engine.generate(prompts, SamplingParams(temperature=0.0))
+with DataParallelController(model="my_weight/Qwen2.5-1.5B-Instruct", data_parallel_size=2) as controller:
+    outputs = controller.generate(prompts, SamplingParams(temperature=0.0))
 ```
 
-For serving, `rapid-llm serve --data-parallel-size 2 --load-balancer total_tokens` swaps in `AsyncDataParallelEngine`, which streams each request's chunks from whichever replica the balancer picks and aborts a request whose connection drops.
+For serving, `rapid-llm serve --data-parallel-size 2 --load-balancer total_tokens` keeps `AsyncLLMEngine` as the single request manager and connects it to `DataParallelController`; it streams chunks from the selected replica and aborts a request whose connection drops.
 
 On 2× A10 (Qwen2.5-1.5B-Instruct): **weak scaling 2.00x** (100% linear, 1857 → 3716 tok/s) with byte-identical outputs, and **1.64x** on a fixed 256-prompt batch. Compose it with TP — `data_parallel_size=2, tensor_parallel_size=2` — on a 4-GPU box.
 

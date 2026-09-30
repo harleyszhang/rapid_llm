@@ -7,7 +7,7 @@ same time, on their own GPU. The thing to look at is the two lanes advancing tog
 that concurrency is the whole speedup.
 
 What is real here and what is staged: the routing (which replica each prompt goes to)
-is the actual :class:`RoundRobinBalancer` decision, and each lane's per-step text and
+is the actual :class:`RoundRobinPolicy` decision, and each lane's per-step text and
 token counts are recorded from a real :class:`Scheduler` run over that
 lane's sub-batch. The two lanes are recorded one after another on a single GPU, then
 replayed in lockstep for the animation, because in a real two-GPU run they execute
@@ -46,7 +46,7 @@ from scripts._viz_lib import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from rapid_llm.engine.dp_load_balancer import RoundRobinBalancer
+from rapid_llm.engine.data_parallel import RoundRobinPolicy
 from rapid_llm.engine.sampler import SamplingParams
 from rapid_llm.engine.scheduler import Scheduler
 from rapid_llm.utils.prompt_templates import get_prompter
@@ -125,7 +125,7 @@ def record_lane(model_dir: str, prompts: list[tuple[int, str]], max_gen_len: int
     return steps
 
 
-def _lane_prompts(balancer: RoundRobinBalancer) -> list[list[tuple[int, str]]]:
+def _lane_prompts(balancer: RoundRobinPolicy) -> list[list[tuple[int, str]]]:
     """Route the demo prompts into per-replica buckets using the real balancer."""
     buckets: list[list[tuple[int, str]]] = [[] for _ in range(DP_SIZE)]
     for index, prompt in enumerate(PROMPTS):
@@ -219,7 +219,7 @@ def main() -> int:
     ap.add_argument("--duration", type=int, default=110, help="ms per frame")
     args = ap.parse_args()
 
-    buckets = _lane_prompts(RoundRobinBalancer(DP_SIZE))
+    buckets = _lane_prompts(RoundRobinPolicy(DP_SIZE))
     print("routing: " + "  ".join(f"GPU{i}={[idx for idx, _ in b]}" for i, b in enumerate(buckets)))
 
     print("recording replicas ...")

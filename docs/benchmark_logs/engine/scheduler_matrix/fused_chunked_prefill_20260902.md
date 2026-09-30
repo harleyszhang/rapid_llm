@@ -30,7 +30,7 @@ done
    因果遮罩按绝对位置判定，`tl.dot` tensor-core tiling。fp8 KV 缓存（uint8 行）
    读不了原样字节，保持 EXTEND（三层防御：engine 开关、spec `schemes=("unquantized",)`、
    `begin_prefill` 断言）。
-2. **按行数路由**（`continuous_engine._prefill_work`）：resumed chunk 的 pass 走哪条
+2. **按行数路由**（`Scheduler._prefill_work`）：resumed chunk 的 pass 走哪条
    kernel 由总行数决定。关键事实（`diag-prefix` + pass 级计时测得）：
 
    | resumed pass 形状 | EXTEND 路径 | chunked 路径 | 最优 |

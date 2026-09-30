@@ -206,7 +206,7 @@ Backend 'linear' selection:
 | 新建 | `tests/distributed/{test_tp_engine,test_tp_control_plane,test_parallel_sampling,test_vocab_parallel,test_qkv_parallel,test_collective_log,test_dp_perf,tp_harness}.py` |
 | 新建 | `tests/{executor/test_model_input,entrypoints/test_cli_wiring,tools/test_profiling}.py` |
 | 修改 | `rapid_llm/distributed/parallel_state.py`（dp×tp 网格、gloo 组、collective 埋点） |
-| 修改 | `rapid_llm/engine/{continuous_engine,data_parallel,async_engine,sampler,llm_engine}.py` |
+| 修改 | `rapid_llm/engine/{scheduler,data_parallel,async_engine,sampler,llm_engine}.py` |
 | 修改 | `rapid_llm/modules/linear.py`（QKVParallelLinear）、`modules/attention.py` |
 | 修改 | `rapid_llm/cli.py`（镜像进程模式退场） |
 | 修改 | `rapid_llm/tools/profiling/{structure,memory}.py`（树渲染修复 + ModelShape） |
@@ -220,11 +220,11 @@ git checkout refactor-multi-process-engine && uv pip install -e .
 # 张量并行（driver 兼任 rank 0，tp=2 只花两个进程）
 python -m rapid_llm.cli chat --model-dir my_weight/Qwen3-8B --tensor-parallel-size 2
 
-# 数据并行 + 张量并行网格（DP 没有 CLI 入口，走 DataParallelEngine API）
+# 数据并行 + 张量并行网格（同步调用走 DataParallelController API）
 python - <<'PY'
-from rapid_llm import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelController, SamplingParams
 
-with DataParallelEngine(
+with DataParallelController(
     model="my_weight/Qwen3-8B",
     data_parallel_size=2,
     tensor_parallel_size=2,

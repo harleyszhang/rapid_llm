@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from PIL import Image
 
 from .engine import SamplingParams, Scheduler, VisionGenerator
-from .engine.dp_load_balancer import LOAD_BALANCERS
+from .engine.data_parallel import LOAD_BALANCE_POLICIES
 from .engine.scheduler import DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_NUM_SEQS
 from .modules.quantization import RUNTIME_SCHEMES
 from .tools.accuracy import (
@@ -517,7 +517,7 @@ class ServeCommand(CliCommand):
             CliOption(
                 "--load-balancer",
                 {
-                    "choices": list(LOAD_BALANCERS),
+                    "choices": list(LOAD_BALANCE_POLICIES),
                     "default": "round_robin",
                     "help": "How requests are routed between data-parallel replicas",
                 },

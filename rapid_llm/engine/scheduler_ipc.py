@@ -37,11 +37,18 @@ class UtilityRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WakeScheduler:
+    """Wake an idle scheduler so it can join a data-parallel coordination round."""
+
+
+@dataclass(frozen=True, slots=True)
 class ShutdownScheduler:
-    """Stop accepting work and end the scheduler event loop."""
+    """Stop accepting work, drain active requests, and end the event loop."""
 
 
-type SchedulerCommand = AddRequest | AbortRequest | UtilityRequest | ShutdownScheduler
+type SchedulerCommand = (
+    AddRequest | AbortRequest | UtilityRequest | WakeScheduler | ShutdownScheduler
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +96,22 @@ class SchedulerFailed:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplicaReady:
+    """Startup handshake from one rank in a data-parallel process grid."""
+
+    global_rank: int
+    scheduler: SchedulerReady | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplicaFailed:
+    """Fatal startup or runtime failure from one data-parallel rank."""
+
+    global_rank: int
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class SchedulerEvents:
     """One scheduler step's request and utility events."""
 
@@ -97,4 +120,6 @@ class SchedulerEvents:
     timestamp: float = field(default_factory=time.monotonic)
 
 
-type SchedulerEvent = SchedulerReady | SchedulerFailed | SchedulerEvents
+type SchedulerEvent = (
+    SchedulerReady | SchedulerFailed | ReplicaReady | ReplicaFailed | SchedulerEvents
+)

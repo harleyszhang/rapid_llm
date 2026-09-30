@@ -95,9 +95,9 @@ def _reference_scenario(engine, prompts: list[str]) -> list[dict[str, Any]]:
 def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
     try:
         if spec["dpa"]:
-            from rapid_llm.engine.data_parallel import DataParallelEngine
+            from rapid_llm.engine.data_parallel import DataParallelController
 
-            engine = DataParallelEngine(
+            engine = DataParallelController(
                 model=spec["model"],
                 data_parallel_size=2,
                 tensor_parallel_size=1,
@@ -111,7 +111,7 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
                 max_chunk_size=64,
             )
             report = {
-                "executor": "DataParallelEngine",
+                "executor": "DataParallelController",
                 "world_size": engine.world_size,
                 "records": {
                     name: [_record(output) for output in engine.generate(prompts, _GREEDY)]
@@ -228,7 +228,7 @@ def probes(model_dir: Path) -> dict[str, dict[str, Any]]:
 @needs_gpus(2)
 def test_dpa_real_engine_uses_two_replica_ranks(probes):
     assert probes["ep2"]["executor"] == "MultiprocExecutor"
-    assert probes["dpa2"]["executor"] == "DataParallelEngine"
+    assert probes["dpa2"]["executor"] == "DataParallelController"
     assert probes["dpa2"]["world_size"] == 2
 
 

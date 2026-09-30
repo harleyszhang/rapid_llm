@@ -76,7 +76,7 @@ def test_parallel_size_contract(model_dir: Path):
 
     ``LLM`` is a single replica driven by a lockstep batch loop, so
     ``data_parallel_size>1`` needs
-    :class:`~rapid_llm.engine.data_parallel.DataParallelEngine` and
+    :class:`~rapid_llm.engine.data_parallel.DataParallelController` and
     ``tensor_parallel_size>1`` needs
     :class:`~rapid_llm.engine.scheduler.Scheduler` — the only
     path whose executor broadcasts each step's plan to follower ranks.
@@ -88,7 +88,7 @@ def test_parallel_size_contract(model_dir: Path):
     with pytest.raises(ValueError, match="Scheduler"):
         LLM(model=str(model_dir), tensor_parallel_size=2, max_seq_len=512)
 
-    with pytest.raises(ValueError, match="DataParallelEngine"):
+    with pytest.raises(ValueError, match="DataParallelController"):
         LLM(model=str(model_dir), data_parallel_size=2)
 
 

@@ -30,7 +30,7 @@ import torch.multiprocessing as mp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from rapid_llm import DataParallelEngine, SamplingParams
+from rapid_llm import DataParallelController, SamplingParams
 from rapid_llm.benchmark import (
     count_gen_tokens,
     print_row_table,
@@ -86,7 +86,7 @@ def _pooling_backend(name: str):
 
 
 def _shape_matched_reference(
-    engine: DataParallelEngine,
+    engine: DataParallelController,
     prompts: list[str],
     params: SamplingParams,
     replicas: int,
@@ -110,7 +110,7 @@ def _probe(spec: dict[str, Any], results: mp.Queue) -> None:
         flags = spec["flags"]
         with _pooling_backend(spec["backend"]):
             started = time.perf_counter()
-            engine = DataParallelEngine(
+            engine = DataParallelController(
                 model=spec["model"],
                 data_parallel_size=flags["dp"],
                 tensor_parallel_size=flags["tp"],

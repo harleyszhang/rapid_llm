@@ -174,11 +174,11 @@ launch-bound，少一次 launch 直接减 TPOT；batch 变大后 GEMM 转为带�
 | 模型 | 行 | TPS 基线→融合 | TPS 比 | TPS/GPU 比 |
 |---|---|---|---|---|
 | qwen3-4b | LLM (in-process) | 1604.3 → 1630.4 | 1.016 | 1.016 |
-| qwen3-4b | DataParallelEngine dp=1 | 1475.3 → 1502.3 | 1.018 | 1.018 |
-| qwen3-4b | DataParallelEngine dp=2 | 2942.7 → 3020.2 | **1.026** | 1.026 |
+| qwen3-4b | DataParallelController dp=1 | 1475.3 → 1502.3 | 1.018 | 1.018 |
+| qwen3-4b | DataParallelController dp=2 | 2942.7 → 3020.2 | **1.026** | 1.026 |
 | 对照 qwen2.5-0.5b | LLM (in-process) | 3443.0 → 5342.8 | 1.552 | 1.552 |
-| 对照 qwen2.5-0.5b | DataParallelEngine dp=1 | 4148.0 → 4172.4 | 1.006 | 1.006 |
-| 对照 qwen2.5-0.5b | DataParallelEngine dp=2 | 8131.8 → 8076.1 | 0.993 | 0.993 |
+| 对照 qwen2.5-0.5b | DataParallelController dp=1 | 4148.0 → 4172.4 | 1.006 | 1.006 |
+| 对照 qwen2.5-0.5b | DataParallelController dp=2 | 8131.8 → 8076.1 | 0.993 | 0.993 |
 
 DP2 判读：对照组的 dp=1/dp=2 两行给出噪声底 **±1%**；受影响模型 dp=2 为 **+2.6%**，略超噪声，算弱正信号。但"LLM (in-process)"行对照组自己波动 +55%，该行不可用（单进程基线最受 GPU0 上其他进程干扰），不作为证据。两侧 dp=1 各 8/8 completions 与 baseline 一致。
 
