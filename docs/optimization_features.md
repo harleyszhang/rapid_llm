@@ -339,7 +339,7 @@ A10, batch=4, seq_len=25, gen_len=64, greedy benchmark result:
 
 ## Data Parallelism
 
-Where tensor parallelism splits one model across GPUs, data parallelism replicates the whole model onto each GPU and routes the request stream between the replicas — for throughput once one card is saturated. Each prompt is dealt to a replica by a load balancer (round-robin or least-loaded), and the replicas decode their own batches concurrently. See [data_parallel.md](data_parallel.md) for the design (it mirrors vLLM's `DPEngineCoreProc` / `DPLBAsyncMPClient` and SGLang's `DataParallelController`) and the benchmarks.
+Where tensor parallelism splits one model across GPUs, data parallelism replicates the whole model onto each GPU and routes the request stream between the replicas — for throughput once one card is saturated. Each prompt is assigned by `DataParallelController` using round-robin, request-count, token-count, or cache-aware routing, and each replica leader runs the same continuous `Scheduler` loop. See [data_parallel.md](data_parallel.md) for the typed command/event protocol, DP × TP process grid, and benchmarks.
 
 ![data parallel](images/data_parallel.gif)
 
