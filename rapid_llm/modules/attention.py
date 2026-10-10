@@ -15,6 +15,12 @@ import math
 import torch
 import torch.nn as nn
 
+from ..distributed.dcp import dcp_kv_head_range, dcp_local_seq_len, merge_dcp_attention
+from ..distributed.parallel_state import (
+    decode_context_parallel_all_gather,
+    get_decode_context_parallel_rank,
+    get_decode_context_parallel_world_size,
+)
 from ..kernels import dispatch
 from ..kernels.dispatcher import PAGED_KV_TAGS
 from .quantization.kv_cache import get_kv_cache_method
@@ -28,6 +34,13 @@ class PagedAttention(nn.Module):
     the dequant scales come from the strategy ``get_kv_cache_method`` returns, so write and
     read cannot disagree. Both dtype args follow vLLM's auto convention (``None`` defers to
     ``torch.get_default_dtype()``; the model passes the checkpoint's dtype).
+
+    Under decode context parallelism (DCP) this rank caches only the positions it
+    owns, for the KV heads of its whole DCP group. Prefill attends the fresh K/V
+    directly (the local query heads read their KV sub-range, no communication);
+    decode and extend gather the group's queries, attend this rank's share with
+    the strided table view, and merge the partials by LSE -- the KV history never
+    moves. ``num_heads`` (this rank's query heads) is required for that path.
     """
 
     def __init__(
@@ -36,6 +49,8 @@ class PagedAttention(nn.Module):
         head_dim: int,
         kv_cache_dtype: torch.dtype | None = None,
         params_dtype: torch.dtype | None = None,
+        *,
+        num_heads: int | None = None,
     ) -> None:
         super().__init__()
         if kv_cache_dtype is None:
@@ -53,6 +68,16 @@ class PagedAttention(nn.Module):
         method = self.kv_cache_method
         self.k_scale = method.k_scale if method is not None else 1.0
         self.v_scale = method.v_scale if method is not None else 1.0
+
+        self.dcp_size = get_decode_context_parallel_world_size()
+        self.dcp_rank = get_decode_context_parallel_rank()
+        self._prefill_kv_heads: tuple[int, int] | None = None
+        if self.dcp_size > 1:
+            if num_heads is None:
+                raise ValueError("decode context parallelism needs the local query head count")
+            self._prefill_kv_heads = dcp_kv_head_range(
+                num_heads, num_kv_heads, self.dcp_rank, self.dcp_size
+            )
 
         # Bind after placement: construction may happen on the meta device.
         self._bound_device = None
@@ -153,6 +178,8 @@ class PagedAttention(nn.Module):
         """
         self._write_cache(xk, xv, atten_info, layer_index)
         if atten_info.b_prefix_len is not None:
+            if self.dcp_size > 1:
+                raise ValueError("chunked prefill over cached rows is not DCP-aware")
             k_cache, v_cache = self._kv_views(atten_info.kv_buffer[layer_index])
             return self._chunked(
                 xq,
@@ -167,6 +194,11 @@ class PagedAttention(nn.Module):
                 k_scale=self.k_scale,
                 v_scale=self.v_scale,
             )
+        if self._prefill_kv_heads is not None:
+            # The cache took the whole group's KV heads; attention wants the
+            # ones this rank's query heads read.
+            start, end = self._prefill_kv_heads
+            xk, xv = xk[:, start:end], xv[:, start:end]
         return self._prefill(
             xq,
             xk,
@@ -192,6 +224,8 @@ class PagedAttention(nn.Module):
         """
         self._write_cache(xk, xv, atten_info, layer_index)
         k_cache, v_cache = self._kv_views(atten_info.kv_buffer[layer_index])
+        if self.dcp_size > 1:
+            return self._dcp_decode(xq, k_cache, v_cache, atten_info)
         return self._decode(
             xq,
             k_cache,
@@ -204,6 +238,44 @@ class PagedAttention(nn.Module):
             k_scale=self.k_scale,
             v_scale=self.v_scale,
         )
+
+    def _dcp_decode(
+        self,
+        xq: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        atten_info,
+    ) -> torch.Tensor:
+        """Decode over this rank's share of the history, merged across the DCP group.
+
+        Every quantity is derived on the device from the step's metadata, so the
+        path captures into a decode graph like the plain one. The native kernel is
+        called directly rather than through dispatch: it is the row that returns an
+        LSE and walks a strided table.
+        """
+        if xq.device.type != "cuda":
+            raise NotImplementedError("decode context parallelism runs on the CUDA kernels")
+        from ..kernels.ops.attention.flashdecoding import flash_decoding
+
+        size, rank = self.dcp_size, self.dcp_rank
+        # [rows, group_heads, dim]: every query head whose KV this rank caches.
+        group_q = decode_context_parallel_all_gather(xq.contiguous(), dim=1)
+        output, lse = flash_decoding(
+            group_q,
+            k_cache,
+            v_cache,
+            self.scale,
+            # Column j of the view is global position rank + j * size.
+            atten_info.b_req_tokens_table[:, rank::size],
+            atten_info.b_req_idx,
+            dcp_local_seq_len(atten_info.b_seq_len, rank, size),
+            dcp_local_seq_len(atten_info.max_actual_seq_len, 0, size),
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
+            return_lse=True,
+        )
+        output, _ = merge_dcp_attention(output, lse)
+        return output
 
     def forward(
         self,

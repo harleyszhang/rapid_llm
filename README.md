@@ -44,6 +44,7 @@ The model registry includes LLaMA, Qwen2, Qwen3, Qwen3-MoE, LLaVA, Qwen3-VL, and
 | Tensor parallelism | Shards projections, attention heads, and the vocabulary across ranks |
 | Expert parallelism | Assigns whole MoE experts within the TP group and routes tokens with all-to-all |
 | Data parallelism | Routes requests between independent replicas; can combine with TP |
+| Decode context parallelism | Shards the KV history by position inside a TP group and merges partial attention by log-sum-exp; saves cache bytes only for MLA or when TP exceeds the KV head count ([details](docs/context_parallel.md)) |
 | Data Parallelism Attention | Keeps Attention/KV replica-local and pools MoE tokens over the DP × TP expert grid; eager mode only |
 | CPU parallelism | Uses Gloo; select `device="cpu"` |
 | CUDA Graph | Captures supported decode shapes; requires matching choices across TP ranks |

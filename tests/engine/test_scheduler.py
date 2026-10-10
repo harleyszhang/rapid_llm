@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 from types import SimpleNamespace
@@ -668,3 +669,31 @@ def test_spec_verify_falls_back_when_no_drafts():
     assert not engine._executor.verify_called
     assert request.finish_reason == "eos"
     engine.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# Decode context parallelism
+# --------------------------------------------------------------------------- #
+def test_dcp_routes_every_resumed_chunk_through_extend(monkeypatch):
+    """The chunked kernel reads one contiguous run of rows; a DCP rank's share is strided."""
+    from rapid_llm.engine import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "get_decode_context_parallel_world_size", lambda: 2)
+    engine = _build_engine([[_WORD]])
+    assert engine._chunked_min_rows == math.inf
+    engine.shutdown()
+
+
+def test_dcp_refuses_kv_offloading(monkeypatch):
+    """Offload copies whole ``block_size``-row blocks; a DCP block is ``block_size / dcp`` rows."""
+    from rapid_llm.engine import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "get_decode_context_parallel_world_size", lambda: 2)
+    fake = _build_engine([[_WORD]]).engine
+    with pytest.raises(ValueError, match="DCP rank"):
+        Scheduler(
+            fake,
+            SchedulerConfig(max_seq_len=64, max_num_seqs=4),
+            executor=_ScriptedExecutor([[_WORD]]),
+            offloading=object(),
+        )

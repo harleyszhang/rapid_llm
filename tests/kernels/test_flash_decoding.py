@@ -168,6 +168,60 @@ def test_matches_reference_with_scattered_cache_rows(seq_lens):
     torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
 
 
+def test_return_lse_matches_reference_and_handles_empty_history():
+    seq_lens = [0, 129]
+    num_q_heads, num_kv_heads, head_dim = 4, 2, 64
+    q = torch.randn(2, num_q_heads, head_dim, device="cuda", dtype=torch.float16) * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(seq_lens, num_kv_heads, head_dim)
+    scale = 1.0 / math.sqrt(head_dim)
+    req_idx = torch.arange(2, dtype=torch.int32, device="cuda")
+
+    output, lse = flash_decoding(
+        q,
+        k_cache,
+        v_cache,
+        scale,
+        table,
+        req_idx,
+        b_seq_len,
+        max(seq_lens),
+        return_lse=True,
+    )
+
+    assert torch.equal(output[0], torch.zeros_like(output[0]))
+    assert torch.isneginf(lse[0]).all()
+    history_k = k_cache[table[1, : seq_lens[1]].long()].float()
+    history_v = v_cache[table[1, : seq_lens[1]].long()].float()
+    expected_output = torch.empty_like(output[1])
+    expected_lse = torch.empty_like(lse[1])
+    q_per_kv = num_q_heads // num_kv_heads
+    for head in range(num_q_heads):
+        kv_head = head // q_per_kv
+        scores = (history_k[:, kv_head] @ q[1, head].float()) * scale
+        expected_lse[head] = torch.logsumexp(scores, dim=0)
+        expected_output[head] = (scores.softmax(dim=0) @ history_v[:, kv_head]).to(output.dtype)
+    torch.testing.assert_close(output[1].float(), expected_output.float(), rtol=_RTOL, atol=_ATOL)
+    torch.testing.assert_close(lse[1], expected_lse, rtol=_RTOL, atol=_ATOL)
+
+
+def test_empty_batch_max_returns_without_launching_kernel():
+    q = torch.randn(2, 4, 64, device="cuda", dtype=torch.float16)
+    k_cache, v_cache, table, b_seq_len = _cache_and_table([0, 0], 2, 64)
+    output, lse = flash_decoding(
+        q,
+        k_cache,
+        v_cache,
+        1.0 / math.sqrt(64),
+        table,
+        torch.arange(2, dtype=torch.int32, device="cuda"),
+        b_seq_len,
+        0,
+        return_lse=True,
+    )
+    assert torch.equal(output, torch.zeros_like(output))
+    assert torch.isneginf(lse).all()
+
+
 def test_output_is_finite_for_long_history():
     """Guards running-max bookkeeping across many partitions.
 
@@ -455,3 +509,54 @@ def test_packed_fp8_cache_matches_widened_reference():
         max(seq_lens),
     )
     torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
+
+
+# --------------------------------------------------------------------------- #
+# DCP: strided table views (one rank's interleaved share of the positions)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "num_q_heads,num_kv_heads,head_dim",
+    [
+        pytest.param(4, 2, 64, id="baseline"),
+        pytest.param(16, 2, 128, id="packed"),
+    ],
+)
+def test_strided_table_shares_merge_to_the_full_attention(num_q_heads, num_kv_heads, head_dim):
+    """DCP's decode contract on one GPU: attend each rank's ``table[:, r::dcp]``
+    share with its local length, merge the partials by LSE, recover the whole.
+
+    A kernel that read the table with an implicit unit stride would attend the
+    neighbouring rank's positions; lengths 1 and 2 leave rank 1 / rank 2 with
+    an empty share, the case that must contribute ``-inf`` and nothing else.
+    """
+    from rapid_llm.distributed.dcp import dcp_local_seq_len, merge_attention_partials
+
+    dcp = 3
+    seq_lens = [1, 2, 37, 300]
+    q = torch.randn(len(seq_lens), num_q_heads, head_dim, device="cuda", dtype=torch.float16)
+    q = q * 0.3
+    k_cache, v_cache, table, b_seq_len = _cache_and_table(
+        seq_lens, num_kv_heads, head_dim, scattered=True
+    )
+    scale = 1.0 / math.sqrt(head_dim)
+    b_req_idx = torch.arange(len(seq_lens), dtype=torch.int32, device="cuda")
+
+    outputs, lses = [], []
+    for rank in range(dcp):
+        output, lse = flash_decoding(
+            q,
+            k_cache,
+            v_cache,
+            scale,
+            table[:, rank::dcp],
+            b_req_idx,
+            dcp_local_seq_len(b_seq_len, rank, dcp),
+            dcp_local_seq_len(max(seq_lens), 0, dcp),
+            return_lse=True,
+        )
+        outputs.append(output.float())
+        lses.append(lse)
+    merged, _ = merge_attention_partials(torch.stack(outputs), torch.stack(lses))
+
+    ref = paged_decode_attention(q, k_cache, v_cache, table, b_seq_len, scale)
+    torch.testing.assert_close(merged, ref.float(), rtol=_RTOL, atol=_ATOL)

@@ -26,6 +26,7 @@ import torch.distributed as dist
 
 from ..tools.observability import Collective, CollectiveStats
 from ..utils.logger import get_logger
+from .topology import ParallelTopology, resolve_topology
 
 _log = get_logger(__name__)
 
@@ -45,6 +46,18 @@ _EP_ENABLED: bool = False
 _EP_GROUP: dist.ProcessGroup | None = None
 _EP_RANK: int = 0
 _EP_WORLD_SIZE: int = 1
+_ATTN_TP_GROUP: dist.ProcessGroup | None = None
+_ATTN_TP_RANK: int = 0
+_ATTN_TP_WORLD_SIZE: int = 1
+_PCP_GROUP: dist.ProcessGroup | None = None
+_PCP_RANK: int = 0
+_PCP_WORLD_SIZE: int = 1
+_DCP_GROUP: dist.ProcessGroup | None = None
+_DCP_RANK: int = 0
+_DCP_WORLD_SIZE: int = 1
+_PCP_STRATEGY: str = "zigzag"
+_DCP_COMM_BACKEND: str = "ag_rs"
+_TOPOLOGY: ParallelTopology = resolve_topology()
 
 
 def grid_coordinates(global_rank: int, tp_size: int, dp_size: int) -> tuple[int, int]:
@@ -85,6 +98,10 @@ def init_parallel(
     backend: str | None = None,
     enable_expert_parallel: bool = False,
     enable_dp_attention: bool = False,
+    prefill_context_parallel_size: int = 1,
+    decode_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    dcp_comm_backend: str = "ag_rs",
 ) -> None:
     """Place this process in the ``dp_size x tp_size`` rank grid.
 
@@ -129,13 +146,34 @@ def init_parallel(
     global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
     global _DP_GROUP, _DP_CPU_GROUP, _DP_ATTENTION
     global _EP_ENABLED, _EP_GROUP, _EP_RANK, _EP_WORLD_SIZE
+    global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_WORLD_SIZE
+    global _PCP_GROUP, _PCP_RANK, _PCP_WORLD_SIZE, _PCP_STRATEGY
+    global _DCP_GROUP, _DCP_RANK, _DCP_WORLD_SIZE, _DCP_COMM_BACKEND, _TOPOLOGY
 
-    _DP_RANK, _TP_RANK = grid_coordinates(global_rank, tp_size, dp_size)
+    topology = resolve_topology(
+        global_rank,
+        tp_size,
+        dp_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+        decode_context_parallel_size=decode_context_parallel_size,
+        prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+        dcp_comm_backend=dcp_comm_backend,
+    )
+    _TOPOLOGY = topology
+    _DP_RANK, _TP_RANK = topology.dp_rank, topology.tp_rank
     _DP_WORLD_SIZE = dp_size
     _TP_WORLD_SIZE = tp_size
+    _ATTN_TP_RANK = topology.attention_tp_rank
+    _ATTN_TP_WORLD_SIZE = topology.attention_tp_size
+    _PCP_RANK = topology.pcp_rank
+    _PCP_WORLD_SIZE = topology.pcp_size
+    _PCP_STRATEGY = topology.pcp_strategy
+    _DCP_RANK = topology.dcp_rank
+    _DCP_WORLD_SIZE = topology.dcp_size
+    _DCP_COMM_BACKEND = topology.dcp_comm_backend
     _EP_ENABLED = enable_expert_parallel
     _DP_ATTENTION = enable_dp_attention and dp_size > 1
-    world_size = tp_size * dp_size
+    world_size = topology.world_size
     # How wide the expert split is: over one replica's TP group by default, over
     # the whole grid under DP-attention — which is the point of pairing the two.
     # The flag alone never implies a distributed path; a world of one answers 1.
@@ -172,6 +210,29 @@ def init_parallel(
                 _TP_GROUP = group
                 _TP_CPU_GROUP = cpu_group
 
+    if topology.pcp_size == 1:
+        _ATTN_TP_GROUP = _TP_GROUP
+    elif topology.attention_tp_size > 1:
+        for members in topology.attention_tp_groups():
+            group = dist.new_group(members, backend=backend)
+            if global_rank in members:
+                _ATTN_TP_GROUP = group
+
+    if topology.pcp_size > 1:
+        for members in topology.pcp_groups():
+            group = dist.new_group(members, backend=backend)
+            if global_rank in members:
+                _PCP_GROUP = group
+
+    if topology.dcp_size > 1:
+        if topology.dcp_size == topology.attention_tp_size:
+            _DCP_GROUP = _ATTN_TP_GROUP
+        else:
+            for members in topology.dcp_groups():
+                group = dist.new_group(members, backend=backend)
+                if global_rank in members:
+                    _DCP_GROUP = group
+
     if _DP_ATTENTION:
         # The DP axis is the *stride* through the grid: rank ``lane`` of every
         # replica forms one group, which is vLLM's transpose of the (DP, TP)
@@ -198,13 +259,20 @@ def init_parallel(
         )
 
     _log.info(
-        "parallel state: global rank %d/%d (dp %d/%d, tp %d/%d)%s%s",
+        "parallel state: global rank %d/%d (dp %d/%d, tp %d/%d, attn-tp %d/%d, "
+        "pcp %d/%d, dcp %d/%d)%s%s",
         global_rank,
         world_size,
         _DP_RANK,
         dp_size,
         _TP_RANK,
         tp_size,
+        _ATTN_TP_RANK,
+        _ATTN_TP_WORLD_SIZE,
+        _PCP_RANK,
+        _PCP_WORLD_SIZE,
+        _DCP_RANK,
+        _DCP_WORLD_SIZE,
         ", dp-attention" if _DP_ATTENTION else "",
         f", ep {_EP_RANK}/{_EP_WORLD_SIZE}" if _EP_ENABLED else "",
     )
@@ -216,6 +284,10 @@ def init_tensor_parallel(
     master_port: int = 29500,
     backend: str | None = None,
     enable_expert_parallel: bool = False,
+    prefill_context_parallel_size: int = 1,
+    decode_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    dcp_comm_backend: str = "ag_rs",
 ) -> None:
     """Initialise a TP-only world: one replica whose ranks are ``[0, world_size)``.
 
@@ -236,6 +308,10 @@ def init_tensor_parallel(
         master_port=master_port,
         backend=backend,
         enable_expert_parallel=enable_expert_parallel,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+        decode_context_parallel_size=decode_context_parallel_size,
+        prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+        dcp_comm_backend=dcp_comm_backend,
     )
 
 
@@ -262,6 +338,9 @@ def _reset_grid() -> None:
     global _TP_RANK, _TP_WORLD_SIZE, _TP_GROUP, _TP_CPU_GROUP, _DP_RANK, _DP_WORLD_SIZE
     global _DP_GROUP, _DP_CPU_GROUP, _DP_ATTENTION
     global _EP_ENABLED, _EP_GROUP, _EP_RANK, _EP_WORLD_SIZE
+    global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_WORLD_SIZE
+    global _PCP_GROUP, _PCP_RANK, _PCP_WORLD_SIZE, _PCP_STRATEGY
+    global _DCP_GROUP, _DCP_RANK, _DCP_WORLD_SIZE, _DCP_COMM_BACKEND, _TOPOLOGY
     _TP_RANK = 0
     _TP_WORLD_SIZE = 1
     _TP_GROUP = None
@@ -275,6 +354,18 @@ def _reset_grid() -> None:
     _EP_GROUP = None
     _EP_RANK = 0
     _EP_WORLD_SIZE = 1
+    _ATTN_TP_GROUP = None
+    _ATTN_TP_RANK = 0
+    _ATTN_TP_WORLD_SIZE = 1
+    _PCP_GROUP = None
+    _PCP_RANK = 0
+    _PCP_WORLD_SIZE = 1
+    _PCP_STRATEGY = "zigzag"
+    _DCP_GROUP = None
+    _DCP_RANK = 0
+    _DCP_WORLD_SIZE = 1
+    _DCP_COMM_BACKEND = "ag_rs"
+    _TOPOLOGY = resolve_topology()
 
 
 def destroy_tensor_parallel() -> None:
@@ -311,14 +402,62 @@ def get_world_size() -> int:
 
 
 def get_tensor_model_parallel_group() -> dist.ProcessGroup | None:
-    """The replica's TP process group, or ``None`` when TP is disabled.
+    """The replica control process group, or ``None`` when TP is disabled.
 
-    Callers that issue their own collectives on a side stream — the overlap
-    package's deferred all-reduce, for instance — need the group object rather
-    than the wrapped helpers, because they post the reduction themselves and
-    fence it with their own events.
+    This remains the full replica group under PCP so plan/token broadcasts and
+    CUDA-graph consensus include every rank. Model data-path collectives should
+    use :func:`get_attention_tensor_parallel_group` instead.
     """
     return _TP_GROUP
+
+
+def get_parallel_topology() -> ParallelTopology:
+    """The validated topology used to initialise this process."""
+    return _TOPOLOGY
+
+
+def get_attention_tensor_parallel_group() -> dist.ProcessGroup | None:
+    return _ATTN_TP_GROUP
+
+
+def get_attention_tensor_parallel_rank() -> int:
+    return _ATTN_TP_RANK
+
+
+def get_attention_tensor_parallel_world_size() -> int:
+    return _ATTN_TP_WORLD_SIZE
+
+
+def get_prefill_context_parallel_group() -> dist.ProcessGroup | None:
+    return _PCP_GROUP
+
+
+def get_prefill_context_parallel_rank() -> int:
+    return _PCP_RANK
+
+
+def get_prefill_context_parallel_world_size() -> int:
+    return _PCP_WORLD_SIZE
+
+
+def get_prefill_context_parallel_strategy() -> str:
+    return _PCP_STRATEGY
+
+
+def get_decode_context_parallel_group() -> dist.ProcessGroup | None:
+    return _DCP_GROUP
+
+
+def get_decode_context_parallel_rank() -> int:
+    return _DCP_RANK
+
+
+def get_decode_context_parallel_world_size() -> int:
+    return _DCP_WORLD_SIZE
+
+
+def get_dcp_comm_backend() -> str:
+    return _DCP_COMM_BACKEND
 
 
 def expert_parallel_enabled() -> bool:
@@ -403,6 +542,48 @@ def _resolve(group: dist.ProcessGroup | None) -> dist.ProcessGroup | None:
 def _world_of_one(group: dist.ProcessGroup | None) -> bool:
     """Whether a collective over ``group`` has no peer to talk to."""
     return _TP_WORLD_SIZE <= 1 if group is None else dist.get_world_size(group) <= 1
+
+
+def _all_reduce_on(
+    tensor: torch.Tensor, group: dist.ProcessGroup | None, world_size: int
+) -> torch.Tensor:
+    if world_size <= 1:
+        return tensor
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group)
+    CollectiveStats.record(Collective.ALL_REDUCE, _payload(tensor))
+    return tensor
+
+
+def _all_gather_on(
+    tensor: torch.Tensor, dim: int, group: dist.ProcessGroup | None, world_size: int
+) -> torch.Tensor:
+    if world_size <= 1:
+        return tensor
+    tensor = tensor.contiguous()
+    parts = [torch.empty_like(tensor) for _ in range(world_size)]
+    dist.all_gather(parts, tensor, group=group)
+    CollectiveStats.record(Collective.ALL_GATHER, _payload(tensor))
+    return torch.cat(parts, dim=dim)
+
+
+def attention_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+    return _all_reduce_on(tensor, _ATTN_TP_GROUP, _ATTN_TP_WORLD_SIZE)
+
+
+def attention_model_parallel_all_gather(tensor: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    return _all_gather_on(tensor, dim, _ATTN_TP_GROUP, _ATTN_TP_WORLD_SIZE)
+
+
+def prefill_context_parallel_all_gather(tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    return _all_gather_on(tensor, dim, _PCP_GROUP, _PCP_WORLD_SIZE)
+
+
+def decode_context_parallel_all_gather(tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    return _all_gather_on(tensor, dim, _DCP_GROUP, _DCP_WORLD_SIZE)
+
+
+def decode_context_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+    return _all_reduce_on(tensor, _DCP_GROUP, _DCP_WORLD_SIZE)
 
 
 def tensor_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
@@ -917,13 +1098,21 @@ def warmup_collectives() -> None:
     traffic a *step* pays, and folding a one-off initialisation into that total
     would overstate the per-step cost by a constant.
     """
+    candidates = (
+        (_TP_GROUP, _TP_WORLD_SIZE),
+        (_ATTN_TP_GROUP, _ATTN_TP_WORLD_SIZE),
+        (_PCP_GROUP, _PCP_WORLD_SIZE),
+        (_DCP_GROUP, _DCP_WORLD_SIZE),
+        (_DP_GROUP, _DP_WORLD_SIZE),
+        (_EP_GROUP, _EP_WORLD_SIZE),
+    )
     groups: list[tuple[dist.ProcessGroup, int]] = []
-    if _TP_GROUP is not None and _TP_WORLD_SIZE > 1:
-        groups.append((_TP_GROUP, _TP_WORLD_SIZE))
-    if _DP_GROUP is not None:
-        groups.append((_DP_GROUP, _DP_WORLD_SIZE))
-    if _EP_GROUP is not None and _EP_GROUP is not _TP_GROUP and _EP_GROUP is not _DP_GROUP:
-        groups.append((_EP_GROUP, _EP_WORLD_SIZE))
+    seen: set[int] = set()
+    for group, expected in candidates:
+        if group is None or expected <= 1 or id(group) in seen:
+            continue
+        seen.add(id(group))
+        groups.append((group, expected))
     for group, expected in groups:
         on_gpu = dist.get_backend(group) == "nccl"
         device = torch.device("cuda", torch.cuda.current_device()) if on_gpu else None

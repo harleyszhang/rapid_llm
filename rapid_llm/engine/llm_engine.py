@@ -18,6 +18,7 @@ import torch
 from transformers import AutoTokenizer
 
 from ..distributed.parallel_state import (
+    get_parallel_topology,
     tensor_model_parallel_broadcast,
 )
 from ..executor.model_runner import ModelRunner
@@ -394,6 +395,10 @@ class LLMEngine:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         enable_expert_parallel: bool = False,
+        prefill_context_parallel_size: int = 1,
+        prefill_context_parallel_strategy: str = "zigzag",
+        decode_context_parallel_size: int = 1,
+        dcp_comm_backend: str = "ag_rs",
         kv_cache_dtype: str = "auto",
         cuda_graph_lazy: bool = False,
         hf_overrides: dict[str, object] | None = None,
@@ -402,6 +407,45 @@ class LLMEngine:
         self.model_path = checkpoints_dir
         self.tensor_parallel_size = tensor_parallel_size
         self.enable_expert_parallel = enable_expert_parallel
+        topology = get_parallel_topology()
+        requested = (
+            tensor_parallel_size,
+            prefill_context_parallel_size,
+            prefill_context_parallel_strategy,
+            decode_context_parallel_size,
+            dcp_comm_backend,
+        )
+        joined = (
+            topology.tp_size,
+            topology.pcp_size,
+            topology.pcp_strategy,
+            topology.dcp_size,
+            topology.dcp_comm_backend,
+        )
+        if requested != joined:
+            raise ValueError(
+                "engine parallel configuration does not match the process groups: "
+                f"requested={requested}, joined={joined}"
+            )
+        self.prefill_context_parallel_size = prefill_context_parallel_size
+        self.prefill_context_parallel_strategy = prefill_context_parallel_strategy
+        self.decode_context_parallel_size = decode_context_parallel_size
+        self.dcp_comm_backend = dcp_comm_backend
+        if prefill_context_parallel_size > 1:
+            # The groups form (attn-TP = TP / PCP), but every model layer still
+            # shards over the whole TP group; serving PCP needs the attention
+            # and MLP shardings split first.
+            raise NotImplementedError(
+                "prefill context parallelism is not wired into the model data path yet"
+            )
+        if decode_context_parallel_size > 1:
+            from ..batch_overlap.two_batch_overlap import tbo_policy
+
+            if tbo_policy().enabled:
+                raise ValueError(
+                    "two-batch overlap splits a decode step around the TP all-reduce; "
+                    "its halves do not schedule the DCP gather/merge collectives"
+                )
 
         # EP keeps its graphs. Its decode path posts the dispatch/combine
         # all-to-all exchanges on the shared comm stream with the same

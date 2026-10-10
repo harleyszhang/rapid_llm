@@ -339,6 +339,10 @@ def launch_tensor_parallel(
     max_num_seqs: int,
     master_port: int | None = None,
     enable_expert_parallel: bool = False,
+    prefill_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    decode_context_parallel_size: int = 1,
+    dcp_comm_backend: str = "ag_rs",
     device: str = "cuda",
     pipeline: bool | None = None,
 ) -> tuple[mp.process.BaseProcess, ...]:
@@ -376,6 +380,10 @@ def launch_tensor_parallel(
                 max_num_seqs,
                 master_port,
                 enable_expert_parallel,
+                prefill_context_parallel_size,
+                prefill_context_parallel_strategy,
+                decode_context_parallel_size,
+                dcp_comm_backend,
                 device,
                 pipeline,
             ),
@@ -392,6 +400,10 @@ def launch_tensor_parallel(
         backend="gloo" if torch.device(device).type == "cpu" else "nccl",
         master_port=master_port,
         enable_expert_parallel=enable_expert_parallel,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+        prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+        decode_context_parallel_size=decode_context_parallel_size,
+        dcp_comm_backend=dcp_comm_backend,
     )
     return tuple(followers)
 
@@ -455,6 +467,10 @@ def run_follower(
     max_num_seqs: int,
     master_port: int,
     enable_expert_parallel: bool = False,
+    prefill_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    decode_context_parallel_size: int = 1,
+    dcp_comm_backend: str = "ag_rs",
     device: str = "cuda",
     pipeline: bool | None = None,
 ) -> None:
@@ -479,6 +495,10 @@ def run_follower(
         backend="gloo" if on_cpu else "nccl",
         master_port=master_port,
         enable_expert_parallel=enable_expert_parallel,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+        prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+        decode_context_parallel_size=decode_context_parallel_size,
+        dcp_comm_backend=dcp_comm_backend,
     )
     engine = None
     try:

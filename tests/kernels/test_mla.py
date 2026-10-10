@@ -137,6 +137,88 @@ def test_decode_matches_reference_with_smaller_lora():
     torch.testing.assert_close(out.float(), ref.float(), rtol=_RTOL, atol=_ATOL)
 
 
+def test_decode_return_lse_matches_reference_and_handles_empty_history():
+    seq_lens = [0, 129]
+    kv_cache, block_table, cache_seqlens = _latent_cache(seq_lens, 16)
+    q = torch.randn(2, 8, _QK_DIM, device="cuda", dtype=torch.bfloat16) * 0.3
+    scale = 1.0 / math.sqrt(_QK_DIM)
+
+    output, lse = mla_decode(
+        q,
+        kv_cache,
+        block_table,
+        cache_seqlens,
+        max_seq_len=max(seq_lens),
+        sm_scale=scale,
+        return_lse=True,
+    )
+    expected_output, expected_lse = mla_decode_reference(
+        q,
+        kv_cache,
+        block_table,
+        cache_seqlens,
+        max_seq_len=max(seq_lens),
+        sm_scale=scale,
+        return_lse=True,
+    )
+
+    torch.testing.assert_close(output.float(), expected_output.float(), rtol=_RTOL, atol=_ATOL)
+    torch.testing.assert_close(lse[1], expected_lse[1], rtol=_RTOL, atol=_ATOL)
+    assert torch.equal(output[0], torch.zeros_like(output[0]))
+    assert torch.isneginf(lse[0]).all()
+
+
+def test_decode_empty_batch_max_returns_without_launching_kernel():
+    kv_cache, block_table, cache_seqlens = _latent_cache([0, 0], 16)
+    q = torch.randn(2, 8, _QK_DIM, device="cuda", dtype=torch.bfloat16)
+
+    output, lse = mla_decode(
+        q,
+        kv_cache,
+        block_table,
+        cache_seqlens,
+        max_seq_len=0,
+        return_lse=True,
+    )
+
+    assert torch.equal(output, torch.zeros_like(output))
+    assert torch.isneginf(lse).all()
+
+
+def test_decode_strided_table_shares_merge_to_the_full_attention():
+    """DCP's latent decode on one GPU: each rank attends ``table[:, r::dcp]``
+    (page size 1, the engine's pool) with its local length; the LSE merge of
+    the shares must equal attention over the whole history.
+    """
+    from rapid_llm.distributed.dcp import dcp_local_seq_len, merge_attention_partials
+
+    dcp = 2
+    seq_lens = [1, 64, 131]
+    kv_cache, block_table, cache_seqlens = _latent_cache(seq_lens, 1, scattered=True)
+    q = torch.randn(len(seq_lens), 8, _QK_DIM, device="cuda", dtype=torch.bfloat16) * 0.3
+    scale = 1.0 / math.sqrt(_QK_DIM)
+
+    outputs, lses = [], []
+    for rank in range(dcp):
+        output, lse = mla_decode(
+            q,
+            kv_cache,
+            block_table[:, rank::dcp],
+            dcp_local_seq_len(cache_seqlens, rank, dcp),
+            max_seq_len=dcp_local_seq_len(max(seq_lens), 0, dcp),
+            sm_scale=scale,
+            return_lse=True,
+        )
+        outputs.append(output.float())
+        lses.append(lse)
+    merged, _ = merge_attention_partials(torch.stack(outputs), torch.stack(lses))
+
+    ref = mla_decode_reference(
+        q, kv_cache, block_table, cache_seqlens, max_seq_len=max(seq_lens), sm_scale=scale
+    )
+    torch.testing.assert_close(merged, ref.float(), rtol=_RTOL, atol=_ATOL)
+
+
 def test_decode_tolerates_oversized_max_seq_len():
     """A grid sized beyond every row's history must not write or read there.
 

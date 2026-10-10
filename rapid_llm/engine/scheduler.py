@@ -33,6 +33,7 @@ import torch
 from ..distributed.dp_attention import coordinate_forward_count_across_dp
 from ..distributed.parallel_state import (
     dp_attention_enabled,
+    get_decode_context_parallel_world_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -337,7 +338,15 @@ class Scheduler:
         # beats paying one decode-style row per token — the per-token cost
         # that kept prefix-cache hits from lowering TTFT. An fp8 cache routes
         # the same way: the chunk kernel dequantises the e4m3 rows it reads.
-        fused = getenv(_FUSED_CHUNK_ENV, "1") != "0"
+        # Under DCP every resumed chunk extends: the chunked kernel reads one
+        # contiguous run of cache rows, and a DCP rank holds an interleaved share.
+        dcp = get_decode_context_parallel_world_size() > 1
+        fused = getenv(_FUSED_CHUNK_ENV, "1") != "0" and not dcp
+        if dcp and offloading is not None:
+            raise ValueError(
+                "KV offloading moves whole blocks of block_size rows; a DCP rank "
+                "holds block_size / dcp rows per block, so the two cannot be combined"
+            )
 
         self._executor: Executor = executor or UniProcExecutor(
             engine, config.max_num_seqs, config.max_seq_len, pipeline=self._pipeline
@@ -414,6 +423,10 @@ class Scheduler:
         quantization: str | None = None,
         tensor_parallel_size: int = 1,
         enable_expert_parallel: bool = False,
+        prefill_context_parallel_size: int = 1,
+        prefill_context_parallel_strategy: str = "zigzag",
+        decode_context_parallel_size: int = 1,
+        dcp_comm_backend: str = "ag_rs",
         kv_cache_dtype: str = "auto",
         enable_prefix_cache: bool = False,
         prefix_cache_blocks: int | None = None,
@@ -462,6 +475,16 @@ class Scheduler:
                 graphs — the a2a exchanges capture with the same comm-stream
                 discipline the deferred all-reduce uses, and EP defaults to
                 lazy capture so the larger exchange buffers fit.
+            prefill_context_parallel_size: Prefill context-parallel ranks.
+                Only ``1`` is served today; larger values are rejected.
+            prefill_context_parallel_strategy: PCP token layout
+                (``"zigzag"`` or ``"interleave"``).
+            decode_context_parallel_size: Ranks of each attention-TP group
+                that shard the KV history, position ``p`` living on rank
+                ``p % dcp``. Must divide ``tensor_parallel_size``. See
+                ``docs/context_parallel.md``.
+            dcp_comm_backend: How DCP ranks merge their partial attention:
+                ``"ag_rs"`` (all-gather LSE + reduce-scatter) or ``"a2a"``.
             kv_cache_dtype: KV-cache element type, forwarded to the engine
                 (``"auto"`` for fp16, or an fp8 spelling to halve the cache).
             enable_prefix_cache: Reuse the K/V of prompt prefixes already
@@ -528,6 +551,10 @@ class Scheduler:
             # replayed once the startup gates in ``ModelRunner`` accept it.
             "use_cuda_graph": use_cuda_graph,
             "quantization": quantization,
+            "prefill_context_parallel_size": prefill_context_parallel_size,
+            "prefill_context_parallel_strategy": prefill_context_parallel_strategy,
+            "decode_context_parallel_size": decode_context_parallel_size,
+            "dcp_comm_backend": dcp_comm_backend,
             "kv_cache_dtype": kv_cache_dtype,
             "cuda_graph_lazy": cuda_graph_lazy,
             "hf_overrides": hf_overrides,
@@ -550,6 +577,10 @@ class Scheduler:
                 engine_kwargs,
                 max_num_seqs,
                 enable_expert_parallel=enable_expert_parallel,
+                prefill_context_parallel_size=prefill_context_parallel_size,
+                prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+                decode_context_parallel_size=decode_context_parallel_size,
+                dcp_comm_backend=dcp_comm_backend,
                 device=device,
                 pipeline=resolved_pipeline,
             )

@@ -34,9 +34,12 @@ ATTN = "layers.0.self_attn"
 def grid(monkeypatch):
     """Become one rank of a ``tp_size``-wide grid, with no process group behind it."""
 
-    def enter(rank: int, tp_size: int) -> None:
+    def enter(rank: int, tp_size: int, dcp_size: int = 1) -> None:
         monkeypatch.setattr(ps, "_TP_RANK", rank)
         monkeypatch.setattr(ps, "_TP_WORLD_SIZE", tp_size)
+        # DCP groups are contiguous runs of TP ranks (PCP = 1).
+        monkeypatch.setattr(ps, "_DCP_RANK", rank % dcp_size)
+        monkeypatch.setattr(ps, "_DCP_WORLD_SIZE", dcp_size)
 
     return enter
 
@@ -189,6 +192,34 @@ def test_a_rank_holds_the_heads_its_index_selects(grid, tp_size: int):
         assert q[0] == first_q_head
         assert k[0] == 100 + first_kv_head
         assert v[0] == 200 + first_kv_head
+
+
+@pytest.mark.parametrize("tp_size,dcp_size", [(2, 2), (4, 2), (4, 4)])
+def test_a_dcp_group_shares_its_kv_heads_and_prefill_reads_the_ones_gqa_pairs(
+    grid, tp_size: int, dcp_size: int
+):
+    """Under DCP the KV heads shard ``tp / dcp`` ways: every rank of one DCP
+    group holds the same KV heads (it splits positions, not heads), and the
+    prefill sub-range must be the KV heads GQA pairs with this rank's own query
+    heads -- the wrong range attends the right queries against a neighbour's K/V.
+    """
+    from rapid_llm.distributed.dcp import dcp_kv_head_range
+
+    ratio = NUM_HEADS // NUM_KV_HEADS
+    for rank in range(tp_size):
+        grid(rank, tp_size, dcp_size)
+        proj = _load_this_rank()
+        q, k, v = (block.float()[:, 0] for block in _blocks(proj, proj.weight.data))
+        q_heads = (q[::HEAD_DIM] // HEAD_DIM).long().tolist()
+        kv_heads = ((k[::HEAD_DIM] - 100) // HEAD_DIM).long().tolist()
+
+        assert len(q_heads) == NUM_HEADS // tp_size
+        first_kv = (rank // dcp_size) * len(kv_heads)
+        assert kv_heads == list(range(first_kv, first_kv + NUM_KV_HEADS * dcp_size // tp_size))
+        assert torch.equal(v - 200, k - 100)
+
+        start, end = dcp_kv_head_range(len(q_heads), len(kv_heads), rank % dcp_size, dcp_size)
+        assert kv_heads[start:end] == sorted({head // ratio for head in q_heads})
 
 
 def test_split_hands_out_views_in_qkv_order_with_heads_still_adjacent(grid):

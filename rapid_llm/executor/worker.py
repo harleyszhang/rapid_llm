@@ -205,9 +205,10 @@ class ModelWorker:
         # requested concurrency, not to however many slots fit the cache.
         self.num_slots = min(self._slot_batch.num_slots, max_num_seqs)
         # Cache rows in scheduler block units: the block pool admits requests,
-        # so it is sized by real memory, not the table's geometry.
+        # so it is sized by real memory, not the table's geometry. Under DCP a
+        # block takes only this rank's share of rows.
         self.num_kv_blocks = (
-            self._runner.kv_cache_manager.gpu_num_blocks // self._slot_batch.block_size
+            self._runner.kv_cache_manager.gpu_num_blocks // self._slot_batch.rows_per_block
         )
         self._gen_grid = torch.zeros(
             (self.num_slots, max_seq_len), dtype=torch.long, device=self._device

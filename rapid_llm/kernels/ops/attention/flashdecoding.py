@@ -196,8 +196,10 @@ def _flash_decoding_stage1_kernel(
     for start_n in range(0, num_blocks, 1):
         # k 位置索引计算
         offs_n_new = offs_n + start_n * BLOCK_N  # [BLOCK_N]
+        # Column stride honoured so a strided view (DCP's ``table[:, r::dcp]``)
+        # reads its own positions; Triton specialises the stride-1 case.
         k_loc = tl.load(
-            req_table_offset + offs_n_new,
+            req_table_offset + offs_n_new * stride_req_to_tokens_s,
             mask=offs_n_new < cur_batch_partition_end_index,
             other=0.0,
         )
@@ -334,6 +336,7 @@ def _flash_decoding_stage2_kernel(
     Mid_O,  # [batch, head, seq_block_num, head_dim]
     Mid_O_LogExpSum,  # [batch, head, seq_block_num]
     Ouput,  # attention 输出首地址
+    Lse_Output,  # 可选的每行每头 logsumexp 输出
     mido_batch_stride,
     mido_heads_stride,
     mido_partitions_stride,
@@ -344,9 +347,12 @@ def _flash_decoding_stage2_kernel(
     o_bs_stride,
     o_heads_stride,
     o_dim_stride,
+    lse_bs_stride,
+    lse_heads_stride,
     B_Seqlen,  # [batch] 每行的历史长度, 决定该行要归约多少个分区
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,  # type: ignore
+    STORE_LSE: tl.constexpr,
 ):
     """Reduction (online softmax)"""
     batch_pid = tl.program_id(0)
@@ -395,6 +401,10 @@ def _flash_decoding_stage2_kernel(
     # 长度为 0 的行没有分区可归约, acc 和 d_i 都还是初值; 除数兜底成 1.0 让它
     # 写出零向量, 而不是把 NaN 播进 o_proj 和之后的每一层。
     tl.store(Ouput + offs_out, acc / tl.where(d_i > 0.0, d_i, 1.0))
+    if STORE_LSE:
+        offs_lse = batch_pid * lse_bs_stride + head_pid * lse_heads_stride
+        lse = tl.where(d_i > 0.0, m_i + tl.log(d_i), -float("inf"))
+        tl.store(Lse_Output + offs_lse, lse)
 
 
 @torch.no_grad()
@@ -404,6 +414,8 @@ def flash_decode_stage2(
     atten_output,  # attention 输出首地址
     b_seq_len,  # kv cache 在 seq_len 维度的长度向量
     PARTITION_SIZE,
+    *,
+    lse_output: torch.Tensor | None = None,
 ):
     batchs, num_heads, HEAD_DIM = mid_o.shape[0], mid_o.shape[1], mid_o.shape[-1]
     grid = (batchs, num_heads)
@@ -412,12 +424,16 @@ def flash_decode_stage2(
         mid_o,  # [batch, head, seq_block_num, head_dim]
         mid_o_logexpsum,  # [batch, head, seq_block_num]
         atten_output,  # attention 输出首地址
+        atten_output if lse_output is None else lse_output,
         *mid_o.stride(),
         *mid_o_logexpsum.stride(),
         *atten_output.stride(),
+        0 if lse_output is None else lse_output.stride(0),
+        0 if lse_output is None else lse_output.stride(1),
         b_seq_len,
         BLOCK_DMODEL=HEAD_DIM,
         BLOCK_SEQ=PARTITION_SIZE,  # type: ignore
+        STORE_LSE=lse_output is not None,
         num_warps=4,
         num_stages=2,
     )
@@ -435,6 +451,7 @@ def flash_decoding(
     max_actual_seq_len,
     k_scale: float = 1.0,  # fp8 KV cache 的逐张量反量化标量(vLLM kv_scale 语义)
     v_scale: float = 1.0,
+    return_lse: bool = False,
 ):
     """Decode attention for one token per sequence.
 
@@ -451,10 +468,20 @@ def flash_decoding(
         max_actual_seq_len: Longest row, which sizes the partition grid.
         k_scale: Dequantisation scale of an fp8 key cache; ignored for fp16.
         v_scale: Same for the value cache.
+        return_lse: Also return the per-row, per-query-head logsumexp. Empty
+            histories produce a zero output and ``-inf`` LSE.
     """
     # q.view(-1, num_heads, head_dim)
     assert q.shape[-1] == k_cache.shape[-1] == v_cache.shape[-1]
     batchs, num_heads, head_dim = q.shape  # decode 阶段 q 的 seq_len = 1,
+    if max_actual_seq_len <= 0:
+        output = torch.zeros_like(q)
+        if return_lse:
+            lse = torch.full(
+                (batchs, num_heads), -float("inf"), dtype=torch.float32, device=q.device
+            )
+            return output, lse
+        return output
 
     # GQA-packed stage 1: one program carries a kv head's whole q-head group,
     # so K/V is read once per group instead of once per q head, and the qk/pv
@@ -532,9 +559,21 @@ def flash_decoding(
     # decode stage 2: reduction among partitions
     atten_output = torch.empty_like(q)
 
-    flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, b_seq_len, PARTITION_SIZE)
+    lse_output = (
+        torch.empty((batchs, num_heads), dtype=torch.float32, device=q.device)
+        if return_lse
+        else None
+    )
+    flash_decode_stage2(
+        mid_o,
+        mid_o_logexpsum,
+        atten_output,
+        b_seq_len,
+        PARTITION_SIZE,
+        lse_output=lse_output,
+    )
 
-    return atten_output
+    return (atten_output, lse_output) if return_lse else atten_output
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +703,7 @@ def _flash_decoding_packed_stage1_kernel(
         offs_n_new = offs_n + start_n * BLOCK_N
         n_mask = offs_n_new < cur_batch_partition_end_index
         k_loc = tl.load(
-            req_table_offset + offs_n_new,
+            req_table_offset + offs_n_new * stride_req_to_tokens_s,
             mask=n_mask,
             other=0.0,
         )

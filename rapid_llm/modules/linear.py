@@ -16,6 +16,7 @@ import torch.nn as nn
 from ..batch_overlap import row_parallel_forward
 from ..distributed.parallel_state import (
     divide,
+    get_decode_context_parallel_world_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -171,6 +172,16 @@ class ColumnParallelLinear(LinearBase):
         return super()._weight_loader(view, loaded)
 
 
+def kv_shard_count() -> int:
+    """Ways the key/value heads split: TP, divided back by the DCP replication."""
+    return get_tensor_model_parallel_world_size() // get_decode_context_parallel_world_size()
+
+
+def kv_shard_index() -> int:
+    """This rank's KV shard: its DCP group (DCP groups are consecutive TP ranks)."""
+    return get_tensor_model_parallel_rank() // get_decode_context_parallel_world_size()
+
+
 class QKVParallelLinear(LinearBase):
     """The query, key and value projections as one column-parallel weight.
 
@@ -182,6 +193,10 @@ class QKVParallelLinear(LinearBase):
     hand low ranks only query heads, high ranks only kv heads). The local layout is
     ``[q | k | v]`` with heads adjacent in a row, so :meth:`split` never copies (RoPE
     rotates q/k in place, the KV write addresses them by stride).
+
+    Under decode context parallelism the key/value block is split only ``tp / dcp``
+    ways: the ranks of one DCP group cache disjoint positions of the *same* KV heads
+    (the heads of the whole group's queries), so they load identical k/v shards.
 
     Raises:
         ValueError: If either head count does not divide across the ranks, or a block's
@@ -201,7 +216,7 @@ class QKVParallelLinear(LinearBase):
     ) -> None:
         world_size = get_tensor_model_parallel_world_size()
         local_heads = divide(num_heads, world_size, "attention heads")
-        local_kv_heads = divide(num_kv_heads, world_size, "key/value heads")
+        local_kv_heads = divide(num_kv_heads, kv_shard_count(), "key/value heads")
         q_size = local_heads * head_dim
         kv_size = local_kv_heads * head_dim
         # Checked per block, not on the total: a fused width can be a whole number of
@@ -246,10 +261,12 @@ class QKVParallelLinear(LinearBase):
         offset, rows = ((0, q_rows), (q_rows, kv_rows), (q_rows + kv_rows, kv_rows))[shard_id]
         view = param.data.narrow(0, offset, rows)
 
-        world_size = get_tensor_model_parallel_world_size()
-        if world_size > 1:
-            size = loaded.shape[0] // world_size
-            loaded = loaded.narrow(0, get_tensor_model_parallel_rank() * size, size)
+        shards, index = get_tensor_model_parallel_world_size(), get_tensor_model_parallel_rank()
+        if shard_id != 0:
+            shards, index = kv_shard_count(), kv_shard_index()
+        if shards > 1:
+            size = loaded.shape[0] // shards
+            loaded = loaded.narrow(0, index * size, size)
 
         return super()._weight_loader(view, loaded)
 

@@ -17,7 +17,14 @@ import math
 import torch
 import torch.nn as nn
 
-from ..distributed.parallel_state import divide, get_tensor_model_parallel_world_size
+from ..distributed.dcp import dcp_local_seq_len, merge_dcp_attention
+from ..distributed.parallel_state import (
+    decode_context_parallel_all_gather,
+    divide,
+    get_decode_context_parallel_rank,
+    get_decode_context_parallel_world_size,
+    get_tensor_model_parallel_world_size,
+)
 from ..kernels import dispatch, rope_emb_forward, skip_rmsnorm
 from ..kernels.dispatcher import MLA_LATENT_TAGS
 from ..models.config import ModelConfig
@@ -135,6 +142,8 @@ class DeepseekV2MLAAttention(nn.Module):
         # Bind after weights and inputs have been placed on their execution device.
         self._bound_device = None
         self._params_dtype = dtype
+        self.dcp_size = get_decode_context_parallel_world_size()
+        self.dcp_rank = get_decode_context_parallel_rank()
 
     def _bind_kernels(self, device_type: str) -> None:
         if self._bound_device == device_type:
@@ -236,18 +245,42 @@ class DeepseekV2MLAAttention(nn.Module):
             # of the latent cache).
             q_absorbed = torch.einsum("bhd,hld->bhl", q_nope, self.w_uk)
             q_latent = torch.cat((q_absorbed, q_pe), dim=-1)
-            block_table = atten_info.b_req_tokens_table[atten_info.b_req_idx]
-            attended = self._decode(
-                q_latent,
-                atten_info.kv_buffer[layer_index],
-                block_table,
-                atten_info.b_seq_len,
-                max_seq_len=atten_info.max_actual_seq_len,
-                sm_scale=self.scale,
-            )
+            if self.dcp_size > 1:
+                attended = self._dcp_decode(q_latent, atten_info, layer_index)
+            else:
+                block_table = atten_info.b_req_tokens_table[atten_info.b_req_idx]
+                attended = self._decode(
+                    q_latent,
+                    atten_info.kv_buffer[layer_index],
+                    block_table,
+                    atten_info.b_seq_len,
+                    max_seq_len=atten_info.max_actual_seq_len,
+                    sm_scale=self.scale,
+                )
             out = torch.einsum("bhl,hld->bhd", attended, self.w_uv)
 
         # reshape, not view: the decode einsum output can be non-contiguous, and the copy is
         # free next to the o_proj GEMM.
         out = out.reshape(batch, seq_len, self.num_heads * self.v_head_dim)
         return self.o_proj(out)
+
+    def _dcp_decode(self, q_latent: torch.Tensor, atten_info, layer_index: int) -> torch.Tensor:
+        """Latent decode over this rank's positions, LSE-merged across the DCP group.
+
+        The latent has no head axis, so TP replicates it and DCP is a straight
+        ``1 / dcp`` cut of the cache. Queries of the whole group attend the local
+        share; the merge hands back this rank's own heads for the ``w_uv`` GEMM.
+        """
+        size, rank = self.dcp_size, self.dcp_rank
+        group_q = decode_context_parallel_all_gather(q_latent.contiguous(), dim=1)
+        attended, lse = self._decode(
+            group_q,
+            atten_info.kv_buffer[layer_index],
+            atten_info.b_req_tokens_table[:, rank::size][atten_info.b_req_idx],
+            dcp_local_seq_len(atten_info.b_seq_len, rank, size),
+            max_seq_len=dcp_local_seq_len(atten_info.max_actual_seq_len, 0, size),
+            sm_scale=self.scale,
+            return_lse=True,
+        )
+        attended, _ = merge_dcp_attention(attended, lse)
+        return attended

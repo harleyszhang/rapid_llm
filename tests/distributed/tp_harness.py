@@ -68,6 +68,10 @@ def _worker(
     acks: mp.Queue,
     enable_expert_parallel: bool = False,
     enable_dp_attention: bool = False,
+    prefill_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    decode_context_parallel_size: int = 1,
+    dcp_comm_backend: str = "ag_rs",
 ) -> None:
     """One rank: take a device, join the grid, run the payload, report answer or traceback.
 
@@ -91,6 +95,10 @@ def _worker(
             backend=backend,
             enable_expert_parallel=enable_expert_parallel,
             enable_dp_attention=enable_dp_attention,
+            prefill_context_parallel_size=prefill_context_parallel_size,
+            prefill_context_parallel_strategy=prefill_context_parallel_strategy,
+            decode_context_parallel_size=decode_context_parallel_size,
+            dcp_comm_backend=dcp_comm_backend,
         )
         results.put((rank, payload(rank), None))
     except BaseException:  # reported to the parent, which re-raises it verbatim
@@ -203,6 +211,10 @@ def _attempt(
     backend: str,
     enable_expert_parallel: bool,
     enable_dp_attention: bool,
+    prefill_context_parallel_size: int,
+    prefill_context_parallel_strategy: str,
+    decode_context_parallel_size: int,
+    dcp_comm_backend: str,
 ) -> list[Any]:
     """One grid on one freshly picked rendezvous port.
 
@@ -237,6 +249,10 @@ def _attempt(
                 acks,
                 enable_expert_parallel,
                 enable_dp_attention,
+                prefill_context_parallel_size,
+                prefill_context_parallel_strategy,
+                decode_context_parallel_size,
+                dcp_comm_backend,
             ),
             daemon=True,
         )
@@ -289,6 +305,10 @@ def run_on_tp_ranks(
     backend: str = "nccl",
     enable_expert_parallel: bool = False,
     enable_dp_attention: bool = False,
+    prefill_context_parallel_size: int = 1,
+    prefill_context_parallel_strategy: str = "zigzag",
+    decode_context_parallel_size: int = 1,
+    dcp_comm_backend: str = "ag_rs",
 ) -> list[Any]:
     """Run ``payload(rank)`` on every rank of a ``dp_size x tp_size`` grid.
 
@@ -311,6 +331,10 @@ def run_on_tp_ranks(
         enable_dp_attention: Make the DP axis a shard of one model rather than a
             set of independent replicas: builds the DP group and widens the EP
             group to the whole grid, which is what the DP-attention tests need.
+        prefill_context_parallel_size: PCP ranks within each replica.
+        prefill_context_parallel_strategy: PCP token layout strategy.
+        decode_context_parallel_size: DCP ranks within each attention-TP group.
+        dcp_comm_backend: DCP output/LSE communication strategy.
 
     Returns:
         One result per global rank, in rank order.
@@ -335,6 +359,10 @@ def run_on_tp_ranks(
                 backend,
                 enable_expert_parallel,
                 enable_dp_attention,
+                prefill_context_parallel_size,
+                prefill_context_parallel_strategy,
+                decode_context_parallel_size,
+                dcp_comm_backend,
             )
         except AssertionError as error:
             attempt += 1

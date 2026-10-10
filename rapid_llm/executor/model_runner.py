@@ -21,6 +21,7 @@ from ..batch_overlap.two_batch_overlap import model_forward_maybe_tbo, tbo_polic
 from ..distributed.parallel_state import (
     divide,
     expert_parallel_enabled,
+    get_decode_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce_min,
     tensor_model_parallel_ranks_agree,
@@ -82,6 +83,11 @@ class ModelRunner:
             # TP rank holds the full row (as vLLM does).
             self.kv_row = (1, config.kv_lora_rank + config.qk_rope_head_dim)
         elif config.model_type == "deepseek_v4":
+            if get_decode_context_parallel_world_size() > 1:
+                raise NotImplementedError(
+                    "DeepSeek-V4 keeps sliding-window and compressor state per position; "
+                    "decode context parallelism is not wired through it"
+                )
             # V4's kv_proj emits one head_dim-wide latent row per token — the
             # same no-head-axis geometry as MLA. The layers manage their own
             # sliding-window/compressor state on top; this row is the engine
@@ -89,8 +95,12 @@ class ModelRunner:
             self.kv_row = (1, config.head_dim)
         else:
             # Heads are dealt across TP ranks, so this rank caches only its own K/V.
+            # Under DCP a group shares its KV heads (it splits positions instead),
+            # so the row is DCP times wider and the rows hold 1/DCP of the tokens.
             kv_heads = divide(
-                config.num_kv_heads, get_tensor_model_parallel_world_size(), "key/value heads"
+                config.num_kv_heads,
+                get_tensor_model_parallel_world_size() // get_decode_context_parallel_world_size(),
+                "key/value heads",
             )
             self.kv_row = (2 * kv_heads, config.head_dim)
         self.vocab_size = config.vocab_size
@@ -255,6 +265,11 @@ class ModelRunner:
         Vision tokens need no special handling: the prompt already has one token per
         vision patch (the processor expanded ``<image>``), so this covers them.
         """
+        if get_decode_context_parallel_world_size() > 1:
+            raise NotImplementedError(
+                "decode context parallelism shards KV positions through the slot "
+                "block table; the one-shot allocator has no such mapping"
+            )
         batch_size = len(actual_prompt_lens)
         self.atten_info.b_req_idx = b_req_idx
         self.atten_info.cur_select_index = self.kv_cache_manager.alloc_kvcache_index(
@@ -427,7 +442,13 @@ class ModelRunner:
 
         self._graph_manager = manager
 
-        if os.environ.get(_PREFILL_GRAPH_ENV, "1") != "0":
+        # A prefill graph always runs the chunked kernel off a contiguous
+        # ``b_kv_base`` run of rows, which a DCP rank's interleaved share is not;
+        # DCP prefills stay eager (its decode graphs are unaffected).
+        if (
+            os.environ.get(_PREFILL_GRAPH_ENV, "1") != "0"
+            and get_decode_context_parallel_world_size() == 1
+        ):
             # Prefill grids capture lazily on first use: the grid is exact-match
             # (request count x chunk width), so startup cannot know the shapes.
             # Each capture is gated on a graph-vs-eager parity check run against

@@ -288,6 +288,12 @@ def _run_replica_process(
             dp_size=dp_size,
             enable_expert_parallel=expert_parallel,
             enable_dp_attention=enable_dp_attention,
+            prefill_context_parallel_size=options.get("prefill_context_parallel_size", 1),
+            prefill_context_parallel_strategy=options.get(
+                "prefill_context_parallel_strategy", "zigzag"
+            ),
+            decode_context_parallel_size=options.get("decode_context_parallel_size", 1),
+            dcp_comm_backend=options.get("dcp_comm_backend", "ag_rs"),
             backend="gloo" if on_cpu else "nccl",
         )
         device = "cpu" if on_cpu else f"cuda:{global_rank}"
@@ -309,6 +315,10 @@ def _run_replica_process(
                 "quantization",
                 "tensor_parallel_size",
                 "enable_expert_parallel",
+                "prefill_context_parallel_size",
+                "prefill_context_parallel_strategy",
+                "decode_context_parallel_size",
+                "dcp_comm_backend",
                 "kv_cache_dtype",
                 "cuda_graph_lazy",
                 "hf_overrides",

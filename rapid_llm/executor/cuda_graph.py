@@ -214,12 +214,32 @@ class CUDAGraphRunner:
         first eager pass read pre-write state where every later pass (and the
         replay) read post-write state — a probe that pinned the test's
         ordering rather than the graph's.
+
+        The probe rows get their own disjoint runs of cache rows first. The
+        check runs at startup, when the table maps nothing and every entry is
+        row 0, so the gather above used to aim *every* row's write at row 0:
+        a duplicate-index scatter whose winner varies run to run, which made
+        two eager passes disagree by whole logits and retired every TP graph
+        with ``batch > 1``. :meth:`parity_error` restores the table afterwards,
+        and the runs' cache rows are zeroed so the probe never reads garbage.
         """
         generator = torch.Generator().manual_seed(
             _PARITY_SEED + self.batch_size * 100_003 + self.seq_len_bucket
         )
         ids = torch.randint(0, vocab_size, (self.batch_size, 1), generator=generator)
-        length = min(self.seq_len_bucket, 32)
+        # Row 0 stays the null row; the runs must fit beside it.
+        rows = self.atten_info.kv_buffer[0].shape[0]
+        length = max(1, min(self.seq_len_bucket, 32, (rows - 1) // self.batch_size))
+
+        table = self.atten_info.b_req_tokens_table
+        runs = torch.arange(1, 1 + self.batch_size * length, dtype=table.dtype)
+        table[: self.batch_size, :length].copy_(runs.view(self.batch_size, length))
+        # The step writes only each run's last row and reads all of it; the rest
+        # is ``torch.empty`` memory never written. A NaN bit pattern there reads
+        # into both forwards alike and fails the gate on every graph at once
+        # (seen intermittently with nvfp4 weights at TP=2).
+        for layer in self.atten_info.kv_buffer:
+            layer[1 : 1 + self.batch_size * length].zero_()
 
         self.input_ids.copy_(ids)
         self.position_ids.fill_(length - 1)
@@ -255,12 +275,16 @@ class CUDAGraphRunner:
         if self._graph is None or self._output is None:
             raise RuntimeError("capture() must be called before parity_error()")
 
+        table = self.atten_info.b_req_tokens_table
+        saved = table[: self.batch_size].clone()
         self._fill_probe_inputs(vocab_size)
         eager = self._step(self.input_ids, self.position_ids, self.atten_info).float().clone()
         # Replayed directly (not via :meth:`replay`): the buffers already hold the
         # probe values, so a copy onto themselves would add nothing.
         self._graph.replay()
-        return (eager - self._output.float()).abs().max().item()
+        error = (eager - self._output.float()).abs().max().item()
+        table[: self.batch_size].copy_(saved)
+        return error
 
     def replay(
         self,

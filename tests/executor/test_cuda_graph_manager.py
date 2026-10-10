@@ -342,3 +342,73 @@ def test_step_factory_not_consulted_when_absent(fake_runner_cls):
     mgr.capture_all()
 
     assert all(r.step is None for r in fake_runner_cls.instances)
+
+
+# --------------------------------------------------------------------------- #
+# Startup parity probe: the synthetic step the TP gate compares on
+# --------------------------------------------------------------------------- #
+def _probe_runner(batch_size: int, rows: int) -> cuda_graph.CUDAGraphRunner:
+    """A real runner over a startup-state cache: the table maps nothing yet."""
+    return cuda_graph.CUDAGraphRunner(
+        model=None,
+        batch_size=batch_size,
+        seq_len_bucket=256,
+        kv_buffer=[torch.zeros(rows, 2, 8)],
+        b_req_tokens_table=torch.zeros(batch_size + 2, 300, dtype=torch.int32),
+        device="cpu",
+    )
+
+
+@pytest.mark.parametrize(("batch_size", "rows"), [(8, 4096), (8, 9)], ids=["roomy", "one-row-each"])
+def test_probe_rows_write_disjoint_cache_rows_on_an_empty_table(batch_size, rows):
+    """Regression: an all-zero table aimed every probe row's write at row 0.
+
+    That duplicate-index scatter has a run-dependent winner, so two eager passes
+    disagreed by whole logits and the TP gate retired every graph with
+    ``batch > 1`` on every model. Each row must now write its own row, at the end
+    of its own read path, and never the null row.
+    """
+    runner = _probe_runner(batch_size, rows)
+    runner._fill_probe_inputs(vocab_size=1000)
+
+    info = runner.atten_info
+    writes = info.cur_select_index.tolist()
+    assert len(set(writes)) == batch_size, f"probe rows share a write slot: {writes}"
+    assert 0 not in writes and max(writes) < rows
+    length = int(info.b_seq_len[0])
+    assert writes == info.b_req_tokens_table[info.b_req_idx, length - 1].tolist()
+
+
+def test_probe_reads_no_unwritten_cache_memory():
+    """Regression: the probe read rows the cache had never written.
+
+    The KV buffer is ``torch.empty``; with the probe rows' earlier history left as
+    found, a NaN bit pattern fed both forwards and the gate retired every graph
+    (intermittent, nvfp4 TP=2). Every row a probe row reads must be zero.
+    """
+    runner = _probe_runner(batch_size=4, rows=4096)
+    runner.atten_info.kv_buffer[0].fill_(float("nan"))
+    runner._fill_probe_inputs(vocab_size=1000)
+
+    info = runner.atten_info
+    length = int(info.b_seq_len[0])
+    read = info.b_req_tokens_table[info.b_req_idx, :length].flatten().long()
+    assert torch.equal(info.kv_buffer[0][read], torch.zeros_like(info.kv_buffer[0][read]))
+
+
+def test_parity_probe_leaves_the_token_table_as_it_found_it():
+    """The probe borrows table rows; the live engine must get them back unchanged."""
+    runner = _probe_runner(batch_size=4, rows=4096)
+    table = runner.atten_info.b_req_tokens_table
+    table[1, :3] = torch.tensor([7, 8, 9], dtype=table.dtype)
+    before = table.clone()
+
+    class _Replayed:
+        def replay(self) -> None:
+            pass
+
+    runner._step = lambda ids, positions, info: torch.zeros(ids.shape[0], 1000)
+    runner._graph, runner._output = _Replayed(), torch.zeros(4, 1000)
+
+    assert runner.parity_error(vocab_size=1000) == 0.0
+    assert torch.equal(table, before)

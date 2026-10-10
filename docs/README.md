@@ -9,6 +9,7 @@
 - [连续批处理](continuous_batching.md)：请求调度、分页 KV、前缀复用、抢占和 CPU KV offload。
 - [在线服务](online_serving.md)：HTTP 接口、流式输出和进程模型。
 - [张量并行](tensor_parallel.md)、[专家并行](expert_parallel.md)与[数据并行](data_parallel.md)：权重切分、MoE 路由和请求分发。文中的 GPU 实测不适用于 CPU。
+- [上下文并行](context_parallel.md)：DCP 的 KV 位置切分、LSE 合并、约束、组合矩阵和 4× H100 实测；PCP 尚未接入。
 - [量化](quantization.md)：存储格式和加载方式；CPU 支持范围以 CPU 文档为准。
 - [模型评测](eval_models.md)与[性能测试](benchmark_models.md)：复现命令和测量口径。
 

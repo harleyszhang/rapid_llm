@@ -81,6 +81,7 @@ uv pip install --python .venv/bin/python -e '.[serve]'
 | 张量并行 | 在多个 rank 间切分投影、注意力头和词表 |
 | 专家并行 | 在 TP 组内分配完整 MoE 专家，并用 all-to-all 路由 token |
 | 数据并行 | 在独立副本之间分配请求，可与 TP 组合 |
+| decode 上下文并行 | 在 TP 组内按位置切分 KV 历史，用 LSE 合并部分 attention；只在 MLA 或 TP 宽度超过 KV 头数时省显存（[详情](docs/context_parallel.md)） |
 | CPU 并行 | 使用 Gloo，指定 `device="cpu"` |
 | CUDA Graph | 捕获支持的 decode 形状；TP 各 rank 必须选择相同执行路径 |
 | 量化 | 支持 INT8、FP8、INT4 等格式，具体范围取决于后端 |

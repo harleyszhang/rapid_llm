@@ -228,3 +228,53 @@ class TestBoundaries:
         batch = _batch()
         batch.write_block_tables([(0, 0, 0, (3,))])
         assert _table(batch).dtype is torch.int32
+
+
+# --------------------------------------------------------------------------- #
+# 4. Decode context parallelism
+# --------------------------------------------------------------------------- #
+def _dcp_batch(monkeypatch, rank: int, dcp: int) -> SlotBatch:
+    from rapid_llm.distributed import parallel_state as ps
+
+    monkeypatch.setattr(ps, "_DCP_RANK", rank)
+    monkeypatch.setattr(ps, "_DCP_WORLD_SIZE", dcp)
+    return _batch()
+
+
+class TestDecodeContextParallel:
+    """Global positions in the table, this rank's packed rows behind them."""
+
+    @pytest.mark.parametrize("dcp", [2, 4])
+    def test_every_position_is_owned_once_and_the_strided_view_is_packed(self, monkeypatch, dcp):
+        """Position ``p`` belongs to rank ``p % dcp``: its entry names a row of
+        the block's ``block_size / dcp`` share there, and row 0 (discard)
+        everywhere else. The attention read ``table[slot, rank::dcp]`` must then
+        be the share's rows in order -- a gap or a repeat there is a position
+        attended twice or never, with nothing downstream to notice.
+        """
+        blocks = (9, 3)
+        owners = []
+        for rank in range(dcp):
+            batch = _dcp_batch(monkeypatch, rank, dcp)
+            per_rank = batch.rows_per_block
+            assert per_rank == batch.block_size // dcp
+            batch.write_block_tables([(0, 0, 0, blocks)])
+
+            row = _table(batch)[0, : len(blocks) * batch.block_size]
+            owners.append(row != 0)
+            expected = [b * per_rank + i for b in blocks for i in range(per_rank)]
+            assert row[rank::dcp].tolist() == expected
+        owned = torch.stack(owners).int()
+        assert torch.equal(owned.sum(dim=0), torch.ones_like(owned[0]))
+
+    def test_the_filler_row_and_scratch_stay_inside_the_null_block_share(self, monkeypatch):
+        batch = _dcp_batch(monkeypatch, 1, 2)
+        row = _table(batch)[batch._filler_slot]
+        assert int(row.max()) < batch.rows_per_block
+        buffer = batch._runner.kv_cache_manager.gpu_kv_buffer[0]
+        assert torch.count_nonzero(buffer[: batch.rows_per_block]) == 0
+        assert torch.count_nonzero(buffer[batch.rows_per_block :]) > 0
+
+    def test_a_block_size_dcp_does_not_divide_is_refused(self, monkeypatch):
+        with pytest.raises(ValueError):
+            _dcp_batch(monkeypatch, 0, 3)

@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from ..distributed.dcp import dcp_block_rows, dcp_rows_per_block
+from ..distributed.parallel_state import (
+    get_decode_context_parallel_rank,
+    get_decode_context_parallel_world_size,
+)
 from ..engine.prefix_cache import PREFIX_CACHE_BLOCK_SIZE
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
@@ -59,6 +64,13 @@ class SlotBatch:
       the host only when a request joins or leaves; a steady step just increments
       lengths on-device, so decode metadata costs two kernels and no transfers.
 
+    Under decode context parallelism the table stays in global positions, but a
+    block's entries name this DCP rank's rows: owned positions pack into the
+    block's ``rows_per_block`` rows, the rest point at the discard row 0 (see
+    :mod:`rapid_llm.distributed.dcp`). Every ``table[slot, p]`` gather -- the
+    K/V write target of each phase -- is therefore DCP-correct unchanged; only
+    the attention read takes the strided ``table[:, rank::dcp]`` view.
+
     Args:
         runner: Executor whose cache, block table and metadata this drives.
     """
@@ -69,6 +81,15 @@ class SlotBatch:
         self.device = runner.device
         self.max_seq_len = runner.max_seq_len
         self.block_size = PREFIX_CACHE_BLOCK_SIZE
+        self.dcp_size = get_decode_context_parallel_world_size()
+        self.dcp_rank = get_decode_context_parallel_rank()
+        #: Cache rows one scheduler block occupies on this rank.
+        self.rows_per_block = dcp_rows_per_block(self.block_size, self.dcp_size)
+        # Row within a block for each offset; ``None`` where another DCP rank owns it.
+        self._block_offsets = [
+            offset // self.dcp_size if offset % self.dcp_size == self.dcp_rank else None
+            for offset in range(self.block_size)
+        ]
 
         table = runner.b_req_tokens_table
         total_slots, row_len = table.shape
@@ -84,11 +105,16 @@ class SlotBatch:
         if self._filler_slot is not None:
             # Filler rows attend over the null block, tiled so any padded position
             # lands inside it; zero it so debug sessions do not read NaN.
-            table[self._filler_slot] = (
-                torch.arange(row_len, dtype=table.dtype, device=self.device) % self.block_size
+            null_rows = torch.tensor(
+                dcp_block_rows(0, self.block_size, self.dcp_rank, self.dcp_size),
+                dtype=table.dtype,
+                device=self.device,
             )
+            table[self._filler_slot] = null_rows.repeat(
+                (row_len + self.block_size - 1) // self.block_size
+            )[:row_len]
             for layer in runner.kv_cache_manager.gpu_kv_buffer:
-                layer[: self.block_size].zero_()
+                layer[: self.rows_per_block].zero_()
 
         # Per-sequence offsets in a flattened prefill grid, scaled per call.
         self._row_offsets = torch.arange(total_slots, dtype=torch.int32, device=self.device)
@@ -121,6 +147,7 @@ class SlotBatch:
         table = self._atten.b_req_tokens_table
         width = table.shape[1]
         size = self.block_size
+        per_rank = self.rows_per_block
         slots: list[int] = []
         positions: list[int] = []
         rows: list[int] = []
@@ -139,7 +166,9 @@ class SlotBatch:
             slots.extend([slot] * count)
             positions.extend(range(start, start + count))
             mapped_rows = [
-                block_id * size + offset for block_id in block_ids for offset in range(size)
+                0 if offset is None else block_id * per_rank + offset
+                for block_id in block_ids
+                for offset in self._block_offsets
             ]
             rows.extend(mapped_rows[:count])
         if slots:
@@ -196,6 +225,11 @@ class SlotBatch:
         self._atten.b_start_loc = self._row_offsets[:n] * max_prompt_len
 
         if any(start > 0 for start in seq_starts):
+            if self.dcp_size > 1:
+                # The chunked kernel reads a contiguous run from ``b_kv_base``;
+                # a DCP rank's share is interleaved. The scheduler routes
+                # resumed chunks to EXTEND under DCP, so this is a planning bug.
+                raise ValueError("a resumed chunk cannot run as a DCP prefill grid")
             # KV row 0 of each slot: the base its history hangs off.
             self._atten.b_prefix_len = starts
             self._atten.b_kv_base = table[b_req_idx, 0]

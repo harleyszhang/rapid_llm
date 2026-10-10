@@ -293,8 +293,8 @@ select(op, key=(arch, dtype, shape_bucket)) -> impl:
 | chunked prefill | 分页 KV + token budget 调度 | 可 | **高** | varlen attention 你已有,主要改调度和 KV 部分写 |
 | prefix caching | 分页 KV + block hash | 可 | **高** | 多轮对话/共享 system prompt 收益直观 |
 | EP | all_to_all | 可(EP=2,已验证) | 中高 | **已有(v0.11.5,提前于 v0.13)**:`--enable-expert-parallel` 让 TP 组兼作 EP 组,routed experts 按整专家切分(intermediate 不再 TP 切),等分 padding `all_to_all` dispatch/combine;DeepSeek-V2/V3/V4 与 qwen3_moe 共享 `SparseMoeBlock` 即自动可用。首版限非量化 + eager |
-| DCP | all_gather + LSE 校正 | 可(DCP=2) | 中 | 长上下文 decode 扩容;MLA 场景价值最大 |
-| CP / PCP | P2P ring 或 zigzag 切分 + LSE 合并 | 可 | 中 | 降 prefill 延迟 |
+| DCP | all_gather + LSE 校正 | 可(DCP=2/4,已验证) | 中 | **已有**:`--decode-context-parallel-size` 在 TP 组内按位置 `p % dcp` 切 KV 历史,Q all-gather + LSE 合并(`ag_rs`/`a2a`),decode graph 可捕获;对齐 TP(含 MLA 合成权重、FP8 KV、prefix cache)。GQA 且 tp ≤ kv_heads 时不省显存、TPS 为同宽 TP 的 0.57-0.74x;MLA 字节减半已验证、性能未实测。拒绝 KV offload / TBO / V4 / CPU,见 `docs/context_parallel.md` |
+| CP / PCP | P2P ring 或 zigzag 切分 + LSE 合并 | 可 | 中 | 降 prefill 延迟。进程组与参数已就位,模型数据路径未接入(PCP>1 报 NotImplementedError) |
 | **PD 分离** | chunked prefill + KV 传输 connector | **可(1P1D)** | 中 | 2 卡就能演示,不需要更多卡 |
 | 专家负载均衡 | EP + 专家负载统计 | 可 | 低 | 冗余专家 + 重平衡;需先确认 EPLB 规格 |
 | **DP 负载均衡策略族** | DP 调度器 + 负载/缓存水位上报 | 可 | **高** | SGLang 四策略之上加 cache-aware 路由(见下方小节) |

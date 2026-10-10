@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from rapid_llm.distributed import parallel_state as ps
+from rapid_llm.distributed.topology import resolve_topology
 from tests.distributed.tp_harness import run_on_tp_ranks
 
 
@@ -32,6 +33,14 @@ def _reset_grid():
 def test_defaults_to_a_world_of_one():
     assert ps.get_tensor_model_parallel_rank() == 0
     assert ps.get_tensor_model_parallel_world_size() == 1
+    assert ps.get_attention_tensor_parallel_rank() == 0
+    assert ps.get_attention_tensor_parallel_world_size() == 1
+    assert ps.get_prefill_context_parallel_rank() == 0
+    assert ps.get_prefill_context_parallel_world_size() == 1
+    assert ps.get_decode_context_parallel_rank() == 0
+    assert ps.get_decode_context_parallel_world_size() == 1
+    assert ps.get_prefill_context_parallel_strategy() == "zigzag"
+    assert ps.get_dcp_comm_backend() == "ag_rs"
     assert ps.get_data_parallel_rank() == 0
     assert ps.get_data_parallel_world_size() == 1
     assert ps.get_world_size() == 1
@@ -93,6 +102,41 @@ def test_rank_outside_the_grid_is_rejected():
 def test_non_positive_sizes_are_rejected(tp_size, dp_size):
     with pytest.raises(ValueError, match="must be >= 1"):
         ps.grid_coordinates(0, tp_size=tp_size, dp_size=dp_size)
+
+
+def test_context_parallel_topology_groups_and_coordinates():
+    topology = resolve_topology(
+        global_rank=7,
+        tp_size=4,
+        dp_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        prefill_context_parallel_strategy="interleave",
+        dcp_comm_backend="a2a",
+    )
+
+    assert (topology.dp_rank, topology.tp_rank) == (1, 3)
+    assert (topology.pcp_rank, topology.attention_tp_rank) == (1, 1)
+    assert (topology.dcp_rank, topology.dcp_group_index) == (1, 0)
+    assert topology.replica_members() == [4, 5, 6, 7]
+    assert topology.attention_tp_groups() == [[0, 1], [2, 3], [4, 5], [6, 7]]
+    assert topology.pcp_groups() == [[0, 2], [1, 3], [4, 6], [5, 7]]
+    assert topology.dcp_groups() == [[0, 1], [2, 3], [4, 5], [6, 7]]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"prefill_context_parallel_size": 3}, "must be divisible"),
+        ({"decode_context_parallel_size": 3}, "attention tensor-parallel size"),
+        ({"prefill_context_parallel_strategy": "ring"}, "unknown prefill"),
+        ({"dcp_comm_backend": "ring"}, "unknown DCP"),
+        ({"dcp_comm_backend": "fi_a2a"}, "FlashInfer MNNVL"),
+    ],
+)
+def test_context_parallel_topology_rejects_invalid_configuration(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        resolve_topology(global_rank=0, tp_size=4, dp_size=1, **kwargs)
 
 
 def test_init_parallel_records_pure_dp_without_a_process_group():
@@ -220,6 +264,43 @@ def test_small_all_reduce_does_not_switch_collectives_after_p2p_error(monkeypatc
     ps.abandon_parallel()
 
 
+def _context_parallel_group_members(rank: int) -> dict[str, object]:
+    import torch
+
+    value = torch.tensor([rank], dtype=torch.int64)
+    return {
+        "coordinates": (
+            ps.get_prefill_context_parallel_rank(),
+            ps.get_attention_tensor_parallel_rank(),
+            ps.get_decode_context_parallel_rank(),
+        ),
+        "attention": ps.attention_model_parallel_all_gather(value).tolist(),
+        "pcp": ps.prefill_context_parallel_all_gather(value).tolist(),
+        "dcp": ps.decode_context_parallel_all_gather(value).tolist(),
+        "strategy": ps.get_prefill_context_parallel_strategy(),
+        "backend": ps.get_dcp_comm_backend(),
+    }
+
+
+def test_context_parallel_groups_use_the_declared_rank_geometry():
+    seen = run_on_tp_ranks(
+        _context_parallel_group_members,
+        tp_size=4,
+        backend="gloo",
+        prefill_context_parallel_size=2,
+        prefill_context_parallel_strategy="interleave",
+        decode_context_parallel_size=2,
+        dcp_comm_backend="a2a",
+    )
+
+    assert [entry["coordinates"] for entry in seen] == [(0, 0, 0), (0, 1, 1), (1, 0, 0), (1, 1, 1)]
+    assert [entry["attention"] for entry in seen] == [[0, 1], [0, 1], [2, 3], [2, 3]]
+    assert [entry["pcp"] for entry in seen] == [[0, 2], [1, 3], [0, 2], [1, 3]]
+    assert [entry["dcp"] for entry in seen] == [[0, 1], [0, 1], [2, 3], [2, 3]]
+    assert all(entry["strategy"] == "interleave" for entry in seen)
+    assert all(entry["backend"] == "a2a" for entry in seen)
+
+
 def _warmup_probe_worlds(rank: int) -> list[int]:
     """The world size of every group ``warmup_collectives`` issues a probe on."""
     import torch.distributed as dist
@@ -258,6 +339,14 @@ def test_warmup_collectives_probes_every_group_the_grid_built():
         enable_dp_attention=True,
     )
     assert both == [[2, 2, 4]] * 4
+    context_parallel = run_on_tp_ranks(
+        _warmup_probe_worlds,
+        tp_size=4,
+        backend="gloo",
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+    )
+    assert context_parallel == [[4, 2, 2]] * 4
 
 
 # --------------------------------------------------------------------------- #

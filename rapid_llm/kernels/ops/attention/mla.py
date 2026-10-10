@@ -203,7 +203,8 @@ def mla_decode(
     *,
     max_seq_len: int,
     sm_scale: float = 1.0,
-) -> torch.Tensor:
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Decode attention over the MLA latent KV cache (native Triton row).
 
     Args:
@@ -218,14 +219,25 @@ def mla_decode(
             token included.
         max_seq_len: Longest row, sizing the kernel grid.
         sm_scale: Softmax scale.
+        return_lse: Also return the per-row, per-head logsumexp. Empty histories
+            produce a zero output and ``-inf`` LSE.
 
     Returns:
         ``[batch, num_heads, kv_lora_rank]`` — the per-head mixture of the
-        cached ``c_kv`` rows, ready for the ``w_uv`` up-projection.
+        cached ``c_kv`` rows, ready for the ``w_uv`` up-projection; when
+        ``return_lse`` is true, paired with ``[batch, num_heads]`` fp32 LSE.
     """
     lora_rank, rope_dim = _latent_split(q, kv_cache)
     batch, num_heads, _ = q.shape
     num_pages, page_size, latent_dim = kv_cache.shape
+    if max_seq_len <= 0:
+        output = torch.zeros((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
+        if return_lse:
+            lse = torch.full(
+                (batch, num_heads), -float("inf"), dtype=torch.float32, device=q.device
+            )
+            return output, lse
+        return output
 
     # The kernel walks flat rows; a paged cache is allocated contiguously, and
     # silently paying a copy here would hide a layout bug in the caller.
@@ -267,8 +279,20 @@ def mla_decode(
     # Cross-partition LSE reduction is geometry-agnostic (any power-of-two
     # head dim), so the MLA row reuses flash_decoding's stage 2 verbatim.
     atten_output = torch.empty((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
-    flash_decode_stage2(mid_o, mid_o_logexpsum, atten_output, cache_seqlens, _PARTITION_SIZE)
-    return atten_output
+    lse_output = (
+        torch.empty((batch, num_heads), dtype=torch.float32, device=q.device)
+        if return_lse
+        else None
+    )
+    flash_decode_stage2(
+        mid_o,
+        mid_o_logexpsum,
+        atten_output,
+        cache_seqlens,
+        _PARTITION_SIZE,
+        lse_output=lse_output,
+    )
+    return (atten_output, lse_output) if return_lse else atten_output
 
 
 @torch.no_grad()
@@ -281,25 +305,29 @@ def mla_decode_reference(
     max_seq_len: int,
     sm_scale: float = 1.0,
     qk_rope_head_dim: int = QK_ROPE_HEAD_DIM,
-) -> torch.Tensor:
+    return_lse: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Pure-PyTorch reference for MLA decode over paged latent cache."""
 
     batch, num_heads, _ = q.shape
     _num_pages, page_size, latent_dim = kv_cache.shape
     lora_rank = latent_dim - qk_rope_head_dim
-    out = torch.empty((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
+    out = torch.zeros((batch, num_heads, lora_rank), dtype=q.dtype, device=q.device)
+    lse = torch.full((batch, num_heads), -float("inf"), dtype=torch.float32, device=q.device)
 
     for b in range(batch):
         length = int(cache_seqlens[b])
+        if length == 0:
+            continue
         num_pages = (length + page_size - 1) // page_size
         pages = block_table[b, :num_pages].tolist()
         latent = torch.cat([kv_cache[p] for p in pages], dim=0)[:length].float()
         c_kv, k_pe = latent[:, :lora_rank], latent[:, lora_rank:]
         qf = q[b].float()
-        scores = qf[:, :lora_rank] @ c_kv.T + qf[:, lora_rank:] @ k_pe.T  # [H, len]
-        probs = (scores * sm_scale).softmax(dim=-1)
-        out[b] = (probs @ c_kv).to(q.dtype)
-    return out
+        scores = (qf[:, :lora_rank] @ c_kv.T + qf[:, lora_rank:] @ k_pe.T) * sm_scale
+        lse[b] = torch.logsumexp(scores, dim=-1)
+        out[b] = (scores.softmax(dim=-1) @ c_kv).to(q.dtype)
+    return (out, lse) if return_lse else out
 
 
 @torch.no_grad()

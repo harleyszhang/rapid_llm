@@ -106,6 +106,40 @@ COMMON_OPTIONS: tuple[CliOption, ...] = (
             "--enable-expert-parallel semantics)",
         },
     ),
+    CliOption(
+        "--prefill-context-parallel-size",
+        {
+            "type": int,
+            "default": 1,
+            "help": "Prefill context-parallel ranks (reserved: values above 1 are refused "
+            "until the model data path is wired)",
+        },
+    ),
+    CliOption(
+        "--prefill-context-parallel-strategy",
+        {
+            "choices": ("zigzag", "interleave"),
+            "default": "zigzag",
+            "help": "Prefill token layout across context-parallel ranks",
+        },
+    ),
+    CliOption(
+        "--decode-context-parallel-size",
+        {
+            "type": int,
+            "default": 1,
+            "help": "Ranks of each TP group that shard the decode KV history by position "
+            "(must divide --tensor-parallel-size; see docs/context_parallel.md)",
+        },
+    ),
+    CliOption(
+        "--dcp-comm-backend",
+        {
+            "choices": ("ag_rs", "a2a"),
+            "default": "ag_rs",
+            "help": "Decode context-parallel output/LSE reduction backend",
+        },
+    ),
 )
 
 
@@ -172,6 +206,10 @@ class BaseOptions:
     kv_cache_dtype: str = "auto"
     tensor_parallel_size: int = 1
     enable_expert_parallel: bool = False
+    prefill_context_parallel_size: int = 1
+    prefill_context_parallel_strategy: str = "zigzag"
+    decode_context_parallel_size: int = 1
+    dcp_comm_backend: str = "ag_rs"
     use_cuda_graph: bool = False
 
     @classmethod
@@ -189,6 +227,12 @@ class BaseOptions:
             "kv_cache_dtype": getattr(args, "kv_cache_dtype", "auto"),
             "tensor_parallel_size": getattr(args, "tensor_parallel_size", 1),
             "enable_expert_parallel": getattr(args, "enable_expert_parallel", False),
+            "prefill_context_parallel_size": getattr(args, "prefill_context_parallel_size", 1),
+            "prefill_context_parallel_strategy": getattr(
+                args, "prefill_context_parallel_strategy", "zigzag"
+            ),
+            "decode_context_parallel_size": getattr(args, "decode_context_parallel_size", 1),
+            "dcp_comm_backend": getattr(args, "dcp_comm_backend", "ag_rs"),
             # ``cuda_graph`` is the dest every --cuda-graph flag writes (text
             # commands and vl-chat alike); the fallback fires only if a command
             # forgot to register the flag, and eager is the safe default.
@@ -236,6 +280,10 @@ class TextEngineOptions(BaseOptions):
             quantization=self.quantization,
             tensor_parallel_size=self.tensor_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
+            prefill_context_parallel_size=self.prefill_context_parallel_size,
+            prefill_context_parallel_strategy=self.prefill_context_parallel_strategy,
+            decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_comm_backend=self.dcp_comm_backend,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
